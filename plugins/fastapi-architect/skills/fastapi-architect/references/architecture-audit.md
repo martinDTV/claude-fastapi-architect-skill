@@ -55,6 +55,8 @@ The report is JSON with `schema_version`, `tool` (name, version and the Python v
 
 Run the auditor with the Python version the project targets. An older interpreter reports modern syntax as `PY_SYNTAX`, marks the analysis partial, and leaves those files unanalysed by the other rules.
 
+Test code and documented suppressions (schema 1.1): each finding carries `environment` (`application` or `test`). Test findings are reported, with one confidence level less for blocking calls, because the stalled loop is the test's own; pass `--exclude-tests` only when the audit scope is production code, and say so in the report. A finding on a line with `# noqa: ASYNC2xx` or `# audit-fastapi: ignore[RULE]` stays listed as `suppressed` and is excluded from `--fail-on`; treat it as "accepted by the team, verify the justification" rather than as absent. `--no-suppressions` shows everything as active.
+
 Treat every auditor finding as **"suspected, backed by evidence"** at best. Open the file, confirm the context, then classify. Known blind spots are listed in section 14.
 
 ## 3. Identifying layers and dependencies

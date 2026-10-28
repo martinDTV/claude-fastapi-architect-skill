@@ -22,8 +22,22 @@ and files that do not parse are listed in ``files_skipped`` or reported as
 ``FILE_SKIPPED``/``PY_SYNTAX`` findings, and ``summary.partial_analysis`` is
 ``true``. ``tool.python`` records the interpreter whose grammar was used.
 
-Exit codes: 0 success, 1 a finding reached ``--fail-on``, 2 usage error,
-missing path or unwritable ``--output``.
+Test code (schema 1.1): every finding carries ``environment`` (``application``
+or ``test``, decided from the path: ``tests/``, ``test/``, ``testing/``,
+``__tests__/``, ``test_*.py``, ``*_test.py``, ``conftest.py``). Test findings
+are never hidden by default; ``ASYNC_BLOCKING_CALL`` in test code keeps its
+severity and drops one confidence level. ``--exclude-tests`` leaves test code
+out entirely and reports how many files were left out in ``tests_excluded``.
+
+Documented suppressions (schema 1.1): a finding whose line carries
+``# noqa: ASYNC2xx`` (flake8-async / ruff codes for the same concern) or
+``# audit-fastapi: ignore`` / ``# audit-fastapi: ignore[RULE]`` stays in the
+report with ``suppressed: true`` and the marker in ``suppression``; it does not
+count towards ``--fail-on``. A bare ``# noqa`` is not honoured.
+``--no-suppressions`` reports everything as active.
+
+Exit codes: 0 success, 1 a non-suppressed finding reached ``--fail-on``,
+2 usage error, missing path or unwritable ``--output``.
 
 Known limitations (deliberate for this version):
 
@@ -581,6 +595,22 @@ def _is_within(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def _count_py_files(directory: str, excluded: Set[str], include_hidden: bool) -> int:
+    """Count the .py files a pruned test directory would have contributed."""
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(directory, followlinks=False):
+        dirnames[:] = [
+            d
+            for d in sorted(dirnames)
+            if d not in excluded
+            and not d.endswith(".egg-info")
+            and (include_hidden or not d.startswith("."))
+            and not os.path.islink(os.path.join(dirpath, d))
+        ]
+        count += sum(1 for fn in filenames if fn.endswith(".py"))
+    return count
+
+
 def iter_python_files(
     root: str,
     *,
@@ -630,10 +660,16 @@ def iter_python_files(
                 continue
             if os.path.islink(os.path.join(dirpath, name)):
                 continue
+            if exclude_tests and name in TEST_DIR_NAMES:
+                left_out += _count_py_files(os.path.join(dirpath, name), excluded, include_hidden)
+                continue
             kept.append(name)
         dirnames[:] = kept
         for name in sorted(filenames):
             if not name.endswith(".py"):
+                continue
+            if exclude_tests and TEST_FILE_RE.match(name):
+                left_out += 1
                 continue
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root_abs).replace(os.sep, "/")
@@ -654,11 +690,21 @@ def iter_python_files(
         files.append((rel, full))
     files.sort(key=lambda item: item[0])
     skipped.sort(key=lambda item: (item["file"], item["reason"]))
+    if tests_excluded is not None:
+        tests_excluded.append(left_out)
     return files, skipped
 
 
-def audit_source(source: bytes, relpath: str) -> List[Finding]:
-    """Analyse one Python source buffer. Never raises for malformed input."""
+def audit_source(
+    source: bytes, relpath: str, *, honor_suppressions: bool = True
+) -> List[Finding]:
+    """Analyse one Python source buffer. Never raises for malformed input.
+
+    Findings in test code keep their severity but ``ASYNC_BLOCKING_CALL`` drops
+    one confidence level (the stalled loop is the test's own). Findings on a
+    line carrying a documented suppression are kept and marked ``suppressed``.
+    """
+    environment = classify_environment(relpath)
     try:
         tree = ast.parse(source, filename=relpath)
     except (SyntaxError, ValueError) as exc:
@@ -678,6 +724,7 @@ def audit_source(source: bytes, relpath: str) -> List[Finding]:
                     "Other rules did not run on it. If the project targets a newer "
                     "Python, rerun the auditor with that interpreter."
                 ),
+                environment=environment,
             )
         ]
     except (RecursionError, MemoryError):
@@ -690,11 +737,34 @@ def audit_source(source: bytes, relpath: str) -> List[Finding]:
                 line=1,
                 column=0,
                 message="File exceeded parser limits (nesting depth or memory) and was skipped.",
+                environment=environment,
             )
         ]
     analyzer = _Analyzer(relpath, tree)
     analyzer.visit(tree)
-    return analyzer.findings
+    comments = _line_comments(source) if (honor_suppressions and analyzer.findings) else {}
+    findings: List[Finding] = []
+    for finding in analyzer.findings:
+        confidence = finding.confidence
+        message = finding.message
+        if environment == ENV_TEST and finding.rule == "ASYNC_BLOCKING_CALL":
+            confidence = CONFIDENCE_DOWNGRADE[confidence]
+            message += (
+                " Test code: the stalled event loop is the test's own; confirm the call "
+                "does not run inside the system under test."
+            )
+        suppression = _suppression_for(finding.rule, comments.get(finding.line))
+        findings.append(
+            replace(
+                finding,
+                confidence=confidence,
+                message=message,
+                environment=environment,
+                suppressed=suppression is not None,
+                suppression=suppression,
+            )
+        )
+    return findings
 
 
 def audit_project(
@@ -703,14 +773,21 @@ def audit_project(
     excluded_dirs: Iterable[str] = (),
     include_hidden: bool = False,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+    exclude_tests: bool = False,
+    honor_suppressions: bool = True,
 ) -> Dict[str, object]:
     """Audit a directory (or single file) and return the JSON-ready report."""
     root_abs = os.path.abspath(root)
     if not os.path.exists(root_abs):
         raise FileNotFoundError(root_abs)
 
+    tests_excluded: List[int] = []
     files, skipped = iter_python_files(
-        root_abs, excluded_dirs=excluded_dirs, include_hidden=include_hidden
+        root_abs,
+        excluded_dirs=excluded_dirs,
+        include_hidden=include_hidden,
+        exclude_tests=exclude_tests,
+        tests_excluded=tests_excluded,
     )
     findings: List[Finding] = []
     for entry in skipped:
@@ -725,6 +802,7 @@ def audit_project(
                     0,
                     "Directory could not be listed and was skipped; the analysis of "
                     "this subtree is partial.",
+                    environment=classify_environment(entry["file"]),
                 )
             )
     files_scanned = 0
@@ -742,6 +820,7 @@ def audit_project(
                         1,
                         0,
                         f"File is larger than {max_file_bytes} bytes and was skipped.",
+                        environment=classify_environment(rel),
                     )
                 )
                 continue
@@ -758,20 +837,25 @@ def audit_project(
                     1,
                     0,
                     f"File could not be read ({exc.__class__.__name__}) and was skipped.",
+                    environment=classify_environment(rel),
                 )
             )
             continue
         files_scanned += 1
-        findings.extend(audit_source(data, rel))
+        findings.extend(audit_source(data, rel, honor_suppressions=honor_suppressions))
 
     findings.sort(key=Finding.sort_key)
     skipped.sort(key=lambda item: (item["file"], item["reason"]))
 
     by_rule: Dict[str, int] = {}
     by_severity: Dict[str, int] = {level: 0 for level in SEVERITY_ORDER}
+    by_environment: Dict[str, int] = {ENV_APPLICATION: 0, ENV_TEST: 0}
+    suppressed = 0
     for finding in findings:
         by_rule[finding.rule] = by_rule.get(finding.rule, 0) + 1
         by_severity[finding.severity] += 1
+        by_environment[finding.environment] += 1
+        suppressed += int(finding.suppressed)
 
     partial = bool(skipped) or "PY_SYNTAX" in by_rule
     return {
@@ -780,10 +864,13 @@ def audit_project(
         "project_root": root_abs,
         "files_scanned": files_scanned,
         "files_skipped": skipped,
+        "tests_excluded": sum(tests_excluded),
         "summary": {
             "findings_total": len(findings),
             "by_rule": dict(sorted(by_rule.items())),
             "by_severity": by_severity,
+            "by_environment": by_environment,
+            "suppressed": suppressed,
             "partial_analysis": partial,
         },
         "findings": [finding.to_dict() for finding in findings],
@@ -819,15 +906,29 @@ def render_text(report: Dict[str, object]) -> str:
             f"(high {sev['high']}, medium {sev['medium']}, low {sev['low']}, info {sev['info']})"
             f"  partial analysis: {'yes' if summary['partial_analysis'] else 'no'}"
         ),
+        (
+            f"environment: application {summary['by_environment'][ENV_APPLICATION]}, "
+            f"test {summary['by_environment'][ENV_TEST]}  "
+            f"suppressed: {summary['suppressed']}  "
+            f"tests excluded: {report['tests_excluded']}"
+        ),
     ]
     findings = report["findings"]
     assert isinstance(findings, list)
-    if findings:
+    active = [item for item in findings if not item["suppressed"]]
+    suppressed = [item for item in findings if item["suppressed"]]
+    for title, items in (("", active), ("suppressed by documented markers (kept for review):", suppressed)):
+        if not items:
+            continue
         lines.append("")
-        for item in findings:
+        if title:
+            lines.append(title)
+        for item in items:
             lines.append(
                 f"{item['file']}:{item['line']}:{item['column']}  {item['rule']}  "
-                f"[{item['severity']}/{item['confidence']}]  {item['message']}"
+                f"[{item['severity']}/{item['confidence']}/{item['environment']}]  "
+                f"{item['message']}"
+                + (f"  (suppressed: {item['suppression']})" if item["suppressed"] else "")
             )
     lines.append("")
     lines.append("disclaimer: " + str(report["disclaimer"]))
@@ -875,9 +976,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"skip files larger than this many bytes (default {DEFAULT_MAX_FILE_BYTES})",
     )
     parser.add_argument(
+        "--exclude-tests",
+        action="store_true",
+        help=(
+            "do not analyse test directories (tests/, test/, testing/, __tests__/) or "
+            "test-named files (test_*.py, *_test.py, conftest.py); off by default, test "
+            "findings are otherwise reported with environment=test"
+        ),
+    )
+    parser.add_argument(
+        "--no-suppressions",
+        action="store_true",
+        help=(
+            "ignore documented suppressions ('# noqa: ASYNC2xx', '# audit-fastapi: ignore') "
+            "and report every finding as active"
+        ),
+    )
+    parser.add_argument(
         "--fail-on",
         choices=sorted(SEVERITY_ORDER, key=SEVERITY_ORDER.get),
-        help="exit with status 1 if any finding has this severity or higher",
+        help=(
+            "exit with status 1 if any non-suppressed finding has this severity or higher"
+        ),
     )
     parser.add_argument("--list-rules", action="store_true", help="list rules and exit")
     parser.add_argument("--version", action="version", version=f"{TOOL_NAME} {TOOL_VERSION}")
@@ -900,6 +1020,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             excluded_dirs=args.exclude,
             include_hidden=args.include_hidden,
             max_file_bytes=args.max_file_bytes,
+            exclude_tests=args.exclude_tests,
+            honor_suppressions=not args.no_suppressions,
         )
     except FileNotFoundError as exc:
         sys.stderr.write(f"{TOOL_NAME}: error: path does not exist: {exc}\n")
@@ -928,7 +1050,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         threshold = SEVERITY_ORDER[args.fail_on]
         findings = report["findings"]
         assert isinstance(findings, list)
-        if any(SEVERITY_ORDER[f["severity"]] >= threshold for f in findings):
+        if any(
+            SEVERITY_ORDER[f["severity"]] >= threshold and not f["suppressed"] for f in findings
+        ):
             return 1
     return 0
 

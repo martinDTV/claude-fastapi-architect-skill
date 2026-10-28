@@ -775,6 +775,200 @@ class ReportTests(ProjectCase):
 
 
 # --------------------------------------------------------------------------- #
+# Test-code classification, --exclude-tests, documented suppressions (schema 1.1)
+# --------------------------------------------------------------------------- #
+
+
+class EnvironmentAndSuppressionTests(ProjectCase):
+    BLOCKING = "import time\nasync def h():\n    time.sleep(1)\n"
+
+    def test_test_code_is_classified_and_downgraded_but_not_hidden(self) -> None:
+        self.write("app/handlers.py", self.BLOCKING)
+        self.write("tests/test_handlers.py", self.BLOCKING)
+        report = self.run_audit()
+        by_file = {f["file"]: f for f in report["findings"]}
+        self.assertEqual(set(by_file), {"app/handlers.py", "tests/test_handlers.py"})
+        app, test = by_file["app/handlers.py"], by_file["tests/test_handlers.py"]
+        self.assertEqual((app["environment"], app["confidence"]), ("application", "high"))
+        self.assertEqual((test["environment"], test["confidence"]), ("test", "medium"))
+        self.assertEqual(app["severity"], test["severity"])  # severity is never lowered
+        self.assertIn("Test code", test["message"])
+        self.assertNotIn("Test code", app["message"])
+        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 1})
+        self.assertEqual(report["tests_excluded"], 0)
+
+    def test_environment_classification_rules(self) -> None:
+        test_paths = [
+            "tests/x.py",
+            "src/pkg/test/x.py",
+            "testing/x.py",
+            "src/__tests__/x.py",
+            "app/test_foo.py",
+            "app/foo_test.py",
+            "app/foo_tests.py",
+            "app/conftest.py",
+        ]
+        app_paths = ["app/contest.py", "app/latest_results.py", "app/testimonials.py", "x.py"]
+        for path in test_paths:
+            self.assertEqual(audit.classify_environment(path), "test", path)
+        for path in app_paths:
+            self.assertEqual(audit.classify_environment(path), "application", path)
+
+    def test_exclude_tests_leaves_test_code_out_and_reports_the_count(self) -> None:
+        self.write("app/handlers.py", self.BLOCKING)
+        self.write("app/conftest.py", self.BLOCKING)
+        self.write("app/test_unit.py", self.BLOCKING)
+        self.write("tests/test_a.py", self.BLOCKING)
+        self.write("tests/unit/test_b.py", self.BLOCKING)
+        self.write("tests/__pycache__/ignored.py", self.BLOCKING)  # excluded dir inside tests
+        report = self.run_audit(exclude_tests=True)
+        self.assertEqual([f["file"] for f in report["findings"]], ["app/handlers.py"])
+        self.assertEqual(report["files_scanned"], 1)
+        self.assertEqual(report["tests_excluded"], 4)
+        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 0})
+
+    def test_exclude_tests_on_a_single_test_file(self) -> None:
+        path = self.write("tests/test_one.py", self.BLOCKING)
+        report = audit.audit_project(str(path), exclude_tests=True)
+        self.assertEqual((report["files_scanned"], report["tests_excluded"]), (0, 1))
+
+    def test_noqa_with_matching_code_marks_the_finding_suppressed(self) -> None:
+        self.write(
+            "app/jobs.py",
+            """
+            import subprocess
+            import time
+
+            async def run():
+                time.sleep(1)  # noqa: ASYNC251
+                probe = subprocess.run(  # noqa: ASYNC221, S603 - the real process is the point
+                    ["ls"],
+                    check=False,
+                )
+                return probe
+            """,
+        )
+        report = self.run_audit()
+        found = report["findings"]
+        self.assertEqual(len(found), 2)  # kept, not hidden
+        self.assertEqual(
+            [(f["suppressed"], f["suppression"]) for f in found],
+            [(True, "noqa: ASYNC251"), (True, "noqa: ASYNC221")],
+        )
+        self.assertEqual(report["summary"]["suppressed"], 2)
+        self.assertEqual(report["summary"]["findings_total"], 2)
+
+    def test_unrelated_or_bare_noqa_does_not_suppress(self) -> None:
+        self.write(
+            "app/jobs.py",
+            """
+            import time
+
+            async def run():
+                time.sleep(1)  # noqa: E501
+                time.sleep(2)  # noqa
+                time.sleep(3)  # NOQA:ASYNC251
+            """,
+        )
+        found = self.findings("ASYNC_BLOCKING_CALL")
+        self.assertEqual([f["suppressed"] for f in found], [False, False, False])
+
+    def test_tool_marker_suppressions(self) -> None:
+        self.write(
+            "app/routes.py",
+            """
+            import time
+            from fastapi import APIRouter
+
+            router = APIRouter()
+
+            async def a():
+                time.sleep(1)  # audit-fastapi: ignore
+                time.sleep(2)  # audit-fastapi: ignore[ASYNC_BLOCKING_CALL]
+                time.sleep(3)  # audit-fastapi: ignore[ROUTE_NO_RETURN_ANNOTATION]
+
+            @router.get("/x")
+            async def x():  # audit-fastapi: ignore[ROUTE_NO_RETURN_ANNOTATION]
+                return {}
+            """,
+        )
+        report = self.run_audit()
+        rows = [(f["rule"], f["line"], f["suppressed"], f["suppression"]) for f in report["findings"]]
+        self.assertEqual(
+            rows,
+            [
+                ("ASYNC_BLOCKING_CALL", 7, True, "audit-fastapi: ignore"),
+                ("ASYNC_BLOCKING_CALL", 8, True, "audit-fastapi: ignore[ASYNC_BLOCKING_CALL]"),
+                ("ASYNC_BLOCKING_CALL", 9, False, None),
+                ("ROUTE_NO_RETURN_ANNOTATION", 12, True, "audit-fastapi: ignore[ROUTE_NO_RETURN_ANNOTATION]"),
+            ],
+        )
+
+    def test_marker_inside_a_string_is_not_a_comment(self) -> None:
+        self.write(
+            "app/s.py",
+            """
+            import time
+
+            async def run():
+                time.sleep(1); note = "# noqa: ASYNC251"
+                return note
+            """,
+        )
+        found = self.findings("ASYNC_BLOCKING_CALL")
+        self.assertEqual([f["suppressed"] for f in found], [False])
+
+    def test_no_suppressions_option_reports_everything_active(self) -> None:
+        self.write("app/jobs.py", "import time\nasync def run():\n    time.sleep(1)  # noqa: ASYNC251\n")
+        report = self.run_audit(honor_suppressions=False)
+        self.assertEqual([f["suppressed"] for f in report["findings"]], [False])
+        self.assertEqual(report["summary"]["suppressed"], 0)
+
+    def test_text_output_shows_environment_and_suppressed_section(self) -> None:
+        self.write("tests/test_x.py", "import time\nasync def h():\n    time.sleep(1)  # noqa: ASYNC251\n")
+        self.write("app/y.py", self.BLOCKING)
+        text = audit.render_text(self.run_audit())
+        self.assertIn("[medium/high/application]", text)
+        self.assertIn("[medium/medium/test]", text)
+        self.assertIn("suppressed by documented markers", text)
+        self.assertIn("(suppressed: noqa: ASYNC251)", text)
+        self.assertIn("tests excluded: 0", text)
+
+    def test_json_contract_schema_1_0_fields_are_preserved(self) -> None:
+        self.write("app/y.py", self.BLOCKING)
+        self.write("app/broken.py", "def (:\n")
+        report = self.run_audit()
+        self.assertEqual(report["schema_version"], "1.1")
+        # Every schema 1.0 field, with the same type and meaning.
+        self.assertIsInstance(report["tool"]["name"], str)
+        self.assertIsInstance(report["tool"]["version"], str)
+        self.assertIsInstance(report["project_root"], str)
+        self.assertIsInstance(report["files_scanned"], int)
+        self.assertIsInstance(report["files_skipped"], list)
+        self.assertIsInstance(report["summary"]["findings_total"], int)
+        self.assertIsInstance(report["summary"]["by_rule"], dict)
+        self.assertEqual(set(report["summary"]["by_severity"]), {"info", "low", "medium", "high"})
+        self.assertIsInstance(report["disclaimer"], str)
+        v1_0_finding_keys = {
+            "rule", "severity", "confidence", "file", "line", "column", "message", "symbol", "function",
+        }
+        for finding in report["findings"]:
+            self.assertTrue(v1_0_finding_keys <= set(finding))
+            self.assertIsInstance(finding["line"], int)
+            self.assertIsInstance(finding["column"], int)
+        # findings_total and by_severity still count suppressed findings (1.0 semantics).
+        self.assertEqual(report["summary"]["findings_total"], 2)
+        self.assertEqual(sum(report["summary"]["by_severity"].values()), 2)
+        # 1.1 additions
+        for finding in report["findings"]:
+            self.assertIn(finding["environment"], {"application", "test"})
+            self.assertIsInstance(finding["suppressed"], bool)
+        self.assertIn("by_environment", report["summary"])
+        self.assertIn("suppressed", report["summary"])
+        self.assertIn("tests_excluded", report)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -822,6 +1016,22 @@ class CliTests(ProjectCase):
         self.assertEqual(self.cli(str(self.root), "--fail-on", "high").returncode, 0)
         self.assertEqual(self.cli("--list-rules").returncode, 0)
         self.assertIn("audit_fastapi 1.3.0", self.cli("--version").stdout)
+
+    def test_exclude_tests_flag_and_suppressions_in_the_cli(self) -> None:
+        self.write("app/h.py", "import time\nasync def h():\n    time.sleep(1)  # noqa: ASYNC251\n")
+        self.write("tests/test_h.py", "import time\nasync def t():\n    time.sleep(1)\n")
+        # Suppressed app finding + active test finding: medium threshold still trips (test finding).
+        self.assertEqual(self.cli(str(self.root), "--fail-on", "medium").returncode, 1)
+        # Excluding tests leaves only the suppressed finding: nothing trips.
+        result = self.cli(str(self.root), "--json", "--exclude-tests", "--fail-on", "medium")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["tests_excluded"], 1)
+        self.assertEqual([f["suppressed"] for f in report["findings"]], [True])
+        # --no-suppressions makes the same finding active again.
+        result = self.cli(str(self.root), "--exclude-tests", "--no-suppressions", "--fail-on", "medium")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--exclude-tests", self.cli("--help").stdout)
 
     def test_unwritable_output_path_fails_cleanly(self) -> None:
         self._populate()
