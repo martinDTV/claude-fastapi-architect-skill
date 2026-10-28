@@ -1,0 +1,104 @@
+{
+  "description": "Additional human/scorer prompts; not executed by this package",
+  "scenarios": [
+    {
+      "id": "jwt_shared_issuer",
+      "prompt": "A WorkOS-like provider has issuer shared across apps; client_id differs. How validate access token?",
+      "expected_signals": [
+        "compare issuer against discovery",
+        "validate app/client binding per provider",
+        "verify signature expiration and claims",
+        "do not confuse issuer with client ID"
+      ]
+    },
+    {
+      "id": "worker_crash",
+      "prompt": "An order commit succeeds but producer crashes before publish. Design durable event delivery.",
+      "expected_signals": [
+        "outbox same transaction",
+        "relay retries",
+        "inbox deduplication",
+        "at-least-once not exactly-once"
+      ]
+    },
+    {
+      "id": "tenant_leak",
+      "prompt": "PostgreSQL pooled connections leak tenant context across requests. Design and test isolation.",
+      "expected_signals": [
+        "transaction scoped tenant setting",
+        "fail closed with no tenant",
+        "RLS bypass-role auditing",
+        "cross tenant negative tests"
+      ]
+    },
+    {
+      "id": "asgi_streaming",
+      "prompt": "FastAPI SSE stream closes during client disconnect; explain resource lifecycle and cancellation.",
+      "expected_signals": [
+        "cancellation handling",
+        "streaming lifespan",
+        "gateway limits",
+        "no leaked sessions"
+      ]
+    },
+    {
+      "id": "deadline_payments",
+      "prompt": "A payment provider times out after debit. May we retry?",
+      "expected_signals": [
+        "outcome unknown",
+        "idempotency key",
+        "reconciliation",
+        "avoid blind retry"
+      ]
+    },
+    {
+      "id": "upgrade_plan",
+      "prompt": "Upgrade FastAPI, Pydantic and SQLAlchemy in a production API. Show process.",
+      "expected_signals": [
+        "baseline",
+        "changelog matrix",
+        "staged upgrade",
+        "rollback and OpenAPI diff"
+      ]
+    },
+    {
+      "id": "microservice_exception",
+      "prompt": "Legal requirement demands dedicated isolation but only one microservice criterion exists.",
+      "expected_signals": [
+        "treat numeric threshold as heuristic",
+        "document isolation requirement",
+        "plan operability",
+        "avoid forced monolith"
+      ]
+    },
+    {
+      "id": "p99_pool",
+      "prompt": "p99 latency spikes on 8 workers and a DB pool of 20. What do you measure?",
+      "expected_signals": [
+        "pool multiplication",
+        "queue wait",
+        "EXPLAIN",
+        "controlled load test"
+      ]
+    },
+    {
+      "id": "clinical_edit",
+      "prompt": "Two doctors edit a draft simultaneously; require no lost updates.",
+      "expected_signals": [
+        "atomic version check",
+        "conflict response",
+        "autoguardado order",
+        "authorization"
+      ]
+    },
+    {
+      "id": "simple_crud",
+      "prompt": "Build a three-endpoint internal CRUD using FastAPI with one developer.",
+      "expected_signals": [
+        "keep it simple",
+        "avoid needless interfaces",
+        "tests proportionate to risk"
+      ]
+    }
+  ]
+}

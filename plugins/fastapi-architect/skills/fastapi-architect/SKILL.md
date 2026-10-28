@@ -175,3 +175,18 @@ Load only the relevant reference for each task; preserve the existing architectu
 | `references/operations-production.md` | CI/CD, SLO, observability, capacity, incidents, cloud deployment |
 
 Do not load all references automatically. Preserve existing repo conventions and project ADRs. Treat defaults as heuristics, not universally binding rules. State what has actually been verified; do not claim a test ran without running it.
+
+## Deep-dive references (v1.2)
+
+Apply only when the situation requires them. These extend, rather than replace, the core and v2 references.
+
+| Reference | Trigger |
+|---|---|
+| `references/domain-modeling.md` | DDD, bounded contexts, complex invariants, CQRS, event sourcing, ports-and-adapters trade-offs |
+| `references/fastapi-runtime.md` | Lifespan, dependencies, ASGI middleware, cancellation, background tasks, SSE/WebSockets |
+| `references/identity-threat-models.md` | OAuth/JWT/JWKS, resource authorization, RLS, tenant boundaries, threat models |
+| `references/events-and-workflows.md` | Outbox/inbox, workers, leases, consumer retries, sagas, crash recovery |
+| `references/performance-capacity.md` | Profiling, p95/p99, capacity, SQL query plans, connection pools, cost |
+| `references/upgrade-governance.md` | Framework upgrades, dependency risk, release governance, ADR review |
+
+**Conflict resolution:** explicit project decisions and verified contracts outrank generic defaults. For any conflict between a concise rule in this file and a newer reference, evaluate the concrete requirements, present alternatives, and document the chosen exception. The “two criteria” rule for extracting microservices is a heuristic: a single hard legal/security/runtime requirement can justify isolation if its constraints are demonstrated. Likewise, transaction ownership, cross-module access and sync-vs-async must be selected based on consistency requirements, not enforced universally.

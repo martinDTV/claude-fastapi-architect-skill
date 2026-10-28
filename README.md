@@ -119,3 +119,11 @@ This distribution includes **all original files** plus eight optional decision r
 The added references cover architecture decisions, API contracts, tenancy/identity, async concurrency, distributed reliability, database evolution, adversarial testing and production operations. This is an additive expansion rather than a replacement for the original seven references.
 
 **Updating an existing checkout:** extract the archive contents into the repository root. Do not replace your `.git` directory (the archive intentionally excludes it). Review `git status` and `git diff`, run your validation, and commit only the intended changes. No cleanup or deletion is required.
+
+## Extension v1.2 — deeper engineering decisions
+
+Adds six opt-in reference guides for domain modeling, FastAPI/ASGI runtime, identity threat modeling, durable workflows, performance/capacity, and upgrade governance. All seven original guides and the eight v2 guides remain intact.
+
+This is a complete repository overlay: extract at the **root** of an existing clone. It does not contain `.git`, request deletion of tracked files, or replace the installation identity `fastapi-architect`. Review changes with `git diff --check` and validate in Claude Code with `claude plugin validate .` before publishing.
+
+Validation performed on the package: manifest JSON parsed, expected reference files present, references linked from `SKILL.md`, and ZIP integrity checked. These checks do not prove Claude-generated code correctness or a passing Claude evaluation run.
