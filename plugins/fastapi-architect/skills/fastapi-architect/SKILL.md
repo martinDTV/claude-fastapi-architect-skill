@@ -157,3 +157,21 @@ Read the file that matches the task. Do not load all of them by default.
 | `references/operations.md` | Logging, tracing, health checks, Docker, deployment, workers |
 
 Assets to copy into projects: `assets/pyproject.toml`, `assets/Dockerfile`, `assets/pre-commit-config.yaml`, `assets/adr-template.md`.
+
+
+## Extended decision and implementation references (v2)
+
+Load only the relevant reference for each task; preserve the existing architecture-stage selection above.
+
+| Reference | Trigger |
+|---|---|
+| `references/decision-router.md` | Choosing architecture, reviewing a system, evaluating CQRS/DDD/microservices |
+| `references/api-contracts.md` | API contracts, pagination, sort, ETag, idempotency, compatibility |
+| `references/authz-multitenancy.md` | Authentication, authorization, OIDC/JWKS, RLS, tenant isolation, security |
+| `references/async-concurrency.md` | Async, cancellation, timeouts, lost updates, concurrency, load |
+| `references/distributed-reliability.md` | Webhooks, outbox/inbox, workers, microservices, sagas, retries |
+| `references/database-evolution.md` | PostgreSQL, migrations, indexing, backups, recovery |
+| `references/testing-matrix.md` | Unit/integration/e2e/contract, adversarial tests, skill evaluation |
+| `references/operations-production.md` | CI/CD, SLO, observability, capacity, incidents, cloud deployment |
+
+Do not load all references automatically. Preserve existing repo conventions and project ADRs. Treat defaults as heuristics, not universally binding rules. State what has actually been verified; do not claim a test ran without running it.

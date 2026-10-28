@@ -1,6 +1,6 @@
 {
   "name": "fastapi-architect",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Chooses the right architecture for a FastAPI project (prototype, modular monolith, ports and adapters, or microservices), enforces module boundaries, and applies production code standards.",
   "author": {
     "name": "Martín De La Torre",
@@ -9,5 +9,13 @@
   "homepage": "https://github.com/martinDTV/claude-fastapi-architect-skill",
   "repository": "https://github.com/martinDTV/claude-fastapi-architect-skill",
   "license": "MIT",
-  "keywords": ["fastapi", "python", "architecture", "backend", "microservices", "modular-monolith", "sqlalchemy"]
+  "keywords": [
+    "fastapi",
+    "python",
+    "architecture",
+    "backend",
+    "microservices",
+    "modular-monolith",
+    "sqlalchemy"
+  ]
 }

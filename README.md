@@ -110,3 +110,12 @@ Skill para Claude Code que le da a los proyectos FastAPI **la cantidad correcta*
 ```
 
 O copia manualmente la carpeta `plugins/fastapi-architect/skills/fastapi-architect` a `~/.claude/skills/` (todos tus proyectos) o a `.claude/skills/` (un solo proyecto).
+
+
+## Extended guidance (v1.1)
+
+This distribution includes **all original files** plus eight optional decision references in `plugins/fastapi-architect/skills/fastapi-architect/references/` and ten additional evaluation scenarios in `evals/scenarios-v2.json`. The main `SKILL.md` routes to these references only when the task needs them.
+
+The added references cover architecture decisions, API contracts, tenancy/identity, async concurrency, distributed reliability, database evolution, adversarial testing and production operations. This is an additive expansion rather than a replacement for the original seven references.
+
+**Updating an existing checkout:** extract the archive contents into the repository root. Do not replace your `.git` directory (the archive intentionally excludes it). Review `git status` and `git diff`, run your validation, and commit only the intended changes. No cleanup or deletion is required.
