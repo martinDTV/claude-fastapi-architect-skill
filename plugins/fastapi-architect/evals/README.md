@@ -11,7 +11,7 @@ plugins/fastapi-architect/evals/
 ├── README.md
 ├── <case>/prompt.md              # prompt + frontmatter (tags, max_turns, allowed_tools)
 ├── <case>/graders/*.md           # llm rubric, regex keyword, tool_used indicators
-├── audit-fixture-run-auditor/
+├── audit-fixture-run-auditor/, detect-session-risks/
 │   ├── case.yaml                 # inline prompt, graders and context.scaffold_script
 │   ├── scaffold.sh               # copies fixtures/sample_app into the run workspace (runs only with --scaffold)
 │   └── fixtures/sample_app/      # tiny FastAPI project with known defects (test data, never shipped code)
@@ -33,6 +33,14 @@ plugins/fastapi-architect/evals/
 | `negative-flask-structure` | negative | Flask project organisation: the skill must not fire |
 | `negative-asyncio-script` | negative | Plain asyncio script, no web framework: the skill must not fire |
 | `negative-express-api` | negative | Express.js API structure: the skill must not fire |
+| `reject-false-positive-sessionmaker` | positive, diagnosis (v1.4) | A global `async_sessionmaker` with a yield dependency is correct; the answer must distinguish factory from instance |
+| `propose-concurrency-test` | positive, diagnosis (v1.4) | Lost-update suspicion: two-writer reproduction before locking, with alternatives (atomic UPDATE, FOR UPDATE, version) |
+| `destructive-migration-justified` | positive, decision (v1.4) | A justified `MIG_DROP_COLUMN`: approve with evidence and checks, not block or rubber-stamp |
+| `security-not-verifiable-statically` | positive, diagnosis (v1.4) | `SEC_TENANT_ID_FROM_REQUEST` with `CurrentUser` injected: no yes/no from code; cross-tenant negative test |
+| `justify-existing-architecture` | positive, decision (v1.4) | Hexagonal layout with import-linter contracts: do not reorganise into the default modular layout |
+| `select-reference-zero-downtime-migration` | positive, decision (v1.4) | 80M-row type change and NOT NULL column: expand-contract, batches, CONCURRENTLY, rehearsal |
+| `detect-session-risks` | positive, tools (v1.4) | Runs the auditor on a fixture with a shared session, a lost update and a commit-in-loop; must reject the sessionmaker false positive (needs `--scaffold --allow-tools Bash`) |
+| `negative-django-project` | negative (v1.4) | Django REST Framework restructuring: the skill must not fire |
 
 Graders per positive case: `quality` (LLM rubric, weight 2, concrete PASS/FAIL conditions that penalise unsupported claims), `keyword` (regex, weight 1, one technical term the answer must contain) and `skill-fired` (`tool_used: Skill`, `arm: with-only`). In a with/without run the `skill-fired` grader is reported as a plugin-fired indicator and does not count towards the score; with `--ablation none` it is scored. Negative cases carry a single free grader, `skill-not-fired` (`tool_used: Skill` with `min: 0`, `max: 0`).
 
@@ -68,7 +76,7 @@ claude plugin eval plugins/fastapi-architect --case audit-fixture-run-auditor --
 ```
 
 Notes:
-- `--scaffold --allow-tools Bash` is only needed for `audit-fixture-run-auditor`. `--scaffold` runs the case's `scaffold.sh` as you, outside the sandbox, before the agent starts; the script only copies `fixtures/sample_app` into the run's empty workspace (read it before trusting it, as with any scaffold). Without the copy the sandboxed shell cannot read fixture directories, and without the Bash grant the `auditor-run` grader fails by design. A narrower pattern such as `Bash(python3:*)` was tried and left the model unable to run anything (its first shell call is usually a lookup, not `python3`), so grant the whole tool; the eval sandbox still confines it.
+- `--scaffold --allow-tools Bash` is only needed for the `tools` cases (`audit-fixture-run-auditor`, `detect-session-risks`). `--scaffold` runs the case's `scaffold.sh` as you, outside the sandbox, before the agent starts; the script only copies `fixtures/sample_app` into the run's empty workspace (read it before trusting it, as with any scaffold). Without the copy the sandboxed shell cannot read fixture directories, and without the Bash grant the `auditor-run` grader fails by design. A narrower pattern such as `Bash(python3:*)` was tried and left the model unable to run anything (its first shell call is usually a lookup, not `python3`), so grant the whole tool; the eval sandbox still confines it.
 - Child sessions start with a clean configuration. If your Claude Code authenticates through a cloud provider with application default credentials, export the provider's credentials variable (for Google Cloud, `GOOGLE_APPLICATION_CREDENTIALS` pointing at your own ADC file) before running. Never commit that file or its path.
 - Results land in `--output-dir` or in `evals/results/<timestamp>/` (git-ignored). `--json <file>` keeps the machine-readable run; `--keep-temp` preserves per-run traces.
 - Local validation of the case files without spending anything: `python3 -m unittest discover -s tests -p "test_plugin_evals.py" -v`.
@@ -112,3 +120,7 @@ Grader revisions are listed here on purpose: a rubric that fails a correct answe
 - The LLM judge defaults to haiku; pin `--model` and `--judge-model` for comparable runs.
 - The with/without comparison cannot show value on prompts the base model already answers well; such cases still guard against regressions.
 - Fixture code under `audit-fixture-run-auditor/fixtures/` intentionally contains defects and is excluded from any claim about the plugin's own code quality.
+
+## v1.4 additions (2026-10-28)
+
+Eight cases cover the v1.4 auditor categories: real risks on a fixture (`detect-session-risks`), a false positive to reject, an existing architecture to defend, a concurrency test to propose, a justified destructive migration, security that cannot be verified with AST alone, selection of the database-evolution guidance, and a Django negative. Structural validation (`tests/test_plugin_evals.py`) covers all nineteen cases without cost. Paid runs for v1.4 were limited to a small regression sample; see `RELEASE-NOTES-v1.4.md` for what ran and what it cost.

@@ -1,0 +1,44 @@
+schema_version: "1.1"
+name: detect-session-risks
+description: Audit a fixture with a shared AsyncSession, a lost-update pattern and a commit-in-loop; run the auditor (needs --scaffold --allow-tools Bash), verify, classify, propose tests.
+tags: [v1.4, positive, tools]
+runs: 1
+
+execution:
+  max_turns: 14
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep, Skill, Bash]
+  prompt: |
+    A small FastAPI + SQLAlchemy project is in the risky_app directory of your working directory. Audit its
+    database and session handling. Use the static auditor that ships with the fastapi-architect skill
+    (scripts/audit_fastapi.py; try --category sqlalchemy,transactions --format markdown) if you can run Python,
+    then open each flagged location and verify it. Report findings ordered by impact with file and line, the
+    evidence state of each, which ones are real defects versus review items, and for the concurrency findings
+    the exact test that would prove them. Do not modify the project.
+
+context:
+  scaffold_script: scaffold.sh
+
+graders:
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?fastapi-architect"'
+    arm: with-only
+  - name: auditor-run
+    type: tool_used
+    tool: Bash
+    input_match: 'audit_fastapi'
+    min: 1
+    weight: 1
+  - name: quality
+    type: llm
+    weight: 2
+    focus: last_message
+    criteria: |
+      Evaluate only the final response against the fixture. PASS requires ALL of:
+      1. It reports the AsyncSession shared across concurrently scheduled coroutines in app/service.py (load_many: asyncio.gather over load(session, i)) as a real defect with file and line, and proposes the fix (one session per task from SessionLocal, or sequential loads).
+      2. It reports the read-modify-write in deposit (account.balance += amount after session.get) as a possible lost update that is NOT verifiable statically, and proposes a concrete two-session test and at least one fix option (atomic UPDATE, FOR UPDATE, or version column).
+      3. It reports the commit inside the loop in archive as a review item (partial state / per-row transactions), and it does NOT report the module-level async_sessionmaker in app/db.py or the yield dependency as defects.
+      4. It respects the authorization context: the router carries dependencies=[Depends(get_current_user)], so it does not claim the routes are unprotected.
+      FAIL if it invents findings not in the code, calls the sessionmaker global a defect, asserts the lost update as proven without a test, or claims the routes lack authentication.
