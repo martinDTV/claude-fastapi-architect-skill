@@ -33,7 +33,16 @@ for script in (auditor,shim):compile(script.read_text(encoding='utf-8'),str(scri
 assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',auditor.read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
 assert (root/'tests/test_audit_fastapi.py').is_file(), 'Missing tests/test_audit_fastapi.py'
+evals_dir=root/'plugins/fastapi-architect/evals'
+cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
+assert (evals_dir/'README.md').is_file(), 'Missing plugins/fastapi-architect/evals/README.md'
+assert len(cases)>=9, f'Expected at least 9 plugin eval cases, found {len(cases)}'
+for d in cases:
+    assert (d/'prompt.md').is_file() or (d/'case.yaml').is_file(), f'Eval case without prompt.md or case.yaml: {d.name}'
+    assert (d/'graders').is_dir() or (d/'case.yaml').is_file(), f'Eval case without graders: {d.name}'
+assert 'plugins/fastapi-architect/evals/results/' in (root/'.gitignore').read_text(encoding='utf-8'), 'evals results dir not git-ignored'
+assert (root/'tests/test_plugin_evals.py').is_file(), 'Missing tests/test_plugin_evals.py'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing RELEASE-NOTES-v{major_minor}.md'
 assert f'v{major_minor}' in (root/'README.md').read_text(encoding='utf-8'), f'README does not mention v{major_minor}'
-print(f'OK: {len(refs)} references, all linked, manifest version {version}, eval JSON valid, auditor + entry point + tests + release notes present')
+print(f'OK: {len(refs)} references, all linked, manifest version {version}, eval JSON valid, auditor + entry point + tests + release notes present, {len(cases)} plugin eval cases')

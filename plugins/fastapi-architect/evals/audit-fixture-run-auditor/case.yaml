@@ -1,0 +1,44 @@
+schema_version: "1.1"
+name: audit-fixture-run-auditor
+description: Audit a small FastAPI fixture project; the skill's static auditor should be run (needs --scaffold --allow-tools Bash) and its findings verified and classified.
+tags: [v1.3, positive, tools]
+runs: 1
+
+execution:
+  max_turns: 14
+  timeout_seconds: 600
+  allowed_tools: [Read, Glob, Grep, Skill, Bash]
+  prompt: |
+    A small FastAPI project is in the sample_app directory of your working directory. Audit it. Use the
+    static auditor that ships with the fastapi-architect skill (scripts/audit_fastapi.py, standard library
+    only, read-only) if you can run Python, then open each flagged location and verify it. Report: findings
+    ordered by impact with file and line, the evidence state of each (observed and reproduced / suspected,
+    backed by evidence / not verifiable), what is a defect versus what is informational, and what you would
+    fix first. Do not modify the project.
+
+context:
+  scaffold_script: scaffold.sh
+
+graders:
+  - name: skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: '"skill"\s*:\s*"(?:[\w-]+:)?fastapi-architect"'
+    arm: with-only
+  - name: auditor-run
+    type: tool_used
+    tool: Bash
+    input_match: 'audit_fastapi'
+    min: 1
+    weight: 1
+  - name: quality
+    type: llm
+    weight: 2
+    focus: last_message
+    criteria: |
+      Evaluate only the final response against the fixture project. PASS requires ALL of:
+      1. It reports the blocking calls inside async routes in app/main.py: time.sleep in get_item and requests.get in partner_status, with file and line, explaining that they stall the event loop; and it does NOT present the time.sleep inside the plain-def health route as the same defect (plain def runs in the threadpool).
+      2. It reports asyncio.run inside the async refresh route as a RuntimeError under a running loop, and either flags refresh_legacy -> refresh_cache as the same problem reached indirectly or states that indirect calls are outside the static tool's reach.
+      3. It treats the missing return annotation on partner_status as informational, notes get_item is covered by response_model, and does not present the subprocess.run in tests/test_api.py as a production event-loop defect: it recognises it as test code with a documented noqa suppression (criticising the test's usefulness on other grounds is acceptable).
+      4. Every finding carries an evidence state, and nothing is described as reproduced or measured unless the response actually ran it.
+      FAIL if it invents findings that are not in the code, calls the annotation gap a bug or a vulnerability, or asserts production impact as proven without a reproduction.
