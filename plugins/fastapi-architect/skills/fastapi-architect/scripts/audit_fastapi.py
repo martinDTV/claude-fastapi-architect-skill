@@ -45,17 +45,49 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import os
 import platform
+import re
 import sys
-from dataclasses import dataclass, field
+import tokenize
+from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 TOOL_NAME = "audit_fastapi"
 TOOL_VERSION = "1.3.0"
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"  # 1.1 adds environment/suppression fields; every 1.0 field is unchanged
 PYTHON_VERSION = platform.python_version()  # grammar used to parse the inspected files
+
+# Test code is classified, never hidden by default. ``--exclude-tests`` opts out explicitly.
+TEST_DIR_NAMES = frozenset({"tests", "test", "testing", "__tests__"})
+TEST_FILE_RE = re.compile(r"^(test_.*|.*_tests?|conftest)\.py$")
+ENV_APPLICATION = "application"
+ENV_TEST = "test"
+
+# Documented suppressions. Only explicit codes are honoured; a bare ``# noqa`` is not.
+# flake8-async / ruff ASYNC2xx codes that describe the same concern as ASYNC_BLOCKING_CALL.
+NOQA_CODES_BY_RULE: Dict[str, frozenset] = {
+    "ASYNC_BLOCKING_CALL": frozenset(
+        {
+            "ASYNC210",  # blocking HTTP call
+            "ASYNC220",  # subprocess / process in async
+            "ASYNC221",
+            "ASYNC222",
+            "ASYNC230",  # blocking file open
+            "ASYNC231",
+            "ASYNC232",
+            "ASYNC240",  # blocking os.path call
+            "ASYNC250",  # input()
+            "ASYNC251",  # time.sleep
+        }
+    ),
+}
+NOQA_RE = re.compile(r"#\s*noqa\s*:\s*([A-Za-z0-9_,\s]+)")
+# Tool-specific marker: ``# audit-fastapi: ignore`` or ``# audit-fastapi: ignore[RULE_A, RULE_B]``
+MARKER_RE = re.compile(r"#\s*audit-fastapi:\s*ignore(?:\[([A-Za-z0-9_,\s]+)\])?")
+CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 
 DEFAULT_EXCLUDED_DIRS = frozenset(
     {
@@ -172,6 +204,9 @@ class Finding:
     message: str
     symbol: Optional[str] = None
     function: Optional[str] = None
+    environment: str = ENV_APPLICATION  # schema 1.1
+    suppressed: bool = False  # schema 1.1: documented suppression found on the line
+    suppression: Optional[str] = None  # schema 1.1: e.g. "noqa: ASYNC221"
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -184,6 +219,9 @@ class Finding:
             "message": self.message,
             "symbol": self.symbol,
             "function": self.function,
+            "environment": self.environment,
+            "suppressed": self.suppressed,
+            "suppression": self.suppression,
         }
 
     def sort_key(self) -> Tuple[str, int, int, str, str, str]:
@@ -271,6 +309,53 @@ def _collect_scope(
             bound.add(node.name)
         stack.extend(ast.iter_child_nodes(node))
     return imports, bound
+
+
+def classify_environment(relpath: str) -> str:
+    """Return ``"test"`` for files under test directories or named like tests."""
+    parts = relpath.replace(os.sep, "/").split("/")
+    if any(part in TEST_DIR_NAMES for part in parts[:-1]):
+        return ENV_TEST
+    if TEST_FILE_RE.match(parts[-1]):
+        return ENV_TEST
+    return ENV_APPLICATION
+
+
+def _is_test_path(relpath: str) -> bool:
+    return classify_environment(relpath) == ENV_TEST
+
+
+def _line_comments(source: bytes) -> Dict[int, str]:
+    """Map line number -> comment text, using the tokenizer (never regexes over strings)."""
+    comments: Dict[int, str] = {}
+    try:
+        for token in tokenize.tokenize(io.BytesIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                comments[token.start[0]] = token.string
+    except (tokenize.TokenError, SyntaxError, UnicodeDecodeError, ValueError):
+        pass  # no suppressions can be read; findings stay active
+    return comments
+
+
+def _suppression_for(rule: str, comment: Optional[str]) -> Optional[str]:
+    """Return the documented suppression that applies to ``rule`` on this line, if any."""
+    if not comment:
+        return None
+    marker = MARKER_RE.search(comment)
+    if marker:
+        rules = marker.group(1)
+        if rules is None:
+            return "audit-fastapi: ignore"
+        wanted = {r.strip() for r in rules.split(",") if r.strip()}
+        if rule in wanted:
+            return f"audit-fastapi: ignore[{rule}]"
+    noqa = NOQA_RE.search(comment)
+    if noqa:
+        codes = {c.strip().upper() for c in noqa.group(1).split(",") if c.strip()}
+        matched = sorted(codes & NOQA_CODES_BY_RULE.get(rule, frozenset()))
+        if matched:
+            return "noqa: " + ", ".join(matched)
+    return None
 
 
 def _module_imports_fastapi(tree: ast.AST) -> bool:
@@ -501,21 +586,30 @@ def iter_python_files(
     *,
     excluded_dirs: Iterable[str] = (),
     include_hidden: bool = False,
+    exclude_tests: bool = False,
+    tests_excluded: Optional[List[int]] = None,
 ) -> Tuple[List[Tuple[str, str]], List[Dict[str, str]]]:
     """Return ``([(relpath, abspath), ...], [skipped, ...])`` deterministically.
 
     Symlinked directories are never followed. Symlinked files are analysed
     only when they resolve inside ``root``; a file reachable through several
-    paths is analysed once, preferring the non-symlink path.
+    paths is analysed once, preferring the non-symlink path. With
+    ``exclude_tests`` test directories and test-named files are not analysed;
+    the number left out is appended to ``tests_excluded`` when a list is given.
     """
     excluded = set(DEFAULT_EXCLUDED_DIRS) | set(excluded_dirs)
     root_abs = os.path.abspath(root)
     root_real = os.path.realpath(root_abs)
     candidates: List[Tuple[bool, str, str, str]] = []  # (is_link, rel, abs, real)
     skipped: List[Dict[str, str]] = []
+    left_out = 0
 
     if os.path.isfile(root_abs):
         rel = os.path.basename(root_abs)
+        if exclude_tests and _is_test_path(rel):
+            if tests_excluded is not None:
+                tests_excluded.append(1)
+            return [], skipped
         return [(rel, root_abs)], skipped
 
     def record_walk_error(error: OSError) -> None:
