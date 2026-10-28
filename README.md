@@ -74,7 +74,8 @@ plugins/fastapi-architect/
     │   └── adr-template.md
     └── scripts/
         └── audit_fastapi.py              # v1.3 read-only static auditor (stdlib only)
-evals/evals.json                          # test prompts for evaluating the skill
+plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
+evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
 tests/test_audit_fastapi.py               # auditor test suite (unittest / pytest)
@@ -147,4 +148,6 @@ python3 scripts/audit_fastapi.py --list-rules
 - Standard library only (`ast`); it never imports, executes or modifies the inspected code. Skips `.git`, virtualenvs, caches, `node_modules`, `dist`, `build` and dot-directories; does not follow symlinked directories; analyses each real file once.
 - Rules: `ASYNC_BLOCKING_CALL` (blocking calls such as `time.sleep`, `requests.*`, `urllib.request.urlopen`, `subprocess.run` inside `async def`, with import aliases and local shadowing handled), `ASYNCIO_RUN_NESTED`, `ROUTE_NO_RETURN_ANNOTATION` (informational; suppressed by `response_model`/`response_class`), `PY_SYNTAX`, `FILE_SKIPPED`.
 - Every finding is a heuristic signal with a severity and a confidence, not a demonstrated defect. `references/architecture-audit.md` defines how to verify, classify (four evidence states), reproduce, refactor incrementally and report. `references/reference-implementation-strategy.md` defines how runnable examples must be built, labelled and verified; no validated end-to-end example ships yet.
+- Test code is classified, never hidden: every finding carries `environment` (`application` or `test`), blocking calls in test code drop one confidence level, `--exclude-tests` leaves tests out explicitly, and documented suppressions (`# noqa: ASYNC2xx`, `# audit-fastapi: ignore[RULE]`) are kept in the report as `suppressed` and ignored by `--fail-on`. Report schema 1.1 is a superset of 1.0.
+- Evals: `plugins/fastapi-architect/evals/` holds the native `claude plugin eval` suite with positive, negative, architecture-decision and tool-use cases plus activation criteria; see its README for commands, costs and the recorded baseline.
 - Tests: `python3 -m unittest discover -s tests -v` (also runs under pytest). Release details in `RELEASE-NOTES-v1.3.md`.
