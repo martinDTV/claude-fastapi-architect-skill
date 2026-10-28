@@ -73,12 +73,13 @@ plugins/fastapi-architect/
     │   ├── pre-commit-config.yaml
     │   └── adr-template.md
     └── scripts/
-        └── audit_fastapi.py              # v1.3 read-only static auditor (stdlib only)
+        ├── audit_fastapi.py              # read-only static auditor entry point (stdlib only)
+        └── fastapi_audit/                # v1.4 auditor package: rules per category, facts, report, cli
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
-tests/test_audit_fastapi.py               # auditor test suite (unittest / pytest)
+tests/                                    # auditor suites per category, fixtures, PostgreSQL integration tests
 ```
 
 ## Principles
@@ -151,3 +152,19 @@ python3 scripts/audit_fastapi.py --list-rules
 - Test code is classified, never hidden: every finding carries `environment` (`application` or `test`), blocking calls in test code drop one confidence level, `--exclude-tests` leaves tests out explicitly, and documented suppressions (`# noqa: ASYNC2xx`, `# audit-fastapi: ignore[RULE]`) are kept in the report as `suppressed` and ignored by `--fail-on`. Report schema 1.1 is a superset of 1.0.
 - Evals: `plugins/fastapi-architect/evals/` holds the native `claude plugin eval` suite with positive, negative, architecture-decision and tool-use cases plus activation criteria; see its README for commands, costs and the recorded baseline.
 - Tests: `python3 -m unittest discover -s tests -v` (also runs under pytest). Release details in `RELEASE-NOTES-v1.3.md`.
+
+## Extension v1.4 — Database, Security & Architecture Auditor
+
+The auditor becomes a small standard-library package (`fastapi_audit`) with rules for SQLAlchemy 2.x sessions and engines, transactions and concurrency, Alembic migrations, authorization and multi-tenancy signals, and architecture boundaries. Everything from v1.0 to v1.3 remains; the command, options and report fields of v1.3 are unchanged (report schema 1.2 is additive).
+
+```bash
+python3 scripts/audit_fastapi.py /path/to/project --format markdown          # report for a review
+python3 scripts/audit_fastapi.py /path/to/project --category sqlalchemy,transactions,migrations
+python3 scripts/audit_fastapi.py /path/to/project --baseline previous.json --fail-on-new
+python3 scripts/audit_fastapi.py /path/to/project --changed-files <(git diff --name-only main)
+```
+
+- 35 rules in 8 categories. Each finding carries a `verification` field (`static`, `needs_runtime_check`, `not_verifiable_statically`) and a recommended test; `references/audit-rules.md` documents what every rule proves, its false-positive patterns and the test that closes it.
+- Session types come from annotations and module-level factories, so a correctly used global `sessionmaker` is never reported while a shared `Session` instance is. Architecture layers and business modules are inferred from paths or configured in `.audit-fastapi.json`; existing import-linter contracts are detected and treated as authoritative.
+- Migrations are never executed. Destructive operations are reported as changes that need review with their expand-contract context.
+- Tests: 149 across unit suites per category, deliberately correct and incorrect fixture projects, and PostgreSQL integration tests that reproduce the lost update, the session-level `SET` leak and the `NOT NULL` failure on an ephemeral cluster (`tests/integration`, skipped when PostgreSQL tools are absent). Release details in `RELEASE-NOTES-v1.4.md`.
