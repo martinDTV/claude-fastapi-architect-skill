@@ -17,6 +17,14 @@ Every finding is a heuristic signal for human review, not a demonstrated
 defect or vulnerability. See ``references/architecture-audit.md`` for how to
 classify, reproduce and report findings.
 
+Partial analysis is explicit: unreadable files or directories, oversized files
+and files that do not parse are listed in ``files_skipped`` or reported as
+``FILE_SKIPPED``/``PY_SYNTAX`` findings, and ``summary.partial_analysis`` is
+``true``. ``tool.python`` records the interpreter whose grammar was used.
+
+Exit codes: 0 success, 1 a finding reached ``--fail-on``, 2 usage error,
+missing path or unwritable ``--output``.
+
 Known limitations (deliberate for this version):
 
 * Only direct calls on imported names are resolved (``time.sleep(...)``,
@@ -39,6 +47,7 @@ import argparse
 import ast
 import json
 import os
+import platform
 import sys
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -46,6 +55,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 TOOL_NAME = "audit_fastapi"
 TOOL_VERSION = "1.3.0"
 SCHEMA_VERSION = "1.0"
+PYTHON_VERSION = platform.python_version()  # grammar used to parse the inspected files
 
 DEFAULT_EXCLUDED_DIRS = frozenset(
     {
@@ -508,7 +518,16 @@ def iter_python_files(
         rel = os.path.basename(root_abs)
         return [(rel, root_abs)], skipped
 
-    for dirpath, dirnames, filenames in os.walk(root_abs, followlinks=False):
+    def record_walk_error(error: OSError) -> None:
+        # A directory that cannot be listed makes the analysis partial; record it
+        # instead of letting os.walk drop it silently.
+        failed = getattr(error, "filename", None) or root_abs
+        rel = os.path.relpath(failed, root_abs).replace(os.sep, "/")
+        skipped.append({"file": rel, "reason": "unreadable_directory"})
+
+    for dirpath, dirnames, filenames in os.walk(
+        root_abs, onerror=record_walk_error, followlinks=False
+    ):
         kept = []
         for name in sorted(dirnames):
             if name in excluded or name.endswith(".egg-info"):
@@ -560,7 +579,11 @@ def audit_source(source: bytes, relpath: str) -> List[Finding]:
                 file=relpath,
                 line=int(line),
                 column=int(column),
-                message=f"File could not be parsed: {detail}. Other rules did not run on it.",
+                message=(
+                    f"File could not be parsed with Python {PYTHON_VERSION}: {detail}. "
+                    "Other rules did not run on it. If the project targets a newer "
+                    "Python, rerun the auditor with that interpreter."
+                ),
             )
         ]
     except (RecursionError, MemoryError):
@@ -596,6 +619,20 @@ def audit_project(
         root_abs, excluded_dirs=excluded_dirs, include_hidden=include_hidden
     )
     findings: List[Finding] = []
+    for entry in skipped:
+        if entry["reason"] == "unreadable_directory":
+            findings.append(
+                Finding(
+                    "FILE_SKIPPED",
+                    RULES["FILE_SKIPPED"]["severity"],
+                    "high",
+                    entry["file"],
+                    1,
+                    0,
+                    "Directory could not be listed and was skipped; the analysis of "
+                    "this subtree is partial.",
+                )
+            )
     files_scanned = 0
     for rel, full in files:
         try:
@@ -642,9 +679,10 @@ def audit_project(
         by_rule[finding.rule] = by_rule.get(finding.rule, 0) + 1
         by_severity[finding.severity] += 1
 
+    partial = bool(skipped) or "PY_SYNTAX" in by_rule
     return {
         "schema_version": SCHEMA_VERSION,
-        "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
+        "tool": {"name": TOOL_NAME, "version": TOOL_VERSION, "python": PYTHON_VERSION},
         "project_root": root_abs,
         "files_scanned": files_scanned,
         "files_skipped": skipped,
@@ -652,6 +690,7 @@ def audit_project(
             "findings_total": len(findings),
             "by_rule": dict(sorted(by_rule.items())),
             "by_severity": by_severity,
+            "partial_analysis": partial,
         },
         "findings": [finding.to_dict() for finding in findings],
         "disclaimer": DISCLAIMER,
@@ -671,14 +710,20 @@ def render_text(report: Dict[str, object]) -> str:
     summary = report["summary"]
     assert isinstance(summary, dict)
     sev = summary["by_severity"]
+    tool = report["tool"]
+    assert isinstance(tool, dict)
     lines = [
-        f"FastAPI static audit ({TOOL_NAME} {TOOL_VERSION}, schema {SCHEMA_VERSION})",
+        (
+            f"FastAPI static audit ({TOOL_NAME} {TOOL_VERSION}, schema {SCHEMA_VERSION}, "
+            f"python {tool['python']})"
+        ),
         f"root: {report['project_root']}",
         (
             f"files scanned: {report['files_scanned']}  "
             f"skipped: {len(report['files_skipped'])}  "  # type: ignore[arg-type]
             f"findings: {summary['findings_total']} "
             f"(high {sev['high']}, medium {sev['medium']}, low {sev['low']}, info {sev['info']})"
+            f"  partial analysis: {'yes' if summary['partial_analysis'] else 'no'}"
         ),
     ]
     findings = report["findings"]
@@ -767,15 +812,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     payload = to_json(report)
+    output_error = None
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as handle:
-            handle.write(payload)
+        try:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+        except OSError as exc:
+            reason = exc.strerror or exc.__class__.__name__
+            output_error = f"{TOOL_NAME}: error: cannot write report to {args.output}: {reason}"
     if args.json:
         sys.stdout.write(payload)
     elif not args.output:
         sys.stdout.write(render_text(report))
-    else:
+    elif output_error is None:
         sys.stdout.write(f"report written to {args.output}\n")
+    if output_error is not None:
+        sys.stderr.write(output_error + "\n")
+        return 2
 
     if args.fail_on:
         threshold = SEVERITY_ORDER[args.fail_on]

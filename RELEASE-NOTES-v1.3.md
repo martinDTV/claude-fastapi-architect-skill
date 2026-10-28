@@ -32,6 +32,13 @@ The target was `1.3.0` because the repository was at `1.2.0`. If a checkout alre
 - Unreadable, oversized or unparsable files are recorded and the scan continues.
 - The auditor never imports or executes inspected code; its only write is the optional `--output` file.
 
+## Corrections made during final validation
+Three gaps in the CLI contract were found while validating against real repositories and fixed before publication; no rule logic changed.
+- `--output` pointing to an unwritable location returned a raw traceback with exit 1. It now prints `cannot write report to ...` on stderr and exits 2. Nothing is created.
+- A directory that could not be listed was dropped silently by the directory walk. It is now recorded in `files_skipped` with reason `unreadable_directory` and as a `FILE_SKIPPED` finding.
+- The report now carries `tool.python` (interpreter whose grammar parsed the files) and `summary.partial_analysis` (`true` when any file or directory was skipped or failed to parse). `PY_SYNTAX` messages name the Python version, because a project written for 3.12+ audited with an older interpreter produces syntax findings that disappear with the right interpreter.
+Tests: 42.
+
 ## Known limitations (open)
 - No inter-procedural analysis; blocking helpers called from `async def` are invisible.
 - Calls through instances or attributes (`self.http.get`, sync ORM sessions, SDK clients) are not resolved.

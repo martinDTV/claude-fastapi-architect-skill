@@ -51,7 +51,9 @@ python3 scripts/audit_fastapi.py --list-rules
 | `PY_SYNTAX` | low | File does not parse with the running Python; other rules did not run on it | That the file is shipped; it may be a template or legacy script |
 | `FILE_SKIPPED` | info | Unreadable file or above the size limit | Anything about the content |
 
-The report is JSON with `schema_version`, `project_root`, `files_scanned`, `files_skipped`, `summary`, `findings` (each with `rule`, `severity`, `confidence`, `file`, `line`, `column`, `message`, `symbol`, `function`) and a `disclaimer`. Output is deterministic for the same tree, so two runs can be diffed.
+The report is JSON with `schema_version`, `tool` (name, version and the Python version whose grammar parsed the files), `project_root`, `files_scanned`, `files_skipped` (with a reason each), `summary` (counts plus `partial_analysis`), `findings` (each with `rule`, `severity`, `confidence`, `file`, `line`, `column`, `message`, `symbol`, `function`) and a `disclaimer`. Output is deterministic for the same tree and interpreter, so two runs can be diffed. Exit codes: 0, 1 when a finding reaches `--fail-on`, 2 for a missing path or an unwritable `--output`.
+
+Run the auditor with the Python version the project targets. An older interpreter reports modern syntax as `PY_SYNTAX`, marks the analysis partial, and leaves those files unanalysed by the other rules.
 
 Treat every auditor finding as **"suspected, backed by evidence"** at best. Open the file, confirm the context, then classify. Known blind spots are listed in section 14.
 

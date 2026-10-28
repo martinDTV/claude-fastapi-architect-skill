@@ -559,6 +559,32 @@ class RobustnessTests(ProjectCase):
         with self.assertRaises(FileNotFoundError):
             audit.audit_project(str(self.root / "does-not-exist"))
 
+    @unittest.skipIf(
+        hasattr(os, "geteuid") and os.geteuid() == 0, "root can list unreadable directories"
+    )
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX permissions required")
+    def test_unreadable_directory_marks_the_analysis_partial(self) -> None:
+        self.write("app/ok.py", "x = 1\n")
+        locked = self.write("locked/inside.py", "import time\nasync def h():\n    time.sleep(1)\n")
+        locked.parent.chmod(0)
+        self.addCleanup(locked.parent.chmod, 0o755)
+        report = self.run_audit()
+        self.assertEqual(report["files_scanned"], 1)
+        self.assertEqual(
+            report["files_skipped"], [{"file": "locked", "reason": "unreadable_directory"}]
+        )
+        self.assertEqual(
+            [(f["file"], f["rule"]) for f in report["findings"]], [("locked", "FILE_SKIPPED")]
+        )
+        self.assertTrue(report["summary"]["partial_analysis"])
+
+    def test_partial_analysis_flag_is_false_for_a_clean_scan(self) -> None:
+        self.write("app/ok.py", "x = 1\n")
+        report = self.run_audit()
+        self.assertFalse(report["summary"]["partial_analysis"])
+        self.write("app/broken.py", "def (:\n")
+        self.assertTrue(self.run_audit()["summary"]["partial_analysis"])
+
 
 # --------------------------------------------------------------------------- #
 # Traversal: exclusions, hidden directories, symlinks
@@ -698,6 +724,8 @@ class ReportTests(ProjectCase):
             self.assertIn(key, report)
         self.assertEqual(report["schema_version"], audit.SCHEMA_VERSION)
         self.assertEqual(report["project_root"], str(self.root))
+        self.assertEqual(report["tool"]["python"], audit.PYTHON_VERSION)
+        self.assertIn("partial_analysis", report["summary"])
         self.assertIn("heuristic", report["disclaimer"])
         self.assertIn("not demonstrated defects", report["disclaimer"])
         for finding in report["findings"]:
@@ -794,6 +822,14 @@ class CliTests(ProjectCase):
         self.assertEqual(self.cli(str(self.root), "--fail-on", "high").returncode, 0)
         self.assertEqual(self.cli("--list-rules").returncode, 0)
         self.assertIn("audit_fastapi 1.3.0", self.cli("--version").stdout)
+
+    def test_unwritable_output_path_fails_cleanly(self) -> None:
+        self._populate()
+        result = self.cli(str(self.root), "--output", str(self.root / "missing-dir" / "r.json"))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot write report", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse((self.root / "missing-dir").exists())
 
     def test_cli_is_deterministic_across_runs(self) -> None:
         self._populate()
