@@ -48,6 +48,7 @@ The skill activates automatically when you work on a FastAPI project. Example pr
 - "Our FastAPI app is getting big. Should we move to microservices?"
 - "Review this FastAPI project's structure and tell me what to fix first."
 - "Extract the notifications module into its own service."
+- "Audit this FastAPI repository and tell me what is actually broken versus what is just style."
 
 ## What's inside
 
@@ -65,13 +66,18 @@ plugins/fastapi-architect/
     │   ├── testing.md                    # fixtures, per-test rollback, unit and integration tests
     │   ├── security-and-config.md        # settings, secrets, OIDC/JWT, authorization, CORS
     │   └── operations.md                 # logging, request IDs, tracing, health checks, Docker, CI
-    └── assets/
-        ├── pyproject.toml                # uv, ruff, mypy, pytest, import-linter configured
-        ├── Dockerfile                    # multi-stage, uv, non-root
-        ├── dockerignore.txt
-        ├── pre-commit-config.yaml
-        └── adr-template.md
+    ├── assets/
+    │   ├── pyproject.toml                # uv, ruff, mypy, pytest, import-linter configured
+    │   ├── Dockerfile                    # multi-stage, uv, non-root
+    │   ├── dockerignore.txt
+    │   ├── pre-commit-config.yaml
+    │   └── adr-template.md
+    └── scripts/
+        └── audit_fastapi.py              # v1.3 read-only static auditor (stdlib only)
 evals/evals.json                          # test prompts for evaluating the skill
+scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
+scripts/validate_structure.py             # packaging, links and version checks
+tests/test_audit_fastapi.py               # auditor test suite (unittest / pytest)
 ```
 
 ## Principles
@@ -83,7 +89,7 @@ evals/evals.json                          # test prompts for evaluating the skil
 
 ## Contributing
 
-Issues and pull requests are welcome. Any code added to `references/` must pass `ruff format --check`, `ruff check`, `mypy --strict` and, where applicable, tests against PostgreSQL. Run `claude plugin validate .` before opening a PR that touches the manifests.
+Issues and pull requests are welcome. Any code added to `references/` must pass `ruff format --check`, `ruff check`, `mypy --strict` and, where applicable, tests against PostgreSQL. Run `python3 scripts/validate_structure.py` and `python3 -m unittest discover -s tests -v` before any PR, and `claude plugin validate .` before opening a PR that touches the manifests.
 
 ## License
 
@@ -127,3 +133,18 @@ Adds six opt-in reference guides for domain modeling, FastAPI/ASGI runtime, iden
 This is a complete repository overlay: extract at the **root** of an existing clone. It does not contain `.git`, request deletion of tracked files, or replace the installation identity `fastapi-architect`. Review changes with `git diff --check` and validate in Claude Code with `claude plugin validate .` before publishing.
 
 Validation performed on the package: manifest JSON parsed, expected reference files present, references linked from `SKILL.md`, and ZIP integrity checked. These checks do not prove Claude-generated code correctness or a passing Claude evaluation run.
+
+## Extension v1.3 — Architectural Auditor
+
+Adds a **read-only static auditor** and two opt-in references for auditing existing FastAPI repositories and for building verified reference implementations. Everything from v1.0, v1.1 and v1.2 remains intact; the plugin identity and install commands do not change.
+
+```bash
+python3 scripts/audit_fastapi.py /path/to/project            # text summary
+python3 scripts/audit_fastapi.py /path/to/project --json     # deterministic JSON report
+python3 scripts/audit_fastapi.py --list-rules
+```
+
+- Standard library only (`ast`); it never imports, executes or modifies the inspected code. Skips `.git`, virtualenvs, caches, `node_modules`, `dist`, `build` and dot-directories; does not follow symlinked directories; analyses each real file once.
+- Rules: `ASYNC_BLOCKING_CALL` (blocking calls such as `time.sleep`, `requests.*`, `urllib.request.urlopen`, `subprocess.run` inside `async def`, with import aliases and local shadowing handled), `ASYNCIO_RUN_NESTED`, `ROUTE_NO_RETURN_ANNOTATION` (informational; suppressed by `response_model`/`response_class`), `PY_SYNTAX`, `FILE_SKIPPED`.
+- Every finding is a heuristic signal with a severity and a confidence, not a demonstrated defect. `references/architecture-audit.md` defines how to verify, classify (four evidence states), reproduce, refactor incrementally and report. `references/reference-implementation-strategy.md` defines how runnable examples must be built, labelled and verified; no validated end-to-end example ships yet.
+- Tests: `python3 -m unittest discover -s tests -v` (also runs under pytest). Release details in `RELEASE-NOTES-v1.3.md`.
