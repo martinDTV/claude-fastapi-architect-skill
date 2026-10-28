@@ -151,7 +151,7 @@ class EphemeralPostgresTests(unittest.TestCase):
     def test_session_level_set_leaks_across_transactions_on_the_same_connection(self) -> None:
         conn = self.connect()
         with conn.cursor() as cur:
-            cur.execute("SET app.tenant_id = 'tenant-a'")
+            cur.execute("SET app.tenant_id = 'tenant-a'")  # audit-fastapi: ignore[SEC_RLS_SET_NOT_LOCAL] deliberate: demonstrates the leak
             conn.commit()
             cur.execute("SELECT current_setting('app.tenant_id', true)")
             self.assertEqual(cur.fetchone()[0], "tenant-a", "session-level SET persists after commit: the next request on this pooled connection inherits it")

@@ -111,6 +111,12 @@ class ArchitectureInlineTests(ProjectCase):
         found = self.findings("ARCH_IMPORT_CYCLE")
         self.assertEqual([(f["file"], f["symbol"]) for f in found], [("pkg/a.py", "cycle:2")])
 
+    def test_type_checking_imports_do_not_form_cycles(self) -> None:
+        self.write("pkg/__init__.py", "")
+        self.write("pkg/a.py", "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pkg.b import B\n\nclass A: ...\n")
+        self.write("pkg/b.py", "from pkg.a import A\n\nclass B(A): ...\n")
+        self.assertEqual(self.findings("ARCH_IMPORT_CYCLE"), [])
+
     def test_microservice_style_repos_without_layers_are_quiet(self) -> None:
         self.write("svc/main.py", "from fastapi import FastAPI\nfrom svc.handlers import router\napp = FastAPI()\n")
         self.write("svc/handlers.py", "from fastapi import APIRouter\nrouter = APIRouter()\n")

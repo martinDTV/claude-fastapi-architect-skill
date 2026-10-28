@@ -334,9 +334,20 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
     if module_imports(tree, ("alembic",)):
         facts.uses_alembic = True
 
-    # import graph: module-level versus function-level
+    # import graph: module-level versus function-level. Imports guarded by
+    # `if TYPE_CHECKING:` never run, so they are not module-level edges (no cycle).
     edges: List[Tuple[str, int, bool]] = []
-    module_level_ids = {id(n) for n in iter_scope_nodes(tree.body) if isinstance(n, (ast.Import, ast.ImportFrom))}
+    type_checking_ids: Set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test = node.test
+            name = test.id if isinstance(test, ast.Name) else test.attr if isinstance(test, ast.Attribute) else None
+            if name == "TYPE_CHECKING":
+                type_checking_ids |= {id(n) for n in ast.walk(node) if isinstance(n, (ast.Import, ast.ImportFrom))}
+    module_level_ids = {
+        id(n) for n in iter_scope_nodes(tree.body)
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and id(n) not in type_checking_ids
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
