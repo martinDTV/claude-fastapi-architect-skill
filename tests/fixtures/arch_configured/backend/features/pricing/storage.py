@@ -1,0 +1,2 @@
+class PriceStore:
+    pass

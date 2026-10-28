@@ -1,0 +1,17 @@
+[importlinter]
+root_package = shop
+
+[importlinter:contract:domain-pure]
+name = Domain is pure
+type = forbidden
+source_modules = shop.domain
+forbidden_modules = sqlalchemy
+    fastapi
+
+[importlinter:contract:layers]
+name = Layers
+type = layers
+layers =
+    shop.api
+    shop.application
+    shop.domain

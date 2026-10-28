@@ -1,0 +1,9 @@
+{
+  "modules_root": "backend/features",
+  "layers": {
+    "domain": ["*/model/*"],
+    "service": ["*/logic.py"],
+    "repository": ["*/storage.py"],
+    "router": ["*/http.py"]
+  }
+}
