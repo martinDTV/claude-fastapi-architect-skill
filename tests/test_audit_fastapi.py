@@ -750,7 +750,7 @@ class ReportTests(ProjectCase):
         self.assertEqual(keys, sorted(keys))
         self.assertEqual(
             [f["file"] for f in findings],
-            ["app/a_first.py", "app/a_first.py", "app/broken.py", "app/z_last.py", "app/z_last.py"],
+            ["app/a_first.py", "app/a_first.py", "app/a_first.py", "app/broken.py", "app/z_last.py", "app/z_last.py"],
         )
 
     def test_audit_does_not_modify_the_project(self) -> None:
@@ -794,7 +794,7 @@ class EnvironmentAndSuppressionTests(ProjectCase):
         self.assertEqual(app["severity"], test["severity"])  # severity is never lowered
         self.assertIn("Test code", test["message"])
         self.assertNotIn("Test code", app["message"])
-        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 1})
+        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 1, "migration": 0})
         self.assertEqual(report["tests_excluded"], 0)
 
     def test_environment_classification_rules(self) -> None:
@@ -825,7 +825,7 @@ class EnvironmentAndSuppressionTests(ProjectCase):
         self.assertEqual([f["file"] for f in report["findings"]], ["app/handlers.py"])
         self.assertEqual(report["files_scanned"], 1)
         self.assertEqual(report["tests_excluded"], 4)
-        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 0})
+        self.assertEqual(report["summary"]["by_environment"], {"application": 1, "test": 0, "migration": 0})
 
     def test_exclude_tests_on_a_single_test_file(self) -> None:
         path = self.write("tests/test_one.py", self.BLOCKING)
@@ -893,7 +893,7 @@ class EnvironmentAndSuppressionTests(ProjectCase):
             """,
         )
         report = self.run_audit()
-        rows = [(f["rule"], f["line"], f["suppressed"], f["suppression"]) for f in report["findings"]]
+        rows = [(f["rule"], f["line"], f["suppressed"], f["suppression"]) for f in report["findings"] if f["rule"] in {"ASYNC_BLOCKING_CALL", "ROUTE_NO_RETURN_ANNOTATION"}]
         self.assertEqual(
             rows,
             [
@@ -938,7 +938,8 @@ class EnvironmentAndSuppressionTests(ProjectCase):
         self.write("app/y.py", self.BLOCKING)
         self.write("app/broken.py", "def (:\n")
         report = self.run_audit()
-        self.assertEqual(report["schema_version"], "1.1")
+        self.assertEqual(report["schema_version"], audit.SCHEMA_VERSION)
+        self.assertGreaterEqual(tuple(int(x) for x in audit.SCHEMA_VERSION.split(".")), (1, 2))
         # Every schema 1.0 field, with the same type and meaning.
         self.assertIsInstance(report["tool"]["name"], str)
         self.assertIsInstance(report["tool"]["version"], str)
@@ -1015,7 +1016,7 @@ class CliTests(ProjectCase):
         self.assertEqual(self.cli(str(self.root), "--fail-on", "medium").returncode, 1)
         self.assertEqual(self.cli(str(self.root), "--fail-on", "high").returncode, 0)
         self.assertEqual(self.cli("--list-rules").returncode, 0)
-        self.assertIn("audit_fastapi 1.3.0", self.cli("--version").stdout)
+        self.assertIn(f"audit_fastapi {audit.TOOL_VERSION}", self.cli("--version").stdout)
 
     def test_exclude_tests_flag_and_suppressions_in_the_cli(self) -> None:
         self.write("app/h.py", "import time\nasync def h():\n    time.sleep(1)  # noqa: ASYNC251\n")

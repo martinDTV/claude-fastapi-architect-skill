@@ -29,10 +29,13 @@ shim=root/'scripts/audit_fastapi.py'
 assert auditor.is_file(), f'Missing auditor: {auditor}'
 assert shim.is_file(), f'Missing root entry point: {shim}'
 assert 'skills' in shim.read_text(encoding='utf-8') and 'audit_fastapi.py' in shim.read_text(encoding='utf-8'), 'Root entry point does not forward to the skill auditor'
-for script in (auditor,shim):compile(script.read_text(encoding='utf-8'),str(script),'exec')
-assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',auditor.read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
+package=base/'scripts/fastapi_audit'
+assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
+for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
+assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
-assert (root/'tests/test_audit_fastapi.py').is_file(), 'Missing tests/test_audit_fastapi.py'
+for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_plugin_evals.py'):
+    assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
 evals_dir=root/'plugins/fastapi-architect/evals'
 cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
 assert (evals_dir/'README.md').is_file(), 'Missing plugins/fastapi-architect/evals/README.md'
