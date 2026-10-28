@@ -1,0 +1,139 @@
+# Template for a Stage 1 FastAPI project. Rename "app" if the package has another name,
+# and keep the import-linter module lists in sync with src/app/modules/.
+
+[project]
+name = "app"
+version = "0.1.0"
+description = "FastAPI service"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "testcontainers[postgres]>=4.7",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "import-linter>=2.0",
+    "pre-commit>=3.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/app"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "S",        # bandit (security)
+    "ASYNC",    # blocking calls in async code
+    "FAST",     # FastAPI-specific rules
+    "C4",       # comprehensions
+    "SIM",      # simplifications
+    "PT",       # pytest style
+    "TID",      # tidy imports
+    "DTZ",      # timezone-aware datetimes
+    "T20",      # no print
+    "ERA",      # no commented-out code
+    "RUF",      # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+"migrations/**" = ["ERA001"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["app"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+# Deprecations become failures, so framework upgrades never break silently.
+# Add narrow "ignore::..." entries for third-party warnings you cannot fix.
+filterwarnings = ["error"]
+markers = ["external: tests that call real third-party services (excluded by default)"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError", "\\.\\.\\."]
+
+# ---------------------------------------------------------------- import-linter
+[tool.importlinter]
+root_packages = ["app"]
+
+[[tool.importlinter.contracts]]
+name = "Modules are independent (cross-module imports only through public.py)"
+type = "independence"
+modules = [
+    "app.modules.customers",
+]
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
+name = "Layered modules"
+type = "layers"
+layers = [
+    "(router)",
+    "(dependencies)",
+    "(service)",
+    "(repository)",
+    "(models)",
+]
+containers = [
+    "app.modules.customers",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core does not depend on business modules or the API layer"
+type = "forbidden"
+source_modules = ["app.core"]
+forbidden_modules = ["app.modules", "app.api"]
