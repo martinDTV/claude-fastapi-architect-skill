@@ -1,6 +1,6 @@
 ---
 name: fastapi-architect
-description: Architecture, project-structure and code-standards guide for Python backends built with FastAPI. Use this skill whenever the user is creating, structuring, refactoring, reviewing or scaling a FastAPI project, including choosing a folder layout, adding a new module or feature, deciding between a monolith, a modular monolith or microservices, splitting a codebase or extracting a service, setting up SQLAlchemy and Alembic, testing, configuration, authentication, Docker or CI, even if they never say the word "architecture". Also use it when the user asks whether a FastAPI codebase is too big, too messy, or "should be microservices".
+description: Architecture, project-structure and code-standards guide for Python backends built with FastAPI. Use this skill whenever the user is creating, structuring, refactoring, reviewing or scaling a FastAPI project, including choosing a folder layout, adding a new module or feature, deciding between a monolith, a modular monolith or microservices, splitting a codebase or extracting a service, setting up SQLAlchemy and Alembic, testing, configuration, authentication, Docker or CI, even if they never say the word "architecture". Also use it when the user asks whether a FastAPI codebase is too big, too messy, or "should be microservices", asks for an audit, diagnosis or architecture review of an existing FastAPI repository, or asks for a runnable reference example.
 license: MIT
 ---
 
@@ -128,7 +128,7 @@ Each rule exists because breaking it causes a recurring, expensive class of bug.
 
 ## Reviewing an existing FastAPI codebase
 
-Report findings ordered by impact, and say which stage the project is in versus which it should be in. Check, in this order:
+Report findings ordered by impact, and say which stage the project is in versus which it should be in. Start with the read-only static auditor shipped with the skill, `python3 scripts/audit_fastapi.py <project> --json`, as triage; its findings are heuristic signals to verify by hand, never conclusions. For a full audit, diagnosis or refactor plan, follow `references/architecture-audit.md`. Check, in this order:
 
 1. Blocking I/O inside `async def` (requests, psycopg2, `time.sleep`, sync SDKs).
 2. Sessions or connections created at import time or shared globally across requests.
@@ -190,3 +190,18 @@ Apply only when the situation requires them. These extend, rather than replace, 
 | `references/upgrade-governance.md` | Framework upgrades, dependency risk, release governance, ADR review |
 
 **Conflict resolution:** explicit project decisions and verified contracts outrank generic defaults. For any conflict between a concise rule in this file and a newer reference, evaluate the concrete requirements, present alternatives, and document the chosen exception. The “two criteria” rule for extracting microservices is a heuristic: a single hard legal/security/runtime requirement can justify isolation if its constraints are demonstrated. Likewise, transaction ownership, cross-module access and sync-vs-async must be selected based on consistency requirements, not enforced universally.
+
+## Architectural auditor (v1.3)
+
+Load only when the task matches the trigger. These extend the review checklist above; they do not replace it.
+
+| Reference | Trigger |
+|---|---|
+| `references/architecture-audit.md` | Audits, diagnostics, architecture or security reviews of an existing repository, "what should we fix first", refactors of code the user did not just write, authorization and multi-tenancy reviews |
+| `references/reference-implementation-strategy.md` | Requests for runnable examples, generated projects, templates, or any claim that code is validated or production-ready |
+
+Tool: `scripts/audit_fastapi.py` (standard library only, read-only; `--list-rules` describes the rules). Run it before reading an unfamiliar codebase, then verify every finding in context.
+
+Every audit finding carries one of four evidence states: **observed and reproduced**, **suspected, backed by evidence**, **not verifiable with the available information**, or **fixed and verified**. Static output alone never reaches the first state. Keep style observations out of the defect list, and never present a heuristic finding as a demonstrated vulnerability.
+
+Code offered as an example is labelled `verified`, `draft` or `illustrative` as defined in the strategy reference. Snippets in the references and this file are guidance, not validated end-to-end projects.

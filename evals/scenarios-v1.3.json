@@ -1,0 +1,69 @@
+{
+  "description": "Architectural Auditor scenarios (v1.3). Human/scorer prompts; not executed by this package. Score with the rubric in references/testing-matrix.md and penalize unsupported claims.",
+  "scenarios": [
+    {
+      "id": "audit_blocking_triage",
+      "prompt": "Audit this FastAPI repository. Several async routes call requests.get and time.sleep. Tell me what is wrong and how bad it is.",
+      "expected_signals": [
+        "runs or proposes scripts/audit_fastapi.py as read-only triage",
+        "opens each flagged call and confirms it is on a request path before classifying",
+        "labels findings 'suspected, backed by evidence' until reproduced",
+        "proposes a reproduction (concurrent request latency test) rather than asserting impact",
+        "fix direction: async client, anyio.to_thread.run_sync, or plain def"
+      ]
+    },
+    {
+      "id": "audit_not_secure_claim",
+      "prompt": "Review our multi-tenant FastAPI app and confirm it is secure. We use PostgreSQL RLS.",
+      "expected_signals": [
+        "refuses to declare the system 'secure'; reports which checks passed, failed, or could not be verified",
+        "checks transaction-local tenant context, non-bypass role, fail-closed default",
+        "asks for or writes cross-tenant negative tests covering list, join, aggregate, raw SQL, background jobs",
+        "uses the four evidence states explicitly",
+        "lists static-tool blind spots in the limitations section"
+      ]
+    },
+    {
+      "id": "audit_legacy_by_type_layout",
+      "prompt": "Our FastAPI codebase is organised as routers/, models/, services/, utils/ with 70 endpoints and no tests. Refactor it to the recommended architecture.",
+      "expected_signals": [
+        "does not rewrite the codebase; produces inventory and comparison table first",
+        "first step is characterization tests and an OpenAPI snapshot for the touched paths",
+        "incremental plan: one seam per change, import-linter contract as soon as a boundary exists",
+        "distinguishes style gaps from functional defects",
+        "ADR only for expensive-to-reverse decisions"
+      ]
+    },
+    {
+      "id": "audit_nested_asyncio_run",
+      "prompt": "Production logs show 'RuntimeError: asyncio.run() cannot be called from a running event loop' on one endpoint. Find it.",
+      "expected_signals": [
+        "uses ASYNCIO_RUN_NESTED from the auditor or an equivalent search",
+        "reproduces with a test that calls the coroutine under a running loop",
+        "fix: await the coroutine; no nest_asyncio workaround as default",
+        "classifies as 'observed and reproduced' only after the test fails then passes"
+      ]
+    },
+    {
+      "id": "audit_route_annotation_not_a_defect",
+      "prompt": "The auditor reported ROUTE_NO_RETURN_ANNOTATION on 40 routes. Is our API broken?",
+      "expected_signals": [
+        "explains the rule is informational and that response_model already suppresses it",
+        "does not call it a bug or a vulnerability",
+        "recommends return annotations or response_model where ORM objects could leak, prioritized by risk",
+        "keeps severity at info in the report"
+      ]
+    },
+    {
+      "id": "reference_impl_verification_label",
+      "prompt": "Generate a runnable FastAPI example with optimistic concurrency using If-Match, ready to copy into production.",
+      "expected_signals": [
+        "produces a complete project with declared versions and tests, including the two-writers negative test",
+        "runs the toolchain and tests, or states precisely which commands could not run",
+        "applies a label: verified, draft or illustrative, consistent with what actually ran",
+        "documents failure conditions and known limitations",
+        "does not claim 'production ready' without recorded verification"
+      ]
+    }
+  ]
+}
