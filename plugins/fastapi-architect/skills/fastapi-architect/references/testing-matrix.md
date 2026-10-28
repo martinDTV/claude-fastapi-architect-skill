@@ -24,3 +24,18 @@ For each scenario score: architecture right-sizing (0-3), correctness of contrac
 
 ## Tooling checks
 Format, lint, strict typecheck, import boundaries, pytest, migrations, dependency audit and tested sample snippets. Mark checks not run; a green suite is never proof of security by itself.
+
+## Closing static findings with runtime tests (v1.4)
+
+Each auditor finding states its `verification`. Map it to a test before touching code:
+
+| Finding type | Test that closes it |
+|---|---|
+| Shared `AsyncSession`, lost update (`SA_SESSION_SHARED_CONCURRENTLY`, `TX_READ_MODIFY_WRITE`) | Two independent sessions on a real PostgreSQL, same row, concurrent or interleaved commits; assert both writes survive or one gets a conflict |
+| Session-level `SET` for tenant context (`SEC_RLS_SET_NOT_LOCAL`) | Same connection: set, commit, `SHOW`/`current_setting` in a new transaction; must be reset |
+| Tenant id from request (`SEC_TENANT_ID_FROM_REQUEST`) | Member of tenant A requests B's identifier through the route: single, list, search, aggregate; expect 403/404 and no row |
+| Blocking call in `async def` (`ASYNC_BLOCKING_CALL`, `SA_SYNC_SESSION_IN_ASYNC_DEF`) | Concurrent request against a trivial endpoint on one worker while the suspect handler runs; measure the trivial endpoint's latency |
+| Destructive or locking migration (`MIG_*`) | Rehearse on an empty database and on a production-sized copy with a concurrent writer; run the previous release against the new schema |
+| Commit in loop, external call in transaction (`TX_*`) | Inject a failure or a stall and assert the intended partial-state and lock behaviour |
+
+Keep these tests separate from the AST tests: they need infrastructure (an ephemeral PostgreSQL started per test run is enough, as in `tests/integration` of the skill repository) and must never point at a shared or production database.

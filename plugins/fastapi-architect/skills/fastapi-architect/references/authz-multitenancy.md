@@ -25,3 +25,13 @@ Assets, identities, trusted boundaries, attack surfaces, abuse incentives, and f
 - Minimize PII in URLs, request logs, traces, exception messages, metrics labels, caches, exports and test fixtures. Treat request bodies as confidential by default.
 - Secrets through secret manager/env, not VCS, images or public runtime config. Rotate using overlapping key rings with verification, migrate dependent encrypted material, and retain needed historic verification evidence.
 - Signed URLs: short TTL, strict object/purpose binding, file size/content type restrictions, malware scanning workflow, safe filenames, retention/deletion policy.
+
+## What static analysis can and cannot say about authorization (v1.4)
+
+The auditor's `security` category reports review signals, never verdicts:
+
+- `SEC_TENANT_ID_FROM_REQUEST`: a route uses a tenant/organisation identifier from the request and no authentication or membership dependency is visible on the handler, its router, the route decorator or the application. A gateway, middleware in another repository, or a composed dependency can make this a false positive; a cross-tenant negative test (member of A asks for B's identifier: single resource, list, search, aggregate) is what settles it.
+- `SEC_RLS_SET_NOT_LOCAL`: `SET app.tenant = ...`, `SET ROLE` or `set_config(..., false)` persists on the pooled connection after the transaction. The integration test in the skill repository shows the value surviving a commit on the same connection; `SET LOCAL` / `set_config(..., true)` do not.
+- `SEC_ROUTE_WITHOUT_AUTH_SIGNAL`: informational; the route may be public by design.
+
+Not verifiable statically, and therefore never claimed by the tool: that a visible `Depends(get_current_user)` binds the tenant to that user; that RLS policies exist on every table, including join and audit tables; that the application role lacks `BYPASSRLS` and is not the table owner; that background jobs run with an explicit tenant context. Each of those is a negative test or a database query (`pg_policies`, `pg_roles`), listed in `references/testing-matrix.md`. Silence from the auditor is not a security result.

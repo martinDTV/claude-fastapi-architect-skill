@@ -112,3 +112,15 @@ Decide early and record it in an ADR; it is expensive to change.
 | Database per tenant | Few large tenants, contractual isolation, per-tenant backups or regions |
 
 Resolve the tenant once per request (from the token or subdomain) in a dependency and pass it explicitly; never read it from a global.
+
+## Sessions and engines: what the auditor checks and what it cannot see (v1.4)
+
+The static auditor (`scripts/audit_fastapi.py`, category `sqlalchemy`) encodes the rules above as review signals; `references/audit-rules.md` lists them. The distinctions that matter when reading its report:
+
+- **Factory versus instance.** A module-level `sessionmaker(...)`, `async_sessionmaker(...)` or `scoped_session(...)` is the recommended global. A module-level `Session(engine)`, `AsyncSession(engine)` or `SessionLocal()` is a shared instance and is reported (`SA_SESSION_MODULE_GLOBAL`), also when the factory is imported under an alias from another module.
+- **Lifetime.** A session built from a factory must end: context manager, `close()` in `finally`, or ownership handed to a caller. A yield-based dependency without `close()` is the classic leak (`SA_SESSION_NOT_CLOSED`).
+- **Concurrency.** One `AsyncSession` per task. Passing the request session to several coroutines in `asyncio.gather`, or to `create_task`/task groups/threads, is reported (`SA_SESSION_SHARED_CONCURRENTLY`); the fix is a session per task from the factory, not a lock.
+- **Await and blocking.** An `AsyncSession` coroutine method without `await` never runs (`SA_ASYNC_SESSION_NOT_AWAITED`); a synchronous `Session` inside `async def` blocks the loop (`SA_SYNC_SESSION_IN_ASYNC_DEF`). Both rely on visible types: annotate dependencies (`SessionDep = Annotated[AsyncSession, Depends(get_session)]`) and the tool becomes precise; leave `db=Depends(get_db)` untyped and it can only guess from the name.
+- **Engines and schema.** `create_engine` inside a handler builds a pool per request (`SA_ENGINE_CREATED_PER_CALL`); `metadata.create_all()` in application code bypasses Alembic (`SA_CREATE_ALL_AT_RUNTIME`). Both are fine in tests, which the tool classifies separately.
+
+Not determinable statically: whether an untyped object is a session, whether a session stored on `app.state` or `self` is used concurrently, lazy-load strategies at query time, and anything that happens inside helpers called from the handler. Confirm those with the pool metrics and the concurrency tests in `references/testing-matrix.md`.

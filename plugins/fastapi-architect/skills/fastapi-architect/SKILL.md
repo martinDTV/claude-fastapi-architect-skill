@@ -192,7 +192,7 @@ Apply only when the situation requires them. These extend, rather than replace, 
 
 **Conflict resolution:** explicit project decisions and verified contracts outrank generic defaults. For any conflict between a concise rule in this file and a newer reference, evaluate the concrete requirements, present alternatives, and document the chosen exception. The “two criteria” rule for extracting microservices is a heuristic: a single hard legal/security/runtime requirement can justify isolation if its constraints are demonstrated. Likewise, transaction ownership, cross-module access and sync-vs-async must be selected based on consistency requirements, not enforced universally.
 
-## Architectural auditor (v1.3)
+## Architectural auditor (v1.3–v1.4)
 
 Load only when the task matches the trigger. These extend the review checklist above; they do not replace it.
 
@@ -200,8 +200,9 @@ Load only when the task matches the trigger. These extend the review checklist a
 |---|---|
 | `references/architecture-audit.md` | Audits, diagnostics, architecture or security reviews of an existing repository, "what should we fix first", refactors of code the user did not just write, authorization and multi-tenancy reviews |
 | `references/reference-implementation-strategy.md` | Requests for runnable examples, generated projects, templates, or any claim that code is validated or production-ready |
+| `references/audit-rules.md` | Interpreting an auditor report: what each rule proves, false-positive patterns, the test that closes a finding, configuring layers and modules for architecture checks |
 
-Tool: `scripts/audit_fastapi.py` (standard library only, read-only; `--list-rules` describes the rules). Run it before reading an unfamiliar codebase, then verify every finding in context. Findings in test code are reported with `environment: test` and lower confidence, never hidden unless `--exclude-tests` is passed; findings under a documented `# noqa: ASYNC2xx` or `# audit-fastapi: ignore` stay listed as suppressed.
+Tool: `scripts/audit_fastapi.py` (standard library only, read-only; `--list-rules` describes the rules). Run it before reading an unfamiliar codebase, then verify every finding in context. Categories: async, routes, sqlalchemy (sessions, engines), transactions (commits, locks, lost updates), migrations (Alembic), security (tenant and RLS signals), architecture (layers, modules, cycles, import-linter); select with `--category`, emit `--format markdown`, compare with `--baseline`. Each finding states its `verification`: `static`, `needs_runtime_check` or `not_verifiable_statically`, plus a recommended test. Findings in test code are reported with `environment: test` and lower confidence, never hidden unless `--exclude-tests` is passed; findings under a documented `# noqa: ASYNC2xx` or `# audit-fastapi: ignore` stay listed as suppressed. The auditor never runs migrations or queries.
 
 Every audit finding carries one of four evidence states: **observed and reproduced**, **suspected, backed by evidence**, **not verifiable with the available information**, or **fixed and verified**. Static output alone never reaches the first state. Keep style observations out of the defect list, and never present a heuristic finding as a demonstrated vulnerability.
 

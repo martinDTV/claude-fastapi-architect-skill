@@ -158,3 +158,9 @@ Never big-bang rewrite. Extract one module at a time, keeping the system working
 ## Writing an ADR
 
 Use `assets/adr-template.md`. Store as `docs/adr/NNNN-short-title.md`, numbered sequentially. Write one when a decision is costly to reverse: choosing the stage of the system, database, sync vs async stack, authentication provider, service extraction, messaging technology. Keep it under one page. An ADR is never edited after acceptance; a new ADR supersedes it.
+
+## Boundary checks by the auditor and how they relate to import-linter (v1.4)
+
+The auditor's `architecture` category infers layers from paths (router, service, repository, domain, adapter, core) and the business-modules root (the shallowest `modules/` or `features/` directory with two or more packages), then reports: a service or repository importing FastAPI, a domain module importing infrastructure, a repository importing a service, a module importing another module's internals instead of `public.py`, core importing a business module, and module-level import cycles. The inference is written to the report's `facts` block; `.audit-fastapi.json` can declare `layers` and `modules_root` for projects with other conventions (vertical slices, hexagonal, custom names), which raises the findings' confidence from medium to high.
+
+When the project already has import-linter contracts (`.importlinter`, `setup.cfg`, `pyproject.toml`), the auditor lists them and reports its own boundary findings with one confidence level less. The contracts are the source of truth: run `lint-imports` and do not add parallel rules that contradict them; use the auditor's findings to propose new contracts where none exist. Existing architectures are respected: a hexagonal layout with pure `domain/`, `application/` use cases and `adapters/` produces no findings; microservice repositories without layered directories are left alone; test files never participate in the graph.

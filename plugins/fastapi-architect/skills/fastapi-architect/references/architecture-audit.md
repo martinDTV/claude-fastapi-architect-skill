@@ -59,6 +59,17 @@ Test code and documented suppressions (schema 1.1): each finding carries `enviro
 
 Treat every auditor finding as **"suspected, backed by evidence"** at best. Open the file, confirm the context, then classify. Known blind spots are listed in section 14.
 
+Since v1.4 the auditor also covers SQLAlchemy sessions and engines (`SA_*`), transactions and concurrency (`TX_*`), Alembic migrations (`MIG_*`), authorization and multi-tenancy signals (`SEC_*`) and architecture boundaries (`ARCH_*`). The full catalogue, with what each rule proves, what it cannot and how to verify it, is `references/audit-rules.md`. Useful options for an audit:
+
+```bash
+python3 scripts/audit_fastapi.py <project> --format markdown > audit.md        # report to attach
+python3 scripts/audit_fastapi.py <project> --category migrations,transactions  # focus
+python3 scripts/audit_fastapi.py <project> --baseline previous.json             # new / fixed / unchanged
+python3 scripts/audit_fastapi.py <project> --changed-files changed.txt          # review only a diff
+```
+
+Each schema 1.2 finding carries `category`, `verification` (`static`, `needs_runtime_check`, `not_verifiable_statically`), a `recommended_test` and a `fingerprint` stable across line shifts. Map `verification` to the evidence states of section 6: `static` findings can be confirmed by reading; `needs_runtime_check` findings stay "suspected" until a measurement or a database test; `not_verifiable_statically` findings are questions that only a negative or concurrent test can answer. The `facts` block says what the tool inferred (layers, business-modules root, session factories, auth signals, import-linter contracts) so the report can state its assumptions explicitly.
+
 ## 3. Identifying layers and dependencies
 
 Folder names lie; imports do not. Determine the real structure from import edges:
