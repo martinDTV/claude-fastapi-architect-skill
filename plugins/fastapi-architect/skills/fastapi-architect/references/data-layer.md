@@ -124,3 +124,8 @@ The static auditor (`scripts/audit_fastapi.py`, category `sqlalchemy`) encodes t
 - **Engines and schema.** `create_engine` inside a handler builds a pool per request (`SA_ENGINE_CREATED_PER_CALL`); `metadata.create_all()` in application code bypasses Alembic (`SA_CREATE_ALL_AT_RUNTIME`). Both are fine in tests, which the tool classifies separately.
 
 Not determinable statically: whether an untyped object is a session, whether a session stored on `app.state` or `self` is used concurrently, lazy-load strategies at query time, and anything that happens inside helpers called from the handler. Confirm those with the pool metrics and the concurrency tests in `references/testing-matrix.md`.
+
+### v1.5 additions the auditor now follows across functions
+- A session's kind is known wherever it travels: `Depends(get_session)` return/yield types and caller arguments type the parameters of services and repositories, so an un-awaited `AsyncSession` method or a blocking sync `Session` call is reported inside helpers too, marked `evidence: inferred` when the type came from a caller.
+- `with session.begin()` inside a block that already began a transaction on the same session raises `InvalidRequestError`; use `begin_nested()` for a savepoint (`TX_NESTED_BEGIN`).
+- Relationships with the implicit `lazy="select"` strategy accessed under `AsyncSession` raise `MissingGreenlet`; declare `lazy="selectin"`, use `selectinload`/`joinedload` per query, or `lazy="raise"` to make the dependency explicit (`SA_ASYNC_LAZY_LOAD_RISK`). `examples/tenant-ledger/tests/test_antipatterns.py` reproduces both the error and the fix.

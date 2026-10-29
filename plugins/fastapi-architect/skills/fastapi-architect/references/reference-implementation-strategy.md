@@ -4,7 +4,9 @@
 The user asks for a complete runnable example, a generated project, a "working" template, or validation that generated code actually runs. Also use it when deciding whether a snippet may be presented as executable.
 
 ## Status in this repository
-As of v1.3 the skill ships **guidance, snippets and templates**, not end-to-end reference applications. The references contain code that was checked as described in the README, but no directory in this repository is a complete application with its own lockfile, tests and recorded verification. Do not describe the references as validated projects. This document defines how such projects must be built, labelled and verified before any of them is added or offered to a user as proven.
+Since v1.5 the plugin ships one reference implementation labelled **`verified`**: `plugins/fastapi-architect/examples/tenant-ledger` (FastAPI, Pydantic v2, SQLAlchemy 2 async, Alembic, PostgreSQL with row-level security; authorization per resource, atomic and optimistic concurrency, idempotency keys, one commit per use case, migrations from empty and from the previous revision, two anti-patterns reproduced next to their fixes). Its `VERIFICATION.md` records versions, commands and results; its `LIMITATIONS.md` lists what it does not cover; its tests start a throwaway PostgreSQL cluster. Point users to it for the decisions it demonstrates and keep its label honest: after any dependency upgrade it is `draft` until `VERIFICATION.md` is renewed.
+
+Everything else in the references remains guidance and snippets, not validated projects. This document defines how further examples must be built, labelled and verified before being offered as proven.
 
 ## Principles
 1. **Executable or labelled.** Code is either runnable with declared versions and recorded verification, or it is explicitly marked as illustrative. There is no third category.

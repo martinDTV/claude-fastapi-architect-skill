@@ -107,6 +107,21 @@ Architectures are not forced: a hexagonal layout with `domain/`, `application/`,
 - Code the interpreter cannot parse (newer syntax): `PY_SYNTAX`, partial analysis, rerun with the project's Python.
 - Dynamic SQL in migrations: reported once per file as information; read it.
 
+## Interprocedural rules (v1.5)
+
+Since v1.5 each finding also carries `evidence`: `verified` (pattern and symbols resolved from the AST), `inferred` (a kind was propagated from a caller or a dependency, or guessed from a name; confidence is lowered one level) or `unknown` (the finding is a question). Cross-function findings carry a `call_path`. `references/audit-engine.md` explains the engine and its limits.
+
+| Rule | Proves | Does not prove | Verify |
+|---|---|---|---|
+| `ASYNC_BLOCKING_CALL_INDIRECT` | An `async def` calls a synchronous project function that reaches a blocking call or sync `Session` I/O along a resolved call path (depth ≤ `--max-call-depth`) | That the caller never offloads the helper at a level the engine did not see | Concurrent latency test; read the functions in the `call_path` |
+| `TX_NESTED_BEGIN` | `with x.begin()` opened inside a block that already began a transaction on `x` | Nothing more; SQLAlchemy raises on this | Run the function; `InvalidRequestError` |
+| `SA_ASYNC_LAZY_LOAD_RISK` | In an `async def`, an attribute that is a relationship with implicit lazy strategy is accessed on an object loaded in that function without loader options | That the attribute is not already populated | Load the object through `AsyncSession` and touch the attribute: `MissingGreenlet`; then `selectinload`/`lazy="raise"` |
+| `RETRY_NON_IDEMPOTENT_WRITE` | A function under a retry decorator or an attempt loop performs (or reaches within two calls) a database or HTTP write and shows no idempotency signal (key header, dedup/request id, `ON CONFLICT`) | That the write is not idempotent by database design | Fault-injection: apply the write, drop the response, retry, assert one effect |
+| `BG_REQUEST_SCOPED_RESOURCE` | A route hands a dependency-provided session to `BackgroundTasks.add_task` or a task it creates | Whether the task finishes before the response in practice | Let the task outlive the response; closed-connection errors and pool checkout |
+| `BG_TASK_CONTEXT_UNVERIFIED` | From a function holding request context, a task is spawned whose target writes and neither receives principal/tenant/session context nor recreates one visibly | Anything about authorization inside the task (informational, `unknown`) | Trigger the task as tenant A with B's data reachable |
+
+Kinds propagated through `Depends(f)` return/yield types count as `verified`; kinds propagated from callers count as `inferred`. A shared `httpx.AsyncClient` is not reported: HTTP clients are designed for concurrent reuse, sessions are not.
+
 ## Backlog (not implemented on purpose)
 
-Lazy-loading strategy review, retries without idempotency keys, background tasks without authorization context, `SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count. Each needs either inter-procedural analysis or runtime data; they are documented here so their absence is not read as a clean bill.
+`SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count, outbox/inbox detection, resolution through object attributes and callbacks, decorators that replace functions. Each needs either deeper flow analysis or runtime data; they are documented here so their absence is not read as a clean bill.
