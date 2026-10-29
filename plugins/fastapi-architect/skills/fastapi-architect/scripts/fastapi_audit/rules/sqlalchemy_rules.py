@@ -259,6 +259,64 @@ def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict
                 )
             )
             break  # one finding per scheduler call
+        else:
+            _shared_through_self_methods(ctx, func, call, is_gather, dotted, attr, out)
+
+
+def _shared_through_self_methods(ctx: FileContext, func: FunctionInfo, call: ast.Call, is_gather: bool, dotted, attr, out: List[Finding]) -> None:
+    """v1.6: ``gather(self._debit(), self._credit())`` where both methods use ``self._session``.
+    The session attribute is shared between coroutines scheduled together: same defect, found
+    through the class's methods (call paths reported)."""
+    graph = getattr(ctx.facts, "callgraph", None) if ctx.facts is not None else None
+    if graph is None or not func.class_name or not is_gather:
+        return
+    attr_kinds = graph.attribute_kinds(ctx.relpath, func.class_name)
+    session_attrs = {a: ke for a, ke in attr_kinds.items() if ke[0] in SESSION_KINDS}
+    if not session_attrs:
+        return
+    cls = graph.class_record_for(ctx.relpath, func.class_name)
+    users: Dict[str, List[str]] = {}  # attr -> qualnames of scheduled methods (or direct uses) touching it
+    for arg in [*call.args, *[k.value for k in call.keywords]]:
+        inner = arg.value if isinstance(arg, ast.Await) else arg
+        if isinstance(arg, ast.Starred):
+            inner = arg.value
+        for sub in ast.walk(inner):  # self._session.execute(...) scheduled directly
+            if isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "self" and sub.attr in session_attrs:
+                users.setdefault(sub.attr, []).append(func.qualname)
+                break
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute) and isinstance(inner.func.value, ast.Name) and inner.func.value.id == "self" and cls is not None:
+            key = graph._method_through_bases(cls.key, inner.func.attr)
+            rec = graph.functions.get(key) if key else None
+            if rec is None:
+                continue
+            for a in rec.self_attr_receivers & set(session_attrs):
+                users.setdefault(a, []).append(rec.qualname)
+    for a, who in sorted(users.items()):
+        if len(who) < 2:
+            continue
+        kind, ev = session_attrs[a]
+        out.append(
+            new_finding(
+                "SA_SESSION_SHARED_CONCURRENTLY",
+                ctx.relpath,
+                call.lineno,
+                call.col_offset,
+                (
+                    f"'self.{a}' ({kind}) is used by {len(who)} coroutines scheduled together by asyncio.gather/wait in "
+                    f"'{func.qualname}': {', '.join(who)}. A session is not safe for concurrent use; give each task its own "
+                    "session from the factory, or run the steps sequentially."
+                    + ("" if ev == "verified" else f" (the kind of 'self.{a}' was inferred from a constructor call; confirm the annotation)")
+                ),
+                confidence="high" if ev == "verified" else "medium",
+                symbol="asyncio.gather/wait",
+                function=func.qualname,
+                environment=ctx.environment,
+                evidence=ev,
+                call_path=[func.qualname, *who, f"self.{a}"],
+                recommended_test=SHARED_TEST,
+            )
+        )
+        break
 
 
 def _check_engine_per_call(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:

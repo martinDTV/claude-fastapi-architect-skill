@@ -68,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum length of call paths followed by the interprocedural pass (default 4)",
     )
     parser.add_argument(
+        "--time-budget", type=float, default=5.0, metavar="SECONDS",
+        help="wall-clock budget for the interprocedural pass; when exceeded the report is still produced and marked truncated (default 5)",
+    )
+    parser.add_argument(
         "--no-interprocedural", action="store_true",
         help="skip the call-graph pass (no cross-function kinds, call paths or indirect blocking findings)",
     )
@@ -145,6 +149,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         baseline_name=os.path.basename(args.baseline) if args.baseline else None,
         interprocedural=not args.no_interprocedural,
         max_call_depth=max(1, args.max_call_depth),
+        time_budget_s=max(0.1, args.time_budget),
     )
     try:
         report = audit_project(args.path, options=options)

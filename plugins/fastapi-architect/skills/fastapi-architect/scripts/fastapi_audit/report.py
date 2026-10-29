@@ -105,13 +105,25 @@ def render_text(report: Dict[str, object]) -> str:
     inter = report.get("interprocedural")
     if isinstance(inter, dict) and inter.get("enabled"):
         res = inter.get("resolution") or {}
+        cov = inter.get("coverage") or {}
+        unc = inter.get("uncertainty") or {}
         lines.append(
             f"call graph: {inter.get('functions', 0)} functions, {inter.get('call_sites', 0)} call sites "
-            f"(project {res.get('project', 0)}, external {res.get('external', 0)}, dynamic {res.get('dynamic', 0)}, "
+            f"(project {res.get('project', 0)}, external {res.get('external', 0)}, builtin {res.get('builtin', 0)}, "
+            f"object {res.get('object', 0)}, ambiguous {res.get('ambiguous', 0)}, dynamic {res.get('dynamic', 0)}, "
             f"not found {res.get('not_found', 0)}), depth {inter.get('max_depth')}, "
-            f"params typed via dependencies {inter.get('dependency_params', 0)} / callers {inter.get('inferred_params', 0)}"
+            f"params typed via dependencies {inter.get('dependency_params', 0)} / callers {inter.get('inferred_params', 0)}, "
+            f"attribute kinds {inter.get('attribute_kinds', 0)}"
             + ("  TRUNCATED: " + str(inter.get("truncated_reason")) if inter.get("truncated") else "")
         )
+        if cov:
+            lines.append(
+                f"coverage: project-call {cov.get('project_call_coverage')} of {cov.get('resolvable_sites', 0)} resolvable sites, "
+                f"classified {cov.get('classified_ratio')}; uncertainty: {unc.get('ambiguous_sites', 0)} ambiguous, "
+                f"{unc.get('dynamic_sites', 0)} dynamic, {unc.get('callback_params_unresolved', 0)} callbacks unresolved, "
+                f"{unc.get('interfaces', 0)} interfaces"
+                + (f"; summaries skipped {inter.get('files_skipped')} file(s)" if inter.get("files_skipped") else "")
+            )
     elif isinstance(inter, dict):
         lines.append("call graph: disabled (--no-interprocedural)")
     comparison = report.get("comparison")
@@ -164,6 +176,16 @@ def render_markdown(report: Dict[str, object]) -> str:
     out.append(f"# FastAPI static audit ({TOOL_NAME} {TOOL_VERSION})")
     out.append("")
     out.append(f"- Root: `{report['project_root']}`")
+    inter = report.get("interprocedural")
+    if isinstance(inter, dict) and inter.get("enabled"):
+        res = inter.get("resolution") or {}
+        cov = inter.get("coverage") or {}
+        out.append(
+            f"- Call graph: {inter.get('call_sites', 0)} call sites, {res.get('project', 0)} project edges, "
+            f"coverage {cov.get('project_call_coverage')} (classified {cov.get('classified_ratio')}), "
+            f"{res.get('ambiguous', 0)} ambiguous, {res.get('dynamic', 0)} dynamic"
+            + (" — truncated: " + str(inter.get("truncated_reason")) if inter.get("truncated") else "")
+        )
     out.append(f"- Schema {SCHEMA_VERSION}, parsed with Python {tool['python']}")
     out.append(f"- Files scanned: {report['files_scanned']}; skipped: {len(report['files_skipped'])}; tests excluded: {report['tests_excluded']}; partial analysis: {'yes' if summary['partial_analysis'] else 'no'}")  # type: ignore[arg-type]
     out.append(f"- Findings: {summary['findings_total']} (suppressed: {summary['suppressed']})")

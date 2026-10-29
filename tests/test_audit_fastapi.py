@@ -750,7 +750,8 @@ class ReportTests(ProjectCase):
         self.assertEqual(keys, sorted(keys))
         self.assertEqual(
             [f["file"] for f in findings],
-            ["app/a_first.py", "app/a_first.py", "app/a_first.py", "app/broken.py", "app/z_last.py", "app/z_last.py"],
+            # v1.6: requests.get without timeout adds REL_HTTP_CALL_WITHOUT_TIMEOUT on a_first.py
+            ["app/a_first.py", "app/a_first.py", "app/a_first.py", "app/a_first.py", "app/broken.py", "app/z_last.py", "app/z_last.py"],
         )
 
     def test_audit_does_not_modify_the_project(self) -> None:

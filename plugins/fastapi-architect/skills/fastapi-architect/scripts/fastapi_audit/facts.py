@@ -26,8 +26,11 @@ from .resolver import (
     dotted_name,
     iter_scope_nodes,
     module_imports,
+    relative_target,
     resolve_in_scopes,
 )
+
+MAX_CANONICAL_HOPS = 8  # re-export chains followed at most this far (cycle-safe)
 
 CONFIG_FILENAME = ".audit-fastapi.json"
 AUTH_RE = re.compile(
@@ -85,14 +88,53 @@ class ProjectFacts:
     relationships: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)  # model class dotted -> {attr: lazy}
     callgraph: Any = None  # callgraph.CallGraph when enabled
     interprocedural: Dict[str, Any] = field(default_factory=lambda: {"enabled": False})
+    # v1.6 symbol resolution
+    reexports: Dict[str, str] = field(default_factory=dict)  # "pkg.local" -> absolute origin of a module-level import
+    module_objects: Set[str] = field(default_factory=set)  # module-level bindings that are not functions/classes (routers, factories, constants)
+    module_instances: Dict[str, str] = field(default_factory=dict)  # module-level `obj = ProjectClass(...)` -> class dotted (resolved by the graph)
+    summary_failures: List[str] = field(default_factory=list)  # files whose function summaries hit a resource limit (graph skipped them)
+    alias_types: Dict[str, str] = field(default_factory=dict)  # Annotated alias -> raw dotted type (resolved lazily through re-exports)
 
     # ---- lookups ------------------------------------------------------------
+    def canonical(self, dotted: Optional[str]) -> Optional[str]:
+        """Follow module-level re-exports (``from .db import X`` in a facade, ``__init__`` exports)
+        to the defining module. Prefix-aware: ``pkg.Cls.method`` follows ``pkg.Cls``. Bounded and
+        cycle-safe; returns the input when nothing is known."""
+        if not dotted:
+            return dotted
+        current = dotted
+        for _ in range(MAX_CANONICAL_HOPS):
+            parts = current.split(".")
+            replaced = None
+            for cut in range(len(parts), 0, -1):
+                prefix = ".".join(parts[:cut])
+                target = self.reexports.get(prefix)
+                if target and target != prefix:
+                    replaced = ".".join([target, *parts[cut:]])
+                    break
+            if replaced is None or replaced == current:
+                return current
+            current = replaced
+        return current
+
     def alias_kind(self, dotted: str) -> Optional[str]:
-        return self.aliases.get(dotted)
+        kind = self.aliases.get(dotted)
+        if kind:
+            return kind
+        raw = self.alias_types.get(dotted)
+        if raw:
+            kind = TYPE_KINDS.get(self.canonical(raw) or "")
+            if kind:
+                self.aliases[dotted] = kind  # memoise; stable per project
+            return kind
+        return None
 
     def factory_kind(self, dotted: str) -> Optional[str]:
         if dotted in self.factories:
             return self.factories[dotted]
+        canon = self.canonical(dotted)
+        if canon and canon in self.factories:
+            return self.factories[canon]
         last = dotted.rsplit(".", 1)[-1]
         kinds = self.factory_last.get(last)
         if kinds and len(kinds) == 1:
@@ -253,17 +295,7 @@ def detect_import_linter(root: str) -> Optional[Dict[str, Any]]:
 
 
 def _relative_target(module: str, is_package: bool, level: int, name: Optional[str]) -> Optional[str]:
-    base_parts = module.split(".") if module else []
-    if not is_package:
-        base_parts = base_parts[:-1]
-    up = level - 1
-    if up > len(base_parts):
-        return None
-    base_parts = base_parts[: len(base_parts) - up] if up else base_parts
-    target = ".".join(base_parts)
-    if name:
-        target = f"{target}.{name}" if target else name
-    return target or None
+    return relative_target(module, is_package, level, name)
 
 
 def _has_keyword(call: ast.Call, name: str) -> bool:
@@ -293,6 +325,8 @@ def collect_summaries(
 
     start = _time.monotonic()
     truncated_reason: Optional[str] = None
+    project_roots = {name.split(".")[0] for name in facts.module_map}
+    summary_failures = 0
     for rel, full in files:
         if _time.monotonic() - start > time_budget_s:
             truncated_reason = f"time budget of {time_budget_s:.1f}s exceeded while summarising functions"
@@ -307,11 +341,16 @@ def collect_summaries(
             tree = ast.parse(data, filename=rel)
         except (OSError, SyntaxError, ValueError, RecursionError, MemoryError):
             continue
-        imports, bound = collect_scope(tree.body)
+        module = facts.file_module.get(rel, "")
+        imports, bound = collect_scope(tree.body, module=module, is_package=rel.endswith("__init__.py"))
         module_scope = _Scope("<module>", False, imports, bound)
         local_factories = module_level_factories(tree, lambda parts: resolve_in_scopes([module_scope], parts))
-        module = facts.file_module.get(rel, "")
-        records, classes = build_summaries(rel, module, tree, facts, local_factories)
+        try:
+            records, classes = build_summaries(rel, module, tree, facts, local_factories, project_roots)
+        except (RecursionError, MemoryError):
+            summary_failures += 1  # pathological nesting: the file keeps its per-file rules, the graph skips it
+            facts.summary_failures.append(rel)
+            continue
         alt_modules = [m for m in module_name_for(rel, facts.config.get("source_roots") or ["src"]) if m != module]
         for record in records:
             facts.functions[record.key] = record
@@ -324,11 +363,13 @@ def collect_summaries(
                 facts.class_aliases.setdefault(f"{alt}.{short}" if alt else short, cls.key)
     remaining = max(0.5, time_budget_s - (_time.monotonic() - start))
     graph = CallGraph(facts, max_depth=max_call_depth, time_budget_s=remaining).build()
+    graph.stats.time_budget_s = time_budget_s  # report the configured budget, never the remainder (determinism)
     if truncated_reason and not graph.stats.truncated:
         graph.stats.truncated, graph.stats.truncated_reason = True, truncated_reason
     graph.stats.elapsed_ms = int((_time.monotonic() - start) * 1000)
     facts.callgraph = graph
     facts.interprocedural = graph.stats.to_dict()
+    facts.interprocedural["files_skipped"] = summary_failures  # schema 1.4
 
 
 def collect_facts(
@@ -391,11 +432,53 @@ def collect_facts(
 def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
     module = facts.file_module.get(rel, "")
     is_package = rel.endswith("__init__.py")
-    imports, bound = collect_scope(tree.body)
+    imports, bound = collect_scope(tree.body, module=module, is_package=is_package)
     scopes = [Scope("<module>", False, imports, bound)]
 
     def resolve(parts):
         return resolve_in_scopes(scopes, parts)
+
+    # v1.6: module-level imports are re-exports of this module (facades, __init__ exports) and
+    # module-level non-callable bindings are "objects" (routers, factories, context vars, constants)
+    for stmt in tree.body:
+        for node in ast.walk(stmt) if isinstance(stmt, (ast.If, ast.Try)) else [stmt]:
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name == "*":
+                        continue
+                    local = alias.asname or alias.name
+                    if node.level == 0 and node.module:
+                        origin = f"{node.module}.{alias.name}"
+                    else:
+                        base = relative_target(module, is_package, node.level, node.module)
+                        origin = f"{base}.{alias.name}" if base else None
+                    if origin:
+                        facts.reexports.setdefault(f"{module}.{local}" if module else local, origin)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.asname:
+                        facts.reexports.setdefault(f"{module}.{alias.asname}" if module else alias.asname, alias.name)
+    object_modules = module_name_for(rel, facts.config.get("source_roots") or ["src"]) or [module]
+    for stmt in tree.body:
+        targets: List[str] = []
+        if isinstance(stmt, ast.Assign):
+            targets = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            targets = [stmt.target.id]
+        value = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        instance_cls = None
+        if isinstance(value, ast.Call):
+            cparts = dotted_name(value.func)
+            cdotted = resolve(cparts) if cparts else None
+            if cdotted is None and cparts and len(cparts) == 1 and cparts[0] in bound:
+                cdotted = f"{module}.{cparts[0]}" if module else cparts[0]  # a class defined in this module
+            if cdotted and cdotted.rsplit(".", 1)[-1][:1].isupper():
+                instance_cls = cdotted
+        for name in targets:
+            for owner in object_modules:
+                facts.module_objects.add(f"{owner}.{name}" if owner else name)
+                if instance_cls:
+                    facts.module_instances[f"{owner}.{name}" if owner else name] = instance_cls
 
     if module_imports(tree, ("fastapi",)):
         facts.uses_fastapi = True
@@ -482,6 +565,9 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
             dotted = annotation_to_dotted(value, resolve)
             if dotted in TYPE_KINDS:
                 alias_kind = TYPE_KINDS[dotted]
+            elif dotted:
+                for t in targets:  # resolved later through re-exports (facade-imported AsyncSession)
+                    facts.alias_types.setdefault(f"{module}.{t.id}" if module else t.id, dotted)
             # any Annotated[..., Depends(f)] alias: remember f so auth-looking dependencies are
             # recognised through the alias from other modules (MemberDep, CurrentUser, ...)
             for sub in ast.walk(value):

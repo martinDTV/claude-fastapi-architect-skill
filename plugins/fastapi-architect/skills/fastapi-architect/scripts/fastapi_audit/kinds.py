@@ -109,7 +109,12 @@ def kind_of_type(dotted: Optional[str], facts: Optional["ProjectFacts"]) -> Opti
     if dotted in TYPE_KINDS:
         return TYPE_KINDS[dotted]
     if facts is not None:
-        return facts.alias_kind(dotted)
+        kind = facts.alias_kind(dotted)
+        if kind:
+            return kind
+        canon = facts.canonical(dotted)  # v1.6: types re-exported through project facades
+        if canon and canon != dotted:
+            return TYPE_KINDS.get(canon) or facts.alias_kind(canon)
     return None
 
 
@@ -230,15 +235,20 @@ def function_kinds(
 
 
 def receiver_kind(call: ast.Call, kinds: Dict[str, str]) -> Optional[str]:
-    """Kind of ``x`` in ``x.method(...)`` when ``x`` is a plain name with a known kind."""
-    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-        return kinds.get(call.func.value.id)
-    return None
+    """Kind of ``x`` in ``x.method(...)`` when ``x`` is a plain name, or ``self.attr`` (v1.6), with a known kind."""
+    name = receiver_name(call)
+    return kinds.get(name) if name else None
 
 
 def receiver_name(call: ast.Call) -> Optional[str]:
-    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-        return call.func.value.id
+    """``x`` for ``x.method()``; ``self.attr`` for ``self.attr.method()`` (instance attributes, v1.6)."""
+    if not isinstance(call.func, ast.Attribute):
+        return None
+    value = call.func.value
+    if isinstance(value, ast.Name):
+        return value.id
+    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id in {"self", "cls"}:
+        return f"{value.value.id}.{value.attr}"
     return None
 
 
@@ -254,7 +264,8 @@ def function_kinds_ex(
     kinds = function_kinds(func, facts, local_factories)
     evidence: Dict[str, str] = {name: "verified" for name in kinds}
     if facts is not None and relpath is not None and getattr(facts, "callgraph", None) is not None:
-        record = facts.callgraph.record_for(relpath, func.qualname)
+        graph = facts.callgraph
+        record = graph.record_for(relpath, func.qualname)
         if record is not None:
             for name, kind in record.dependency_kinds.items():
                 if name not in kinds:
@@ -262,4 +273,11 @@ def function_kinds_ex(
             for name, kind in record.inferred_kinds.items():
                 if name not in kinds:
                     kinds[name], evidence[name] = kind, "inferred"
+        # v1.6: instance attributes typed in __init__ (self._session: AsyncSession) or through the
+        # arguments constructors receive; keyed as "self.<attr>" to match receiver_name()
+        if func.class_name:
+            for attr, (kind, ev) in graph.attribute_kinds(relpath, func.class_name).items():
+                key = f"self.{attr}"
+                if key not in kinds:
+                    kinds[key], evidence[key] = kind, ev
     return kinds, evidence

@@ -28,7 +28,7 @@ class CallGraphTests(unittest.TestCase):
         self.assertEqual(inter["functions"], 35)
         self.assertEqual(inter["call_sites"], 91)
         res = inter["resolution"]
-        self.assertEqual(set(res), {"project", "external", "dynamic", "not_found", "constructors"})
+        self.assertTrue({"project", "external", "dynamic", "not_found", "constructors"} <= set(res))  # 1.3 keys kept; 1.4 adds builtin/object/ambiguous
         self.assertEqual(sum(res.values()), inter["call_sites"])
         self.assertGreaterEqual(res["project"], 9)
         self.assertEqual(inter["dependency_params"], 4)  # db=Depends(get_db) in four routes
@@ -127,7 +127,7 @@ class NewRuleTests(unittest.TestCase):
         self.assertEqual(lines_of(self.report, "BG_TASK_CONTEXT_UNVERIFIED"), [18])
 
     def test_schema_1_3_fields(self) -> None:
-        self.assertEqual(self.report["schema_version"], "1.3")
+        self.assertGreaterEqual(tuple(int(x) for x in self.report["schema_version"].split(".")), (1, 3))
         for finding in self.report["findings"]:
             self.assertIn(finding["evidence"], {"verified", "inferred", "unknown"})
             self.assertIn("call_path", finding)

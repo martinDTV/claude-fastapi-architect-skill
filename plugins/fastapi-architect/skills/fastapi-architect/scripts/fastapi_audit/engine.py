@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from .discovery import DEFAULT_MAX_FILE_BYTES, classify_environment, iter_python_files
-from .facts import ProjectFacts, collect_facts, load_config
+from .facts import ProjectFacts, collect_facts, load_config, module_name_for
 from .kinds import module_level_factories
 from .model import (
     CATEGORIES,
@@ -64,6 +64,7 @@ class AuditOptions:
         return {
             "interprocedural": self.interprocedural,
             "max_call_depth": self.max_call_depth,
+            "time_budget_s": self.time_budget_s,  # schema 1.4
             "categories": sorted(self.categories) if self.categories is not None else sorted(CATEGORIES),
             "select_rules": sorted(self.select_rules) if self.select_rules is not None else None,
             "ignore_rules": sorted(self.ignore_rules),
@@ -110,7 +111,11 @@ def build_context(relpath: str, source: bytes, tree: ast.Module, facts: Optional
     fastapi_imported = module_imports(tree, ("fastapi",))
     sqlalchemy_imported = module_imports(tree, ("sqlalchemy", "sqlmodel"))
     alembic_imported = module_imports(tree, ("alembic",))
-    module_scope, functions = collect_functions(tree, fastapi_imported)
+    module = facts.file_module.get(relpath) if facts is not None else None
+    if module is None:
+        names = module_name_for(relpath, ["src"])
+        module = names[0] if names else None
+    module_scope, functions = collect_functions(tree, fastapi_imported, module=module, is_package=relpath.endswith("__init__.py"))
     if environment == ENV_APPLICATION and alembic_imported:
         is_revision = any(f.name == "upgrade" and f.parent is None for f in functions)
         is_env = os.path.basename(relpath) == "env.py"
@@ -181,10 +186,23 @@ def analyse_source(
     except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         finding = _parse_failure(relpath, environment, exc)
         return [finding] if _rule_enabled(finding.rule, options) else []
-    ctx = build_context(relpath, source, tree, facts)
+    try:
+        ctx = build_context(relpath, source, tree, facts)
+    except (RecursionError, MemoryError) as exc:
+        finding = _parse_failure(relpath, environment, exc)
+        return [finding] if _rule_enabled(finding.rule, options) else []
     raw: List[Finding] = []
     for module in FILE_RULE_MODULES:
-        raw.extend(module.run(ctx))
+        try:
+            raw.extend(module.run(ctx))
+        except (RecursionError, MemoryError) as exc:
+            # pathological nesting inside one rule module: keep the other modules' results and say so
+            raw.append(new_finding(
+                "ANALYSIS_PARTIAL", relpath, 1, 0,
+                f"Rule module '{module.__name__.rsplit('.', 1)[-1]}' hit a resource limit ({exc.__class__.__name__}) on this file "
+                "and reported nothing for it; the other rule modules ran. The analysis of this file is partial.",
+                confidence="high", environment=ctx.environment,
+            ))
     raw = [f for f in raw if _rule_enabled(f.rule, options)]
     comments = line_comments(source) if (options.honor_suppressions and raw) else {}
     return [_classify(f, ctx.environment, comments, options.honor_suppressions) for f in raw]
@@ -253,6 +271,13 @@ def audit_project(
     )
 
     findings: List[Finding] = []
+    for rel in sorted(facts.summary_failures):
+        findings.append(new_finding(
+            "ANALYSIS_PARTIAL", rel, 1, 0,
+            "The interprocedural pass hit a resource limit (recursion or memory) while summarising this file; "
+            "its functions are absent from the call graph. Per-file rules still ran on it.",
+            confidence="high", environment=classify_environment(rel),
+        ))
     for entry in skipped:
         if entry["reason"] == "unreadable_directory":
             findings.append(new_finding(
@@ -312,7 +337,7 @@ def audit_project(
         by_verification[finding.verification] = by_verification.get(finding.verification, 0) + 1
         suppressed += int(finding.suppressed)
 
-    partial = bool(skipped) or "PY_SYNTAX" in by_rule
+    partial = bool(skipped) or "PY_SYNTAX" in by_rule or "ANALYSIS_PARTIAL" in by_rule or bool(facts.interprocedural.get("truncated"))
     report: Dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "tool": {"name": TOOL_NAME, "version": TOOL_VERSION, "python": PYTHON_VERSION},

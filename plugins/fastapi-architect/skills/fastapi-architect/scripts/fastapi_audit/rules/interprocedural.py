@@ -34,7 +34,9 @@ def run(ctx: FileContext) -> List[Finding]:
             path = graph.blocking_path(callee_key)
             if not path:
                 continue
-            chain, symbol = path
+            chain, symbol, path_evidence = path
+            _edge_kind, edge_evidence = graph.edge_info(ctx.relpath, site.lineno, site.col)
+            evidence = "inferred" if "inferred" in (path_evidence, edge_evidence) else "verified"
             reported.add(callee_key)
             depth = len(chain)
             call_path = [record.key, *chain, symbol]
@@ -50,12 +52,13 @@ def run(ctx: FileContext) -> List[Finding]:
                         + " -> ".join(call_path)
                         + ". The event loop blocks for the whole helper. Offload the helper "
                         "(anyio.to_thread.run_sync), make the chain async, or declare the route with plain 'def'."
+                        + (" One step of this path was resolved through an interface, a callback or a caller-typed value (inferred); confirm the concrete target." if evidence == "inferred" else "")
                     ),
-                    confidence="high" if depth == 1 else "medium",
+                    confidence=("high" if depth == 1 else "medium") if evidence == "verified" else ("medium" if depth == 1 else "low"),
                     symbol=symbol,
                     function=func.qualname,
                     environment=ctx.environment,
-                    evidence="verified",
+                    evidence=evidence,
                     call_path=call_path,
                     recommended_test=(
                         "Run the async function concurrently with a trivial endpoint on one worker and measure the "

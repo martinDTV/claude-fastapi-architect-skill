@@ -8,9 +8,11 @@ from imports and local bindings alone"; when it cannot, it answers ``None``.
 from __future__ import annotations
 
 import ast
+import builtins
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
+BUILTIN_NAMES = frozenset(n for n in dir(builtins) if not n.startswith("_"))
 ROUTE_DECORATOR_METHODS = frozenset(
     {"get", "post", "put", "patch", "delete", "head", "options", "trace", "api_route"}
 )
@@ -39,14 +41,38 @@ class Scope:
     bound: Set[str] = field(default_factory=set)
 
 
+def relative_target(module: Optional[str], is_package: bool, level: int, name: Optional[str]) -> Optional[str]:
+    """Absolute dotted target of ``from <level dots><name> import ...`` seen from ``module``.
+
+    ``module`` is the importing file's dotted name (``app.modules.x.router``); for a package
+    ``__init__`` it is the package itself. ``None`` when the import climbs above the project root
+    or the module is unknown (the origin stays untracked, never guessed).
+    """
+    if module is None:
+        return None
+    base_parts = module.split(".") if module else []
+    if not is_package:
+        base_parts = base_parts[:-1]
+    up = level - 1
+    if up > len(base_parts):
+        return None
+    base_parts = base_parts[: len(base_parts) - up] if up else base_parts
+    target = ".".join(base_parts)
+    if name:
+        target = f"{target}.{name}" if target else name
+    return target or None
+
+
 def collect_scope(
-    body: Iterable[ast.AST], args: Optional[ast.arguments] = None
+    body: Iterable[ast.AST], args: Optional[ast.arguments] = None, module: Optional[str] = None, is_package: bool = False
 ) -> Tuple[Dict[str, Optional[str]], Set[str]]:
     """Collect imports and locally bound names of one scope.
 
     Nested function, class and lambda bodies are not descended into: they are
     separate scopes. A local name imported from two different modules in the
-    same scope is recorded as ambiguous (``None``) and never matched.
+    same scope is recorded as ambiguous (``None``) and never matched. Relative
+    imports resolve to absolute names when ``module`` is known (v1.6); otherwise
+    the local name is bound with an unknown origin, as before.
     """
     imports: Dict[str, Optional[str]] = {}
     bound: Set[str] = set()
@@ -87,7 +113,11 @@ def collect_scope(
                 if node.level == 0 and node.module:
                     record(local, node.module + "." + alias.name)
                 else:
-                    bound.add(local)  # relative import: origin unknown
+                    base = relative_target(module, is_package, node.level, node.module) if node.level > 0 else None
+                    if base:
+                        record(local, base + "." + alias.name)
+                    else:
+                        bound.add(local)  # relative import from an unknown module: origin unknown
         elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
             bound.add(node.id)
         elif isinstance(node, ast.ExceptHandler) and node.name:
@@ -256,16 +286,20 @@ def detect_route(
     return None
 
 
-def collect_functions(tree: ast.Module, fastapi_imported: bool) -> Tuple[Scope, List[FunctionInfo]]:
-    """Return the module scope and every function with its scope chain, in source order."""
-    imports, bound = collect_scope(tree.body)
+def collect_functions(
+    tree: ast.Module, fastapi_imported: bool, module: Optional[str] = None, is_package: bool = False
+) -> Tuple[Scope, List[FunctionInfo]]:
+    """Return the module scope and every function with its scope chain, in source order.
+
+    ``module``/``is_package`` let relative imports resolve to absolute names (v1.6)."""
+    imports, bound = collect_scope(tree.body, module=module, is_package=is_package)
     module_scope = Scope("<module>", False, imports, bound)
     functions: List[FunctionInfo] = []
 
     def walk(nodes: Iterable[ast.AST], scopes: List[Scope], class_name: Optional[str], parent: Optional[FunctionInfo]) -> None:
         for node in nodes:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                f_imports, f_bound = collect_scope(node.body, node.args)
+                f_imports, f_bound = collect_scope(node.body, node.args, module=module, is_package=is_package)
                 is_async = isinstance(node, ast.AsyncFunctionDef)
                 own = Scope(node.name, is_async, f_imports, f_bound)
                 chain = [*scopes, own]
@@ -285,7 +319,7 @@ def collect_functions(tree: ast.Module, fastapi_imported: bool) -> Tuple[Scope, 
                 functions.append(info)
                 walk(node.body, chain, None, info)
             elif isinstance(node, ast.ClassDef):
-                c_imports, c_bound = collect_scope(node.body)
+                c_imports, c_bound = collect_scope(node.body, module=module, is_package=is_package)
                 chain = [*scopes, Scope(node.name, False, c_imports, c_bound)]
                 walk(node.body, chain, node.name, parent)
             else:

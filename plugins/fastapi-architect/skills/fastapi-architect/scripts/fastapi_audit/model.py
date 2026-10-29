@@ -9,12 +9,14 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 TOOL_NAME = "audit_fastapi"
-TOOL_VERSION = "1.5.0"
+TOOL_VERSION = "1.6.0"
 # 1.0: base report. 1.1: environment/suppression fields. 1.2: category, fingerprint,
 # verification, recommended_test, migration environment, facts/config/comparison blocks.
 # 1.3: evidence and call_path per finding, interprocedural block, reliability category.
+# 1.4: resolution adds builtin/object/ambiguous; interprocedural adds edges, coverage, uncertainty,
+#      limits, attribute_kinds, files_skipped; config adds time_budget_s; ANALYSIS_PARTIAL rule.
 # Every field of an earlier schema keeps its name, type and meaning.
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 
 EVIDENCE_VERIFIED = "verified"  # pattern and symbols resolved directly from the AST
 EVIDENCE_INFERRED = "inferred"  # a type or flow was propagated from callers/dependencies or guessed from names
@@ -476,6 +478,89 @@ RULES.update(
                 "neither receives tenant/principal context nor recreates it visibly "
                 "(own session, tenant setting). Whether authorization and tenant scope "
                 "apply inside the task cannot be decided statically."
+            ),
+        },
+    }
+)
+
+RULES.update(
+    {
+        # ---- v1.6 ---------------------------------------------------------------
+        "ASYNC_TASK_REFERENCE_DROPPED": {
+            "severity": "medium",
+            "category": "async",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "asyncio.create_task()/ensure_future() is called and its result is dropped. The event "
+                "loop keeps only a weak reference to tasks, so a task with no other reference can be "
+                "garbage-collected mid-execution (Python docs: 'Save a reference to the result of this "
+                "function'). Keep the task in a collection, await it, or use a TaskGroup."
+            ),
+        },
+        "RETRY_UNBOUNDED": {
+            "severity": "medium",
+            "category": "reliability",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "A retry has no stop condition: a tenacity/retrying/backoff decorator without a stop or "
+                "max-attempts argument (their default is to retry forever), or a 'while True' retry loop "
+                "without an attempt counter. A persistent failure turns into a hung request or worker; "
+                "bound attempts and total time, with backoff and jitter."
+            ),
+        },
+        "REL_HTTP_CALL_WITHOUT_TIMEOUT": {
+            "severity": "medium",
+            "category": "reliability",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "An outbound HTTP call can wait forever: requests.* without timeout= (requests has no "
+                "default timeout), urlopen without timeout, or an httpx client built with timeout=None. "
+                "A stalled dependency then holds the worker, the pooled connection or the event loop task "
+                "indefinitely. Set an explicit timeout and handle it."
+            ),
+        },
+        "REL_DUAL_WRITE_WITHOUT_OUTBOX": {
+            "severity": "low",
+            "category": "reliability",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "One function commits a database change and publishes a message to a broker or queue, "
+                "with no outbox/inbox table visible. The two writes are not atomic: a crash between them "
+                "loses the message or publishes a change that was rolled back. Record the event in an "
+                "outbox row inside the same transaction and relay it from a worker."
+            ),
+        },
+        "SEC_TENANT_NOT_BOUND_TO_PRINCIPAL": {
+            "severity": "medium",
+            "category": "security",
+            "verification": VERIFICATION_NOT_STATIC,
+            "summary": (
+                "A route is authenticated, takes a tenant identifier from the request and uses it in "
+                "project calls, but no visible step binds that tenant to the authenticated principal: the "
+                "authentication dependency chain has no tenant parameter and the principal does not flow "
+                "where the tenant goes. If membership is checked elsewhere this is a false positive; "
+                "otherwise any authenticated caller can address any tenant. Not verifiable statically."
+            ),
+        },
+        "SEC_PRIVILEGE_CHANGE_UNVERIFIED": {
+            "severity": "medium",
+            "category": "security",
+            "verification": VERIFICATION_NOT_STATIC,
+            "summary": (
+                "A route changes roles, permissions or admin flags (attribute assignment or a grant/"
+                "revoke/promote call) and only a generic authentication signal is visible; no dependency "
+                "or parameter names an admin/owner/role/permission policy. Whether the caller is allowed "
+                "to change privileges cannot be decided statically; confirm with a negative test as a "
+                "plain member."
+            ),
+        },
+        "ANALYSIS_PARTIAL": {
+            "severity": "info",
+            "category": "files",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "A rule module hit a resource limit (recursion or memory) on this file and reported "
+                "nothing for it. The remaining rule modules ran; the file's analysis is partial."
             ),
         },
     }

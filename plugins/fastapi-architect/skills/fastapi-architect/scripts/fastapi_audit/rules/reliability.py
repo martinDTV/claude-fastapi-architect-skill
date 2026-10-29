@@ -230,10 +230,277 @@ def run(ctx: FileContext) -> List[Finding]:
     facts = ctx.facts
     graph = getattr(facts, "callgraph", None) if facts is not None else None
     if graph is None:
+        for func in ctx.functions:
+            kinds, _evidence = function_kinds_ex(func, facts, ctx.local_factories, ctx.relpath)
+            _run_v16(ctx, func, None, kinds, out)
         return out
     for func in ctx.functions:
         record = graph.record_for(ctx.relpath, func.qualname)
         kinds, evidence = function_kinds_ex(func, facts, ctx.local_factories, ctx.relpath)
         _retry(ctx, func, record, graph, out)
         _background(ctx, func, record, kinds, evidence, graph, out)
+        _run_v16(ctx, func, record, kinds, out)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# v1.6: dropped task references, unbounded retries, HTTP calls without timeout, dual writes
+# --------------------------------------------------------------------------- #
+
+import re as _re
+
+from ..kinds import CLIENT_KINDS as _CLIENT_KINDS, KIND_CLIENT as _KIND_CLIENT, receiver_kind as _receiver_kind, receiver_name as _receiver_name
+from ..resolver import annotation_to_dotted as _annotation_to_dotted, iter_scope_nodes as _iter_scope_nodes
+from .transactions import _reachable_network
+
+TASK_SPAWNERS = frozenset({"asyncio.create_task", "asyncio.ensure_future"})
+REQUESTS_CALLS = frozenset({f"requests.{v}" for v in ("get", "post", "put", "patch", "delete", "head", "options", "request")})
+HTTPX_CLIENTS = frozenset({"httpx.Client", "httpx.AsyncClient"})
+URLOPEN = frozenset({"urllib.request.urlopen"})
+RETRY_BOUNDS = {  # decorator -> keywords that bound it (absent => retries forever by the library's default)
+    "tenacity.retry": ("stop",),
+    "backoff.on_exception": ("max_tries", "max_time"),
+    "backoff.on_predicate": ("max_tries", "max_time"),
+    "retrying.retry": ("stop_max_attempt_number", "stop_max_delay"),
+    "retry.retry": ("tries",),
+    "retry.api.retry": ("tries",),
+}
+STRONG_PUBLISH = frozenset({"publish", "produce", "send_and_wait", "apply_async", "send_task", "enqueue", "enqueue_job", "xadd", "send_message", "basic_publish", "publish_event", "emit_event"})
+WEAK_PUBLISH = frozenset({"send", "put", "delay", "emit", "push"})
+PRODUCER_RE = _re.compile(r"producer|broker|kafka|publisher|bus|topic|queue|sqs|sns|rabbit|channel|exchange|stream|pubsub|nats|celery|dramatiq|arq", _re.I)
+OUTBOX_RE = _re.compile(r"outbox|inbox", _re.I)
+COUNTER_TOKENS = ("attempt", "retr", "tries")
+
+
+def _task_reference(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:
+    for node in func.scope_nodes():
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)):
+            continue
+        call = node.value
+        dotted = func.resolve_node(call.func)
+        attr = call.func.attr if isinstance(call.func, ast.Attribute) else None
+        loop_task = attr == "create_task" and _receiver_name(call) in {"loop", "event_loop"}
+        if dotted not in TASK_SPAWNERS and not loop_task:
+            continue
+        symbol = dotted or f"{_receiver_name(call)}.create_task"
+        out.append(
+            new_finding(
+                "ASYNC_TASK_REFERENCE_DROPPED",
+                ctx.relpath,
+                call.lineno,
+                call.col_offset,
+                (
+                    f"'{symbol}(...)' in '{func.qualname}' is a bare statement: nothing keeps a reference to the task. "
+                    "The event loop holds tasks weakly, so the task can be garbage-collected before it finishes and its "
+                    "exception is never observed. Store it (a set with add_done_callback(discard)), await it, or run it "
+                    "in an asyncio.TaskGroup."
+                ),
+                confidence="high",
+                symbol=symbol,
+                function=func.qualname,
+                environment=ctx.environment,
+                recommended_test="Spawn the task, drop every reference, force gc.collect() while it awaits, and assert the side effect still happens.",
+            )
+        )
+
+
+def _retry_unbounded(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:
+    for dec in getattr(func.node, "decorator_list", []):
+        call = dec if isinstance(dec, ast.Call) else None
+        target = dec.func if call is not None else dec
+        parts = dotted_name(target)
+        dotted = func.resolve(parts) if parts else None
+        if dotted not in RETRY_BOUNDS:
+            continue
+        bounds = RETRY_BOUNDS[dotted]
+        if call is not None and any(kw.arg in bounds for kw in call.keywords):
+            continue
+        out.append(
+            new_finding(
+                "RETRY_UNBOUNDED",
+                ctx.relpath,
+                dec.lineno,
+                dec.col_offset,
+                (
+                    f"'@{dotted}' on '{func.qualname}' has no {' / '.join(bounds)} argument, so by the library's default it "
+                    "retries forever. A dependency that stays down turns every call into a hang that holds the request, "
+                    "the worker and any open transaction. Bound attempts and total time; keep backoff with jitter."
+                ),
+                confidence="high",
+                symbol=dotted,
+                function=func.qualname,
+                environment=ctx.environment,
+                recommended_test="Point the operation at a dependency that always fails and assert it gives up within the documented budget.",
+            )
+        )
+    for node in func.scope_nodes():
+        if not isinstance(node, ast.While):
+            continue
+        test = node.test
+        forever = isinstance(test, ast.Constant) and bool(test.value) is True
+        if not forever:
+            continue
+        tries = [n for n in _iter_scope_nodes(node.body) if isinstance(n, ast.Try)]
+        if not tries:
+            continue
+        exits = any(isinstance(n, (ast.Break, ast.Return)) for t in tries for n in _iter_scope_nodes(t.body))
+        if not exits:
+            continue  # a worker loop that never leaves is not a retry
+        counter = any(
+            (isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and any(t in n.target.id.lower() for t in COUNTER_TOKENS))
+            or (isinstance(n, ast.Compare) and any(isinstance(c, ast.Name) and any(t in c.id.lower() for t in COUNTER_TOKENS) for c in [n.left, *n.comparators]))
+            for n in ast.walk(node)
+        )
+        if counter:
+            continue
+        out.append(
+            new_finding(
+                "RETRY_UNBOUNDED",
+                ctx.relpath,
+                node.lineno,
+                node.col_offset,
+                (
+                    f"'while True' retry loop at line {node.lineno} in '{func.qualname}': the body exits on success but "
+                    "goes around again on every exception with no attempt counter or deadline. A persistent failure "
+                    "loops forever. Add a bounded attempt count or a total time budget and give up explicitly."
+                ),
+                confidence="medium",
+                symbol="while True",
+                function=func.qualname,
+                environment=ctx.environment,
+                recommended_test="Make the operation fail permanently and assert the loop terminates with an error within the budget.",
+            )
+        )
+
+
+def _receiver_type(ctx: FileContext, func: FunctionInfo, call: ast.Call) -> Optional[str]:
+    """Declared type of ``x`` in ``x.method()``: a self attribute typed in __init__, an annotated
+    parameter, or a local built by a constructor call. Canonical through re-exports; None when unknown."""
+    name = _receiver_name(call)
+    if not name or ctx.facts is None:
+        return None
+    graph = getattr(ctx.facts, "callgraph", None)
+    if name.startswith("self.") and func.class_name and graph is not None:
+        cls = graph.class_record_for(ctx.relpath, func.class_name)
+        info = cls.attrs.get(name[5:]) if cls is not None else None
+        return ctx.facts.canonical(info.type) if info is not None and info.type else None
+    for arg in func.params():
+        if arg.arg == name:
+            return ctx.facts.canonical(_annotation_to_dotted(arg.annotation, func.resolve))
+    for node in func.scope_nodes():
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets) and isinstance(node.value, ast.Call):
+            parts = dotted_name(node.value.func)
+            return ctx.facts.canonical(func.resolve(parts)) if parts else None
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name) and item.optional_vars.id == name and isinstance(item.context_expr, ast.Call):
+                    parts = dotted_name(item.context_expr.func)
+                    return ctx.facts.canonical(func.resolve(parts)) if parts else None
+    return None
+
+
+def _http_timeout(ctx: FileContext, func: FunctionInfo, kinds, out: List[Finding]) -> None:
+    for call in iter_function_calls(func):
+        dotted = func.resolve_node(call.func)
+        keywords = {kw.arg for kw in call.keywords if kw.arg}
+        attr = call.func.attr if isinstance(call.func, ast.Attribute) else None
+        what: Optional[str] = None
+        confidence = "high"
+        if dotted in REQUESTS_CALLS and "timeout" not in keywords:
+            what = f"'{dotted}()' without timeout= (requests never times out by default)"
+        elif dotted in URLOPEN and "timeout" not in keywords and len(call.args) < 2:
+            what, confidence = f"'{dotted}()' without timeout (blocks until the socket default, usually forever)", "medium"
+        elif dotted in HTTPX_CLIENTS:
+            for kw in call.keywords:
+                if kw.arg == "timeout" and isinstance(kw.value, ast.Constant) and kw.value.value is None:
+                    what = f"'{dotted}(timeout=None)' disables httpx's default 5 s timeout for every request on this client"
+        elif attr in {"get", "post", "put", "patch", "delete", "head", "options", "request"} and "timeout" not in keywords:
+            if _receiver_kind(call, kinds) == _KIND_CLIENT:
+                rtype = _receiver_type(ctx, func, call) or ""
+                if rtype.startswith("requests."):  # httpx clients carry a default timeout; requests.Session does not
+                    what, confidence = f"'{_receiver_name(call)}.{attr}()' on a requests.Session without timeout=", "medium"
+        if what is None:
+            continue
+        out.append(
+            new_finding(
+                "REL_HTTP_CALL_WITHOUT_TIMEOUT",
+                ctx.relpath,
+                call.lineno,
+                call.col_offset,
+                (
+                    f"{what} in '{func.qualname}'. A stalled dependency then holds this worker, its pooled database "
+                    "connection and any open transaction indefinitely. Pass an explicit timeout (connect and read) and "
+                    "decide what the caller sees when it fires."
+                ),
+                confidence=confidence,
+                symbol=dotted or f"{_receiver_name(call)}.{attr}",
+                function=func.qualname,
+                environment=ctx.environment,
+                recommended_test="Point the call at a server that accepts the connection and never answers; assert the call fails within the configured timeout.",
+            )
+        )
+
+
+def _dual_write(ctx: FileContext, func: FunctionInfo, record, kinds, out: List[Finding]) -> None:
+    commits = []
+    publishes = []
+    for call in iter_function_calls(func):
+        if not isinstance(call.func, ast.Attribute):
+            continue
+        attr = call.func.attr
+        name = _receiver_name(call) or ""
+        kind = _receiver_kind(call, kinds)
+        if attr == "commit" and (kind in SESSION_KINDS or name in {"session", "db", "db_session", "self._session", "self.session", "self.db"}):
+            commits.append(call)
+        elif attr in STRONG_PUBLISH or (attr in WEAK_PUBLISH and PRODUCER_RE.search(name) and kind not in SESSION_KINDS and kind not in _CLIENT_KINDS):
+            publishes.append((call, attr in STRONG_PUBLISH))
+    if not commits or not publishes:
+        return
+    names = {n.id for n in ast.walk(func.node) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(func.node) if isinstance(n, ast.Attribute)}
+    texts = [n.value for n in ast.walk(func.node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    if any(OUTBOX_RE.search(n) for n in names) or any(OUTBOX_RE.search(t) for t in texts):
+        return
+    graph = getattr(ctx.facts, "callgraph", None) if ctx.facts is not None else None
+    external_publishes = []
+    for call, strong in publishes:
+        if graph is not None:
+            status, key = graph.site_target(ctx.relpath, call.lineno, call.col_offset)
+            if status == "project" and key:
+                # a project-owned queue: only a dual write when it leaves the database (network) itself
+                if _reachable_network(graph, key) is None:
+                    continue
+            elif status == "builtin":
+                continue  # a list/deque/dict: not a broker (module-level objects may well be one; kept)
+        external_publishes.append((call, strong))
+    publishes = external_publishes
+    if not publishes:
+        return
+    call, strong = publishes[0]
+    receiver = _receiver_name(call) or "?"
+    out.append(
+        new_finding(
+            "REL_DUAL_WRITE_WITHOUT_OUTBOX",
+            ctx.relpath,
+            call.lineno,
+            call.col_offset,
+            (
+                f"'{func.qualname}' commits a database transaction (line {commits[0].lineno}) and publishes through "
+                f"'{receiver}.{call.func.attr}()' (line {call.lineno}) with no outbox or inbox table in sight. The two "
+                "writes cannot be atomic: a crash or a broker error between them loses the event, and publishing "
+                "before the commit announces a change that may roll back. Insert an outbox row in the same transaction "
+                "and relay it from a worker; make the consumer idempotent."
+            ),
+            confidence="medium" if strong else "low",
+            symbol=f"{receiver}.{call.func.attr}",
+            function=func.qualname,
+            environment=ctx.environment,
+            recommended_test="Kill the process between commit and publish (fault injection); assert the event is still delivered after restart, exactly once.",
+        )
+    )
+
+
+def _run_v16(ctx: FileContext, func: FunctionInfo, record, kinds, out: List[Finding]) -> None:
+    _task_reference(ctx, func, out)
+    _retry_unbounded(ctx, func, out)
+    _http_timeout(ctx, func, kinds, out)
+    _dual_write(ctx, func, record, kinds, out)

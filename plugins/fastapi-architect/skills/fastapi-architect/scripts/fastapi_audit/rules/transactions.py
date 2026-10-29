@@ -4,7 +4,7 @@ read-modify-write without a lock or version, swallowed commit failures."""
 from __future__ import annotations
 
 import ast
-from typing import Dict, Iterator, List, Optional, Set
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from ..kinds import CLIENT_KINDS, SESSION_KINDS, SESSION_LIKE_NAMES, function_kinds, function_kinds_ex, receiver_kind, receiver_name
 from ..model import ENV_MIGRATION, Finding, new_finding
@@ -109,6 +109,27 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
             break  # one finding per loop
 
 
+NETWORK_DEPTH = 2
+
+
+def _reachable_network(graph, key: str, depth: int = 0, visited: Optional[Set[str]] = None) -> Optional[Tuple[List[str], str]]:
+    record = graph.functions.get(key)
+    if record is None:
+        return None
+    if record.network_calls:
+        return [key], record.network_calls[0][1]
+    if depth >= NETWORK_DEPTH:
+        return None
+    visited = (visited or set()) | {key}
+    for _site, callee in graph.edges.get(key, []):
+        if callee in visited:
+            continue
+        sub = _reachable_network(graph, callee, depth + 1, visited)
+        if sub:
+            return [key, *sub[0]], sub[1]
+    return None
+
+
 def _external_call_in_transaction(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding]) -> None:
     for node in func.scope_nodes():
         if not isinstance(node, (ast.With, ast.AsyncWith)):
@@ -136,6 +157,22 @@ def _external_call_in_transaction(ctx: FileContext, func: FunctionInfo, kinds: D
                 what, confidence = f"sleep '{dotted}'", "medium"
             elif name in CLIENT_LIKE_NAMES and attr in CLIENT_METHODS:
                 what, confidence = f"probable HTTP call '{name}.{attr}()'", "medium"
+            path_note = ""
+            evidence = "verified"
+            call_path = None
+            if what is None:
+                # v1.6: a project call inside the block whose callee reaches the network within two calls
+                graph = getattr(ctx.facts, "callgraph", None) if ctx.facts is not None else None
+                if graph is not None:
+                    status, key = graph.site_target(ctx.relpath, call.lineno, call.col_offset)
+                    reach = _reachable_network(graph, key) if (status == "project" and key) else None
+                    if reach:
+                        chain, symbol = reach
+                        _k, edge_ev = graph.edge_info(ctx.relpath, call.lineno, call.col_offset)
+                        evidence = "inferred" if edge_ev == "inferred" else "verified"
+                        what, confidence = f"network call '{symbol}' reached through {' -> '.join(chain)}", "medium" if evidence == "verified" else "low"
+                        call_path = [func.qualname, *chain, symbol]
+                        path_note = " The call path is reported as evidence; read those functions in order."
             if what is None or call.lineno in seen_lines:
                 continue
             seen_lines.add(call.lineno)
@@ -149,12 +186,14 @@ def _external_call_in_transaction(ctx: FileContext, func: FunctionInfo, kinds: D
                         f"{what} happens inside the transaction block opened at line {node.lineno} in "
                         f"'{func.qualname}'. Row locks and the pooled connection are held for the whole "
                         "network round trip (and its timeout). Call the external system before or after "
-                        "the transaction, or record the intent in an outbox table and send it from a worker."
+                        "the transaction, or record the intent in an outbox table and send it from a worker." + path_note
                     ),
                     confidence=confidence,
                     symbol=dotted or f"{name}.{attr}",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=evidence,
+                    call_path=call_path,
                     recommended_test="Stall the external call (slow fake) and observe lock waits / pool exhaustion on concurrent requests.",
                 )
             )
@@ -225,6 +264,26 @@ def _read_modify_write(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, st
         break  # one finding per function
 
 
+COMMIT_FAILURE_TYPES = frozenset({
+    "Exception", "BaseException", "SQLAlchemyError", "DBAPIError", "DatabaseError", "OperationalError", "IntegrityError",
+    "InterfaceError", "InternalError", "ProgrammingError", "PendingRollbackError", "InvalidRequestError", "StatementError",
+    "DataError", "NotSupportedError", "Error", "TimeoutError", "OSError", "ConnectionError",
+})
+
+
+def _catches_commit_failure(handler: ast.ExceptHandler) -> bool:
+    """True for bare ``except``, ``except Exception`` and database/driver error families: the only
+    handlers that can swallow a failed commit. Custom domain exceptions are not raised by commit()."""
+    if handler.type is None:
+        return True
+    names = [n for n in ast.walk(handler.type) if isinstance(n, (ast.Name, ast.Attribute))]
+    for n in names:
+        label = n.id if isinstance(n, ast.Name) else n.attr
+        if label in COMMIT_FAILURE_TYPES or label.endswith(("DBAPIError", "DatabaseError", "OperationalError", "IntegrityError", "SQLAlchemyError")):
+            return True
+    return False
+
+
 def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None) -> None:
     for node in func.scope_nodes():
         if not isinstance(node, ast.Try):
@@ -247,6 +306,8 @@ def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[s
             reraises = any(isinstance(n, ast.Raise) for n in iter_scope_nodes(handler.body))
             if has_rollback or reraises:
                 continue
+            if not _catches_commit_failure(handler):
+                continue  # v1.6: a handler for a domain exception never sees the commit's DBAPI error
             caught = ast.unparse(handler.type) if handler.type is not None and hasattr(ast, "unparse") else "Exception"
             ev = _receiver_evidence(commits[0], kinds, evidence)
             out.append(
