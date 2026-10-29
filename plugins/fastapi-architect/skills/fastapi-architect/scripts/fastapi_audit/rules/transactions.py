@@ -6,7 +6,7 @@ from __future__ import annotations
 import ast
 from typing import Dict, Iterator, List, Optional, Set
 
-from ..kinds import CLIENT_KINDS, SESSION_KINDS, SESSION_LIKE_NAMES, function_kinds, receiver_kind, receiver_name
+from ..kinds import CLIENT_KINDS, SESSION_KINDS, SESSION_LIKE_NAMES, function_kinds, function_kinds_ex, receiver_kind, receiver_name
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, dotted_name, iter_scope_nodes
 from . import FileContext
@@ -51,11 +51,27 @@ def _calls_in(nodes: List[ast.AST]) -> Iterator[ast.Call]:
 # --------------------------------------------------------------------------- #
 
 
-def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding]) -> None:
+def _receiver_evidence(call: ast.Call, kinds: Dict[str, str], evidence: Optional[Dict[str, str]]) -> str:
+    """'verified' when the receiver's session kind is declared/resolved, else 'inferred'."""
+    name = receiver_name(call)
+    if name and kinds.get(name) in SESSION_KINDS:
+        return (evidence or {}).get(name, "verified")
+    return "inferred"
+
+
+def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None) -> None:
     reported: Set[int] = set()
     for node in func.scope_nodes():
         if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             continue
+        # A retry/attempt loop (try: ... commit ... break / except: ...) commits once on success,
+        # and a worker tick loop (`while running: try: ... except: ...`) is one unit of work per
+        # tick by design. Neither is "one transaction per item".
+        tries = [s for s in node.body if isinstance(s, ast.Try)]
+        if tries and len(node.body) == len(tries) + sum(1 for s in node.body if isinstance(s, (ast.Expr, ast.Assign)) and not isinstance(getattr(s, "value", None), ast.Call)):
+            retry_like = any(isinstance(n, ast.Break) for t in tries for n in iter_scope_nodes(t.body))
+            if retry_like or isinstance(node, ast.While):
+                continue
         for call in _calls_in(node.body):
             if not (isinstance(call.func, ast.Attribute) and call.func.attr == "commit"):
                 continue
@@ -65,6 +81,9 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
             if confidence is None:
                 continue
             reported.add(id(call))
+            ev = _receiver_evidence(call, kinds, evidence)
+            if ev == "inferred" and confidence == "high":
+                confidence = "medium"
             name = receiver_name(call)
             out.append(
                 new_finding(
@@ -83,6 +102,7 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
                     symbol="session.commit",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=ev,
                     recommended_test="Make a later iteration fail and assert whether earlier rows should or should not remain committed.",
                 )
             )
@@ -205,7 +225,7 @@ def _read_modify_write(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, st
         break  # one finding per function
 
 
-def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding]) -> None:
+def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None) -> None:
     for node in func.scope_nodes():
         if not isinstance(node, ast.Try):
             continue
@@ -228,6 +248,7 @@ def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[s
             if has_rollback or reraises:
                 continue
             caught = ast.unparse(handler.type) if handler.type is not None and hasattr(ast, "unparse") else "Exception"
+            ev = _receiver_evidence(commits[0], kinds, evidence)
             out.append(
                 new_finding(
                     "TX_COMMIT_WITHOUT_ROLLBACK",
@@ -241,12 +262,61 @@ def _commit_without_rollback(ctx: FileContext, func: FunctionInfo, kinds: Dict[s
                         "PendingRollbackError; roll back (or use 'with session.begin()') and decide "
                         "explicitly whether the caller must see the error."
                     ),
-                    confidence="medium",
+                    confidence="medium" if ev == "verified" else "low",
                     symbol="session.rollback",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=ev,
                 )
             )
+
+
+def _nested_begin(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:
+    """``with x.begin()`` opened inside a block that already began a transaction on ``x``."""
+
+    def walk(stmts: List[ast.stmt], active: Set[str]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                opened: Set[str] = set()
+                for item in stmt.items:
+                    expr = item.context_expr
+                    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == "begin" and isinstance(expr.func.value, ast.Name):
+                        receiver = expr.func.value.id
+                        if receiver in active:
+                            out.append(
+                                new_finding(
+                                    "TX_NESTED_BEGIN",
+                                    ctx.relpath,
+                                    expr.lineno,
+                                    expr.col_offset,
+                                    (
+                                        f"'{receiver}.begin()' is opened inside a block that already began a transaction on "
+                                        f"'{receiver}' in '{func.qualname}'. SQLAlchemy raises InvalidRequestError ('A transaction "
+                                        "is already begun on this Session'). Use begin_nested() for a savepoint, or let the outer "
+                                        "transaction own this work."
+                                    ),
+                                    confidence="high",
+                                    symbol=f"{receiver}.begin",
+                                    function=func.qualname,
+                                    environment=ctx.environment,
+                                )
+                            )
+                        else:
+                            opened.add(receiver)
+                walk(stmt.body, active | opened)
+                continue
+            for field_name in ("body", "orelse", "finalbody", "handlers"):
+                children = getattr(stmt, field_name, None)
+                if isinstance(children, list) and children:
+                    if field_name == "handlers":
+                        for handler in children:
+                            walk(handler.body, active)
+                    else:
+                        walk([c for c in children if isinstance(c, ast.stmt)], active)
+
+    walk(func.body, set())
 
 
 def run(ctx: FileContext) -> List[Finding]:
@@ -256,9 +326,10 @@ def run(ctx: FileContext) -> List[Finding]:
     if not (ctx.sqlalchemy_imported or ctx.local_factories or (ctx.facts and ctx.facts.uses_sqlalchemy)):
         return out
     for func in ctx.functions:
-        kinds = function_kinds(func, ctx.facts, ctx.local_factories)
-        _commit_in_loop(ctx, func, kinds, out)
+        kinds, evidence = function_kinds_ex(func, ctx.facts, ctx.local_factories, ctx.relpath)
+        _commit_in_loop(ctx, func, kinds, out, evidence)
         _external_call_in_transaction(ctx, func, kinds, out)
         _read_modify_write(ctx, func, kinds, out)
-        _commit_without_rollback(ctx, func, kinds, out)
+        _commit_without_rollback(ctx, func, kinds, out, evidence)
+        _nested_begin(ctx, func, out)
     return out

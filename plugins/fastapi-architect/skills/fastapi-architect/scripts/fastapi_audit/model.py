@@ -6,14 +6,19 @@ import hashlib
 import platform
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 TOOL_NAME = "audit_fastapi"
-TOOL_VERSION = "1.4.0"
+TOOL_VERSION = "1.5.0"
 # 1.0: base report. 1.1: environment/suppression fields. 1.2: category, fingerprint,
 # verification, recommended_test, migration environment, facts/config/comparison blocks.
+# 1.3: evidence and call_path per finding, interprocedural block, reliability category.
 # Every field of an earlier schema keeps its name, type and meaning.
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
+
+EVIDENCE_VERIFIED = "verified"  # pattern and symbols resolved directly from the AST
+EVIDENCE_INFERRED = "inferred"  # a type or flow was propagated from callers/dependencies or guessed from names
+EVIDENCE_UNKNOWN = "unknown"  # the property could not be resolved; the finding is a question
 PYTHON_VERSION = platform.python_version()
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
@@ -36,6 +41,7 @@ CATEGORIES: Tuple[str, ...] = (
     "migrations",
     "security",
     "architecture",
+    "reliability",
     "files",
 )
 
@@ -402,6 +408,79 @@ RULES: Dict[str, Dict[str, str]] = {
     },
 }
 
+RULES.update(
+    {
+        # ---- v1.5 interprocedural ------------------------------------------
+        "ASYNC_BLOCKING_CALL_INDIRECT": {
+            "severity": "medium",
+            "category": "async",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "An async function calls a synchronous project helper that, along a "
+                "resolved call path, performs a blocking call or synchronous database "
+                "I/O. The event loop stalls just as with a direct call; the call path "
+                "is reported as evidence."
+            ),
+        },
+        "TX_NESTED_BEGIN": {
+            "severity": "high",
+            "category": "transactions",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "session.begin() is opened inside a block that already began a "
+                "transaction on the same session. SQLAlchemy raises InvalidRequestError "
+                "('a transaction is already begun'); use begin_nested() for a savepoint "
+                "or let the outer transaction own the work."
+            ),
+        },
+        "SA_ASYNC_LAZY_LOAD_RISK": {
+            "severity": "medium",
+            "category": "sqlalchemy",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "An ORM relationship with an implicit lazy strategy is accessed in an "
+                "async function after the object was loaded without an explicit "
+                "loader option. Under AsyncSession the implicit lazy load raises "
+                "MissingGreenlet; with a closed session it raises DetachedInstanceError. "
+                "Use selectinload/joinedload, lazy='selectin', or lazy='raise' as a guard."
+            ),
+        },
+        "RETRY_NON_IDEMPOTENT_WRITE": {
+            "severity": "medium",
+            "category": "reliability",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "A retried operation (retry decorator or hand-written retry loop) "
+                "performs a database or HTTP write and no idempotency signal is visible "
+                "(idempotency key, dedup/request id, ON CONFLICT). After a lost response "
+                "the write can execute twice. Verify with a fault-injection test."
+            ),
+        },
+        "BG_REQUEST_SCOPED_RESOURCE": {
+            "severity": "high",
+            "category": "reliability",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "A request-scoped session provided by a dependency is handed to a "
+                "background task (BackgroundTasks.add_task or a task created in the "
+                "handler). The dependency closes the session when the response is sent, "
+                "while the task is still running; create a session inside the task."
+            ),
+        },
+        "BG_TASK_CONTEXT_UNVERIFIED": {
+            "severity": "info",
+            "category": "reliability",
+            "verification": VERIFICATION_NOT_STATIC,
+            "summary": (
+                "A background task writes to the database or an external system and "
+                "neither receives tenant/principal context nor recreates it visibly "
+                "(own session, tenant setting). Whether authorization and tenant scope "
+                "apply inside the task cannot be decided statically."
+            ),
+        },
+    }
+)
+
 RULE_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     category: tuple(sorted(r for r, meta in RULES.items() if meta["category"] == category))
     for category in CATEGORIES
@@ -427,6 +506,8 @@ class Finding:
     category: str = "files"  # schema 1.2
     verification: str = VERIFICATION_STATIC  # schema 1.2
     recommended_test: Optional[str] = None  # schema 1.2
+    evidence: str = EVIDENCE_VERIFIED  # schema 1.3
+    call_path: Optional[Tuple[str, ...]] = None  # schema 1.3: caller -> ... -> symbol
 
     @property
     def fingerprint(self) -> str:
@@ -460,6 +541,8 @@ class Finding:
             "verification": self.verification,
             "recommended_test": self.recommended_test,
             "fingerprint": self.fingerprint,
+            "evidence": self.evidence,
+            "call_path": list(self.call_path) if self.call_path else None,
         }
 
     def sort_key(self) -> Tuple[str, int, int, str, str, str]:
@@ -480,6 +563,8 @@ def new_finding(
     verification: Optional[str] = None,
     recommended_test: Optional[str] = None,
     severity: Optional[str] = None,
+    evidence: str = EVIDENCE_VERIFIED,
+    call_path: Optional[Sequence[str]] = None,
 ) -> Finding:
     """Build a Finding with severity, category and default verification from the catalogue."""
     meta = RULES[rule]
@@ -497,4 +582,6 @@ def new_finding(
         category=meta["category"],
         verification=verification or meta["verification"],
         recommended_test=recommended_test,
+        evidence=evidence,
+        call_path=tuple(call_path) if call_path else None,
     )

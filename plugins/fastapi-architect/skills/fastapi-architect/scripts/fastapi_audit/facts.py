@@ -76,6 +76,14 @@ class ProjectFacts:
     imports: Dict[str, List[Tuple[str, int, bool]]] = field(default_factory=dict)  # rel -> [(dotted, line, module_level)]
     parse_failures: List[str] = field(default_factory=list)
     suffix_index: Dict[str, Set[str]] = field(default_factory=dict)  # dotted suffix -> rels
+    # v1.5 interprocedural
+    functions: Dict[str, Any] = field(default_factory=dict)  # key -> summaries.FunctionRecord
+    classes: Dict[str, Any] = field(default_factory=dict)  # key -> summaries.ClassRecord
+    function_aliases: Dict[str, str] = field(default_factory=dict)  # "app.x.f" -> "src.app.x.f" (source-root variants)
+    class_aliases: Dict[str, str] = field(default_factory=dict)
+    relationships: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)  # model class dotted -> {attr: lazy}
+    callgraph: Any = None  # callgraph.CallGraph when enabled
+    interprocedural: Dict[str, Any] = field(default_factory=lambda: {"enabled": False})
 
     # ---- lookups ------------------------------------------------------------
     def alias_kind(self, dotted: str) -> Optional[str]:
@@ -266,6 +274,62 @@ def _has_keyword(call: ast.Call, name: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def collect_summaries(
+    facts: ProjectFacts,
+    files: List[Tuple[str, str]],
+    *,
+    max_file_bytes: int,
+    max_call_depth: int,
+    time_budget_s: float,
+) -> None:
+    """Second read-only pass: per-function summaries and the conservative call graph."""
+    import time as _time
+
+    from .callgraph import CallGraph
+    from .kinds import module_level_factories
+    from .resolver import Scope as _Scope
+    from .summaries import build_summaries
+
+    start = _time.monotonic()
+    truncated_reason: Optional[str] = None
+    for rel, full in files:
+        if _time.monotonic() - start > time_budget_s:
+            truncated_reason = f"time budget of {time_budget_s:.1f}s exceeded while summarising functions"
+            break
+        if rel in facts.parse_failures:
+            continue
+        try:
+            if os.stat(full).st_size > max_file_bytes:
+                continue
+            with open(full, "rb") as handle:
+                data = handle.read()
+            tree = ast.parse(data, filename=rel)
+        except (OSError, SyntaxError, ValueError, RecursionError, MemoryError):
+            continue
+        imports, bound = collect_scope(tree.body)
+        module_scope = _Scope("<module>", False, imports, bound)
+        local_factories = module_level_factories(tree, lambda parts: resolve_in_scopes([module_scope], parts))
+        module = facts.file_module.get(rel, "")
+        records, classes = build_summaries(rel, module, tree, facts, local_factories)
+        alt_modules = [m for m in module_name_for(rel, facts.config.get("source_roots") or ["src"]) if m != module]
+        for record in records:
+            facts.functions[record.key] = record
+            for alt in alt_modules:
+                facts.function_aliases.setdefault(f"{alt}.{record.qualname}" if alt else record.qualname, record.key)
+        for cls in classes:
+            facts.classes[cls.key] = cls
+            short = cls.key.rsplit(".", 1)[-1]
+            for alt in alt_modules:
+                facts.class_aliases.setdefault(f"{alt}.{short}" if alt else short, cls.key)
+    remaining = max(0.5, time_budget_s - (_time.monotonic() - start))
+    graph = CallGraph(facts, max_depth=max_call_depth, time_budget_s=remaining).build()
+    if truncated_reason and not graph.stats.truncated:
+        graph.stats.truncated, graph.stats.truncated_reason = True, truncated_reason
+    graph.stats.elapsed_ms = int((_time.monotonic() - start) * 1000)
+    facts.callgraph = graph
+    facts.interprocedural = graph.stats.to_dict()
+
+
 def collect_facts(
     root: str,
     files: List[Tuple[str, str]],
@@ -273,6 +337,9 @@ def collect_facts(
     config: Optional[Dict[str, Any]] = None,
     config_source: Optional[str] = None,
     max_file_bytes: int = 5 * 1024 * 1024,
+    interprocedural: bool = True,
+    max_call_depth: int = 4,
+    time_budget_s: float = 5.0,
 ) -> ProjectFacts:
     facts = ProjectFacts(root=os.path.abspath(root), config=dict(config or {}), config_source=config_source)
     facts.files = [rel for rel, _ in files]
@@ -313,6 +380,10 @@ def collect_facts(
         _collect_from_tree(facts, rel, tree)
 
     facts.parse_failures.sort()
+    if interprocedural:
+        collect_summaries(facts, files, max_file_bytes=max_file_bytes, max_call_depth=max_call_depth, time_budget_s=time_budget_s)
+    else:
+        facts.interprocedural = {"enabled": False, "max_depth": max_call_depth}
     return facts
 
 
@@ -366,6 +437,29 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
                         if alias.name != "*":
                             edges.append((f"{base}.{alias.name}", node.lineno, id(node) in module_level_ids))
     facts.imports[rel] = edges
+
+    # ORM relationships per model class (for the async lazy-load rule)
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.ClassDef):
+            continue
+        rels: Dict[str, Optional[str]] = {}
+        for item in stmt.body:
+            value = item.value if isinstance(item, (ast.Assign, ast.AnnAssign)) else None
+            if not isinstance(value, ast.Call):
+                continue
+            parts = dotted_name(value.func)
+            dotted = resolve(parts) if parts else None
+            if dotted not in {"sqlalchemy.orm.relationship", "sqlalchemy.orm.relationships.relationship", "sqlmodel.Relationship"}:
+                continue
+            names = [t.id for t in item.targets if isinstance(t, ast.Name)] if isinstance(item, ast.Assign) else ([item.target.id] if isinstance(item.target, ast.Name) else [])
+            lazy = None
+            for kw in value.keywords:
+                if kw.arg == "lazy" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    lazy = kw.value.value
+            for name in names:
+                rels[name] = lazy
+        if rels:
+            facts.relationships[f"{module}.{stmt.name}" if module else stmt.name] = rels
 
     # module-level bindings: factories, Annotated aliases, protected routers
     for stmt in tree.body:

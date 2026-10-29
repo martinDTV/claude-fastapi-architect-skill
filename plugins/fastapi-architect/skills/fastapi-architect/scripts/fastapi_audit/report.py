@@ -102,6 +102,18 @@ def render_text(report: Dict[str, object]) -> str:
                 ]
             )
         )
+    inter = report.get("interprocedural")
+    if isinstance(inter, dict) and inter.get("enabled"):
+        res = inter.get("resolution") or {}
+        lines.append(
+            f"call graph: {inter.get('functions', 0)} functions, {inter.get('call_sites', 0)} call sites "
+            f"(project {res.get('project', 0)}, external {res.get('external', 0)}, dynamic {res.get('dynamic', 0)}, "
+            f"not found {res.get('not_found', 0)}), depth {inter.get('max_depth')}, "
+            f"params typed via dependencies {inter.get('dependency_params', 0)} / callers {inter.get('inferred_params', 0)}"
+            + ("  TRUNCATED: " + str(inter.get("truncated_reason")) if inter.get("truncated") else "")
+        )
+    elif isinstance(inter, dict):
+        lines.append("call graph: disabled (--no-interprocedural)")
     comparison = report.get("comparison")
     if isinstance(comparison, dict):
         c = comparison["counts"]
@@ -117,12 +129,16 @@ def render_text(report: Dict[str, object]) -> str:
         if title:
             lines.append(title)
         for item in items:
+            evidence = item.get("evidence")
+            tag = f"/{evidence}" if evidence and evidence != "verified" else ""
             lines.append(
                 f"{item['file']}:{item['line']}:{item['column']}  {item['rule']}  "
-                f"[{item['severity']}/{item['confidence']}/{item['environment']}]  "
+                f"[{item['severity']}/{item['confidence']}/{item['environment']}{tag}]  "
                 f"{item['message']}"
                 + (f"  (suppressed: {item['suppression']})" if item["suppressed"] else "")
             )
+            if item.get("call_path"):
+                lines.append("    call path: " + " -> ".join(item["call_path"]))
     lines.append("")
     lines.append("disclaimer: " + str(report["disclaimer"]))
     return "\n".join(lines) + "\n"

@@ -28,11 +28,11 @@ from .model import (
 )
 from .report import compare_with_baseline
 from .resolver import awaited_call_ids, collect_functions, module_imports, resolve_in_scopes
-from .rules import FileContext, architecture, async_rules, migrations, security, sqlalchemy_rules, transactions
+from .rules import FileContext, architecture, async_rules, interprocedural, migrations, reliability, security, sqlalchemy_rules, transactions
 from .suppressions import line_comments, suppression_for
 
-FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security)
-TEST_DOWNGRADE_PREFIXES = ("ASYNC_BLOCKING_CALL", "SA_", "TX_")
+FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security, interprocedural, reliability)
+TEST_DOWNGRADE_PREFIXES = ("ASYNC_BLOCKING_CALL", "SA_", "TX_", "RETRY_", "BG_")
 ASYNC_TEST_NOTE = (
     " Test code: the stalled event loop is the test's own; confirm the call does not run "
     "inside the system under test."
@@ -56,9 +56,14 @@ class AuditOptions:
     config_path: Optional[str] = None
     baseline: Optional[Dict[str, Any]] = None
     baseline_name: Optional[str] = None
+    interprocedural: bool = True  # v1.5: summaries + call graph
+    max_call_depth: int = 4
+    time_budget_s: float = 5.0
 
     def effective(self) -> Dict[str, Any]:
         return {
+            "interprocedural": self.interprocedural,
+            "max_call_depth": self.max_call_depth,
             "categories": sorted(self.categories) if self.categories is not None else sorted(CATEGORIES),
             "select_rules": sorted(self.select_rules) if self.select_rules is not None else None,
             "ignore_rules": sorted(self.ignore_rules),
@@ -236,7 +241,16 @@ def audit_project(
         include_globs=include_globs,
         exclude_globs=exclude_globs,
     )
-    facts = collect_facts(config_root, files, config=config, config_source=config_source, max_file_bytes=options.max_file_bytes)
+    facts = collect_facts(
+        config_root,
+        files,
+        config=config,
+        config_source=config_source,
+        max_file_bytes=options.max_file_bytes,
+        interprocedural=options.interprocedural,
+        max_call_depth=options.max_call_depth,
+        time_budget_s=options.time_budget_s,
+    )
 
     findings: List[Finding] = []
     for entry in skipped:
@@ -320,6 +334,7 @@ def audit_project(
         "findings": [finding.to_dict() for finding in findings],
         "config": options.effective(),
         "facts": facts.summary(),
+        "interprocedural": facts.interprocedural,
         "comparison": None,
         "disclaimer": DISCLAIMER,
     }

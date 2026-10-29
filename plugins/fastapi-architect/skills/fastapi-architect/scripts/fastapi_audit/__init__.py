@@ -17,6 +17,8 @@ from .discovery import (
 )
 from .engine import AuditOptions, analyse_source, audit_project, audit_source
 from .facts import CONFIG_FILENAME, ProjectFacts, collect_facts
+from .callgraph import DEFAULT_MAX_CALL_DEPTH, CallGraph, CallGraphStats
+from .kinds import function_kinds, function_kinds_ex
 from .model import (
     CATEGORIES,
     CONFIDENCE_DOWNGRADE,
@@ -25,6 +27,9 @@ from .model import (
     ENV_APPLICATION,
     ENV_MIGRATION,
     ENV_TEST,
+    EVIDENCE_INFERRED,
+    EVIDENCE_UNKNOWN,
+    EVIDENCE_VERIFIED,
     PYTHON_VERSION,
     RULE_CATEGORIES,
     RULES,

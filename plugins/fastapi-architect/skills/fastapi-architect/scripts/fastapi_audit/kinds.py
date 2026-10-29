@@ -222,3 +222,26 @@ def receiver_name(call: ast.Call) -> Optional[str]:
     if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
         return call.func.value.id
     return None
+
+
+def function_kinds_ex(
+    func: FunctionInfo,
+    facts: Optional["ProjectFacts"],
+    local_factories: Dict[str, str],
+    relpath: Optional[str] = None,
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """``(kinds, evidence)``: declared/local kinds (``verified``) merged with kinds the
+    interprocedural pass derived for this function's parameters: dependency returns
+    (``verified``) and caller propagation (``inferred``). Declared kinds win."""
+    kinds = function_kinds(func, facts, local_factories)
+    evidence: Dict[str, str] = {name: "verified" for name in kinds}
+    if facts is not None and relpath is not None and getattr(facts, "callgraph", None) is not None:
+        record = facts.callgraph.record_for(relpath, func.qualname)
+        if record is not None:
+            for name, kind in record.dependency_kinds.items():
+                if name not in kinds:
+                    kinds[name], evidence[name] = kind, "verified"
+            for name, kind in record.inferred_kinds.items():
+                if name not in kinds:
+                    kinds[name], evidence[name] = kind, "inferred"
+    return kinds, evidence

@@ -64,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fail-on-new", action="store_true", help="exit 1 if the comparison with --baseline shows new non-suppressed findings (at --fail-on severity or above when given)")
     parser.add_argument("--config", metavar="FILE", help="JSON config file (default: .audit-fastapi.json at the project root, if present)")
     parser.add_argument(
+        "--max-call-depth", type=int, default=4, metavar="N",
+        help="maximum length of call paths followed by the interprocedural pass (default 4)",
+    )
+    parser.add_argument(
+        "--no-interprocedural", action="store_true",
+        help="skip the call-graph pass (no cross-function kinds, call paths or indirect blocking findings)",
+    )
+    parser.add_argument(
         "--fail-on", choices=sorted(SEVERITY_ORDER, key=SEVERITY_ORDER.get),
         help="exit with status 1 if any non-suppressed finding has this severity or higher",
     )
@@ -135,6 +143,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         config_path=args.config,
         baseline=baseline,
         baseline_name=os.path.basename(args.baseline) if args.baseline else None,
+        interprocedural=not args.no_interprocedural,
+        max_call_depth=max(1, args.max_call_depth),
     )
     try:
         report = audit_project(args.path, options=options)

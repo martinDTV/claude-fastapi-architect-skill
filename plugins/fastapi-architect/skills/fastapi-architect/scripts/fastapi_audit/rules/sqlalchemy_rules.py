@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..kinds import (
     ASYNC_SESSION_COROUTINES,
@@ -16,6 +16,7 @@ from ..kinds import (
     SESSION_LIKE_NAMES,
     SYNC_SESSION_IO,
     function_kinds,
+    function_kinds_ex,
     kind_of_call,
     receiver_kind,
     receiver_name,
@@ -111,13 +112,15 @@ def _module_global_sessions(ctx: FileContext, out: List[Finding]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], deferred: Set[int], out: List[Finding]) -> None:
+def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], evidence: Dict[str, str], deferred: Set[int], out: List[Finding]) -> None:
     for call in iter_function_calls(func):
         if not isinstance(call.func, ast.Attribute):
             continue
         attr = call.func.attr
         kind = receiver_kind(call, kinds)
         name = receiver_name(call)
+        ev = evidence.get(name or "", "verified")
+        note = "" if ev == "verified" else f" (the type of '{name}' was inferred from a caller; confirm its annotation)"
         awaited = id(call) in ctx.awaited or id(call) in deferred
         if kind == KIND_ASYNC_SESSION and attr in ASYNC_SESSION_COROUTINES and not awaited:
             if id(call) in ctx.returned and not func.is_async:
@@ -131,12 +134,13 @@ def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[
                     (
                         f"'{name}.{attr}()' is a coroutine method of an AsyncSession but is not "
                         f"awaited in '{func.qualname}', so it never executes (and Python warns "
-                        "'coroutine was never awaited'). Add 'await'."
+                        "'coroutine was never awaited'). Add 'await'." + note
                     ),
-                    confidence="high",
+                    confidence="high" if ev == "verified" else "medium",
                     symbol=f"AsyncSession.{attr}",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=ev,
                 )
             )
             continue
@@ -153,12 +157,13 @@ def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[
                         f"'{name}.{attr}()' performs synchronous database I/O on a Session inside "
                         f"async function '{func.qualname}', blocking the event loop. Use an "
                         "AsyncSession, run the work in a thread (anyio.to_thread.run_sync), or "
-                        "declare the route with plain 'def'."
+                        "declare the route with plain 'def'." + note
                     ),
-                    confidence="high",
+                    confidence="high" if ev == "verified" else "medium",
                     symbol=f"Session.{attr}",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=ev,
                     recommended_test="Measure event-loop lag or concurrent latency while this handler runs a slow query.",
                 )
             )
@@ -178,6 +183,7 @@ def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[
                     symbol="Session.query",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence="inferred",
                 )
             )
         elif kind is None and name in SESSION_LIKE_NAMES and attr in {"commit", "execute", "flush", "refresh", "rollback", "scalar", "scalars"}:
@@ -197,11 +203,12 @@ def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[
                     symbol=f"?.{attr}",
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence="inferred",
                 )
             )
 
 
-def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding]) -> None:
+def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], evidence: Dict[str, str], out: List[Finding]) -> None:
     session_names = {n for n, k in kinds.items() if k in SESSION_KINDS}
     for call in iter_function_calls(func):
         dotted = func.resolve_node(call.func)
@@ -227,7 +234,9 @@ def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict
                 continue
             known = sname in session_names
             kind = kinds.get(sname, "session")
+            ev = evidence.get(sname, "verified") if known else "inferred"
             how = "asyncio.gather/wait" if is_gather else (dotted or attr or "a concurrent scheduler")
+            origin = "" if not known else ("" if ev == "verified" else ", type inferred from a caller")
             out.append(
                 new_finding(
                     "SA_SESSION_SHARED_CONCURRENTLY",
@@ -235,16 +244,17 @@ def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict
                     call.lineno,
                     call.col_offset,
                     (
-                        f"'{sname}' ({kind}{'' if known else ', type inferred from its name'}) is passed to "
+                        f"'{sname}' ({kind}{origin if known else ', type inferred from its name'}) is passed to "
                         f"{'several coroutines scheduled together by' if is_gather else 'work scheduled concurrently by'} "
                         f"{how} in '{func.qualname}'. A session is not safe for concurrent use; "
                         "create one session per task (async_sessionmaker() inside each coroutine) "
                         "or run the steps sequentially."
                     ),
-                    confidence=("high" if (known and is_gather) else "medium" if known else "low"),
+                    confidence=("high" if (known and is_gather and ev == "verified") else "medium" if known else "low"),
                     symbol=how,
                     function=func.qualname,
                     environment=ctx.environment,
+                    evidence=ev,
                     recommended_test=SHARED_TEST,
                 )
             )
@@ -381,6 +391,116 @@ def _check_session_not_closed(ctx: FileContext, func: FunctionInfo, out: List[Fi
         )
 
 
+LOADER_OPTION_ATTRS = frozenset({"options", "selectinload", "joinedload", "subqueryload", "immediateload", "lazyload", "raiseload", "noload", "defaultload", "contains_eager"})
+IMPLICIT_LAZY = frozenset({None, "select"})
+ROW_LOADERS = frozenset({"get", "get_one", "scalar", "scalar_one", "scalar_one_or_none", "one", "one_or_none", "first", "scalars", "unique", "all"})
+LAZY_TEST = (
+    "Load the object through an AsyncSession in a test and access the relationship: expect "
+    "sqlalchemy.exc.MissingGreenlet; then add selectinload()/joinedload() (or lazy='selectin' on the "
+    "relationship) and assert the access succeeds. lazy='raise' turns the implicit load into an explicit error."
+)
+
+
+def _model_key(node: ast.AST, func: FunctionInfo, ctx: FileContext) -> Optional[str]:
+    """Project model class referenced by ``node`` (Name/Attribute), when it declares relationships."""
+    if ctx.facts is None or not ctx.facts.relationships:
+        return None
+    parts = dotted_name(node)
+    if not parts:
+        return None
+    dotted = func.resolve(parts)
+    candidates = [dotted] if dotted else []
+    module = ctx.facts.file_module.get(ctx.relpath, "")
+    candidates.append(f"{module}.{'.'.join(parts)}" if module else ".".join(parts))
+    for cand in candidates:
+        if cand in ctx.facts.relationships:
+            return cand
+        canon = ctx.facts.class_aliases.get(cand)  # app.models.Order -> src.app.models.Order
+        if canon and canon in ctx.facts.relationships:
+            return canon
+    return None
+
+
+def _check_lazy_load(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding]) -> None:
+    if not func.is_async or ctx.facts is None or not ctx.facts.relationships:
+        return
+    calls = list(iter_function_calls(func))
+    if any(isinstance(c.func, ast.Attribute) and c.func.attr in LOADER_OPTION_ATTRS for c in calls):
+        return  # loader options are used somewhere in this function: assume the author chose a strategy
+    if any((func.resolve_node(c.func) or "").startswith("sqlalchemy.orm.") and (func.resolve_node(c.func) or "").rsplit(".", 1)[-1] in LOADER_OPTION_ATTRS for c in calls):
+        return
+    loaded: Dict[str, Tuple[str, int]] = {}  # var -> (model key, line)
+    result_models: Dict[str, str] = {}  # result var -> model key (from select(Model))
+
+    def model_in_chain(node: ast.AST) -> Optional[str]:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and sub.args:
+                parts = dotted_name(sub.func)
+                if parts and parts[-1] in {"get", "get_one", "select"}:
+                    key = _model_key(sub.args[0], func, ctx)
+                    if key:
+                        return key
+        return None
+
+    for node in func.scope_nodes():
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            value = node.value.value if isinstance(node.value, ast.Await) else node.value
+            if not isinstance(value, ast.Call):
+                continue
+            key = model_in_chain(value)
+            attr = value.func.attr if isinstance(value.func, ast.Attribute) else None
+            if key and attr in ROW_LOADERS:
+                loaded[node.targets[0].id] = (key, node.lineno)
+            elif key and attr == "execute":
+                result_models[node.targets[0].id] = key
+            elif attr in ROW_LOADERS and isinstance(value.func, ast.Attribute):
+                recv = receiver_name(value)
+                if recv in result_models:
+                    loaded[node.targets[0].id] = (result_models[recv], node.lineno)
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
+            key = model_in_chain(node.iter)
+            recv = receiver_name(node.iter) if isinstance(node.iter, ast.Call) else None
+            if key:
+                loaded[node.target.id] = (key, node.lineno)
+            elif recv in result_models:
+                loaded[node.target.id] = (result_models[recv], node.lineno)
+    if not loaded:
+        return
+    reported: Set[Tuple[str, str]] = set()
+    for node in func.scope_nodes():
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and isinstance(node.ctx, ast.Load)):
+            continue
+        var = node.value.id
+        if var not in loaded or (var, node.attr) in reported:
+            continue
+        model, loaded_line = loaded[var]
+        rels = ctx.facts.relationships.get(model, {})
+        if node.attr not in rels or rels[node.attr] not in IMPLICIT_LAZY:
+            continue
+        reported.add((var, node.attr))
+        out.append(
+            new_finding(
+                "SA_ASYNC_LAZY_LOAD_RISK",
+                ctx.relpath,
+                node.lineno,
+                node.col_offset,
+                (
+                    f"'{var}.{node.attr}' is a relationship of '{model.rsplit('.', 1)[-1]}' with the implicit "
+                    f"lazy='{rels[node.attr] or 'select'}' strategy, accessed in async function '{func.qualname}' "
+                    f"after the object was loaded at line {loaded_line} without a loader option. Under AsyncSession "
+                    "the implicit load raises MissingGreenlet (or DetachedInstanceError once the session is closed). "
+                    "Load it eagerly (selectinload/joinedload, or lazy='selectin'), or set lazy='raise' to make the "
+                    "dependency explicit. Whether the attribute was already populated cannot be decided statically."
+                ),
+                confidence="medium",
+                symbol=f"{model.rsplit('.', 1)[-1]}.{node.attr}",
+                function=func.qualname,
+                environment=ctx.environment,
+                recommended_test=LAZY_TEST,
+            )
+        )
+
+
 def run(ctx: FileContext) -> List[Finding]:
     out: List[Finding] = []
     if ctx.environment == ENV_MIGRATION or ctx.alembic_imported:
@@ -392,11 +512,12 @@ def run(ctx: FileContext) -> List[Finding]:
     in_functions = {id(c) for f in ctx.functions for c in iter_function_calls(f)}
     _check_create_all(ctx, None, [c for c in module_calls if id(c) not in in_functions], out)
     for func in ctx.functions:
-        kinds = function_kinds(func, ctx.facts, ctx.local_factories)
+        kinds, evidence = function_kinds_ex(func, ctx.facts, ctx.local_factories, ctx.relpath)
         deferred = _deferred_call_ids(func)
-        _check_await_and_blocking(ctx, func, kinds, deferred, out)
-        _check_shared_concurrently(ctx, func, kinds, out)
+        _check_await_and_blocking(ctx, func, kinds, evidence, deferred, out)
+        _check_shared_concurrently(ctx, func, kinds, evidence, out)
         _check_engine_per_call(ctx, func, out)
         _check_create_all(ctx, func, iter_function_calls(func), out)
         _check_session_not_closed(ctx, func, out)
+        _check_lazy_load(ctx, func, kinds, out)
     return out
