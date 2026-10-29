@@ -18,7 +18,7 @@ Label: **`verified`** (see `VERIFICATION.md` for the recorded run). A small, com
 
 ## Not production authentication
 
-Requests identify themselves with the `X-Demo-User` header (`core/security.py`). This exists only so the example can show authorization, isolation and concurrency without an identity provider. Replace it with OIDC/JWT validation before any real use; see `references/authz-multitenancy.md` and `references/identity-threat-models.md` in the skill.
+Requests identify themselves with the `X-Demo-User` header (`modules/tenants/security.py`). This exists only so the example can show authorization, isolation and concurrency without an identity provider. Replace it with OIDC/JWT validation before any real use; see `references/authz-multitenancy.md` and `references/identity-threat-models.md` in the skill.
 
 ## Run the tests (no setup beyond PostgreSQL binaries)
 
