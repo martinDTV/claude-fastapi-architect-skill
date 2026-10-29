@@ -35,3 +35,9 @@ The auditor's `security` category reports review signals, never verdicts:
 - `SEC_ROUTE_WITHOUT_AUTH_SIGNAL`: informational; the route may be public by design.
 
 Not verifiable statically, and therefore never claimed by the tool: that a visible `Depends(get_current_user)` binds the tenant to that user; that RLS policies exist on every table, including join and audit tables; that the application role lacks `BYPASSRLS` and is not the table owner; that background jobs run with an explicit tenant context. Each of those is a negative test or a database query (`pg_policies`, `pg_roles`), listed in `references/testing-matrix.md`. Silence from the auditor is not a security result.
+
+### v1.6: what the auditor adds and what it still cannot say
+- Authentication reached through composed dependencies (`ctx = Depends(get_context)` where `get_context` depends on `get_current_user`) is recognised by following the chain; the absence of a function named `authorize` is never the evidence of a missing check.
+- `SEC_TENANT_NOT_BOUND_TO_PRINCIPAL` is a question (`evidence: unknown`): the route is authenticated, takes a tenant id from the request and uses it, and no visible step binds that tenant to the principal (no membership dependency, the principal does not flow where the tenant goes, no comparison between the two). Middleware, row-level security keyed on the principal or a check inside the service make it a false positive; a cross-tenant negative test settles it either way.
+- `SEC_PRIVILEGE_CHANGE_UNVERIFIED` is a question too: roles, permissions or admin flags change in a route whose only visible signal is generic authentication. Name the policy (an admin/owner dependency, an explicit check in the body, a decorator dependency) and test it as a plain member.
+- Still outside static reach: hard-coded permissions, identity propagation into workers beyond the first hop, and whether row-level security policies are keyed on the right setting.

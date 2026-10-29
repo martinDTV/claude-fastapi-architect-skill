@@ -1,6 +1,6 @@
 # Static audit rules: what each one proves, what it cannot, and how to verify
 
-Catalogue for `scripts/audit_fastapi.py` (v1.4, report schema 1.2). Read it when interpreting a report, deciding whether a finding is a defect, or explaining why the tool stayed silent. `--list-rules` prints the short form.
+Catalogue for `scripts/audit_fastapi.py` (v1.6, report schema 1.4; additive over 1.0–1.3). Read it when interpreting a report, deciding whether a finding is a defect, or explaining why the tool stayed silent. `--list-rules` prints the short form.
 
 Every finding carries `verification`:
 
@@ -122,6 +122,23 @@ Since v1.5 each finding also carries `evidence`: `verified` (pattern and symbols
 
 Kinds propagated through `Depends(f)` return/yield types count as `verified`; kinds propagated from callers count as `inferred`. A shared `httpx.AsyncClient` is not reported: HTTP clients are designed for concurrent reuse, sessions are not.
 
+## Rules added or extended in v1.6 (schema 1.4)
+
+The engine now resolves relative imports, facade re-exports, instance attributes typed in `__init__`, annotated return types, functions passed as arguments (when every caller agrees) and single-implementation Protocols; sites with several candidates stay `ambiguous` and never produce a finding. Every `SA_*`/`TX_*` rule therefore also applies to `self._session`-style attributes, and authentication reached through composed dependencies (`get_context -> get_current_user`) is recognised. The `interprocedural` block reports coverage and uncertainty (`references/audit-engine.md`).
+
+| Rule | Proves | Does not prove | Verify |
+|---|---|---|---|
+| `ASYNC_TASK_REFERENCE_DROPPED` | `asyncio.create_task()`/`ensure_future()`/`loop.create_task()` is a bare statement: nothing keeps the task | That the task is ever collected in practice (it is allowed to be, per the Python docs) | Drop the reference, force `gc.collect()` during an await, assert the effect still happens; keep tasks in a set or a `TaskGroup` |
+| `RETRY_UNBOUNDED` | A `tenacity`/`retrying`/`backoff` decorator without its stop/max argument (the libraries default to forever), or a `while True` loop that exits on success and retries on every exception with no attempt counter | That the dependency ever fails persistently | Point it at a dead endpoint and assert it gives up within the budget |
+| `REL_HTTP_CALL_WITHOUT_TIMEOUT` | `requests.*` without `timeout=` (no default), `urlopen` without timeout, `httpx.Client/AsyncClient(timeout=None)`, or a verb on a `requests.Session` receiver without `timeout=` | That the server ever stalls; httpx clients with their default timeout are not reported | A server that accepts and never answers; assert the call fails in time |
+| `REL_DUAL_WRITE_WITHOUT_OUTBOX` | One function commits and publishes to a broker/queue/producer that is external or reaches the network, with no outbox/inbox in sight | That the two writes are not already reconciled elsewhere; project-owned queue tables and in-process dispatchers are not reported | Kill the process between commit and publish; assert delivery exactly once after restart |
+| `SEC_TENANT_NOT_BOUND_TO_PRINCIPAL` | An authenticated route takes a tenant id from the request and passes it to project calls while no dependency in the chain takes a tenant parameter and the principal never flows alongside (`evidence: unknown`) | That membership is not enforced elsewhere (middleware, RLS keyed on the principal, the service) | Member of A requests B's resources: 403/404 and no row |
+| `SEC_PRIVILEGE_CHANGE_UNVERIFIED` | A route assigns `role`/`permissions`/`is_admin`-like attributes or calls `grant_access`/`revoke_role`/`promote_to_admin`-like functions, and only a generic authentication signal is visible (`evidence: unknown`) | That the caller is not already restricted by a policy the tool cannot name | A plain member attempts the change: 403 and no change |
+| `ANALYSIS_PARTIAL` | A rule module or the summary pass hit a resource limit (recursion/memory) on this file; the rest ran | Nothing about the code | Simplify the pathological expression or accept the partial result |
+| `TX_COMMIT_WITHOUT_ROLLBACK` (tightened) | Only handlers that can catch a commit failure count: bare `except`, `Exception`, `BaseException`, SQLAlchemy/DBAPI error families; handlers for custom domain exceptions are no longer reported | — | — |
+| `SA_SESSION_SHARED_CONCURRENTLY` (extended) | Also `gather(self._a(), self._b())` where both methods use the same `self._session`; the `call_path` names the methods | That the driver raises: asyncpg serialises statements with a lock, so the sharing is silent and the two units share one transaction (see `examples/tenant-ledger/tests/test_adversarial.py`) | Two units of work on one session where one rolls back: the other's write disappears |
+| `TX_EXTERNAL_CALL_IN_TRANSACTION` (extended) | Also a project call inside the transaction block whose callee reaches the network within two calls; the `call_path` is the evidence | — | — |
+
 ## Backlog (not implemented on purpose)
 
-`SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count, outbox/inbox detection, resolution through object attributes and callbacks, decorators that replace functions. Each needs either deeper flow analysis or runtime data; they are documented here so their absence is not read as a clean bill.
+`SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count, inbox/dedup detection on consumers, lock ordering and deadlock analysis, cancellation landing inside a driver operation, attribute chains deeper than one level, decorators that replace functions, Protocols with several implementations (deliberately `ambiguous`). Each needs either deeper flow analysis or runtime data; they are documented here so their absence is not read as a clean bill.

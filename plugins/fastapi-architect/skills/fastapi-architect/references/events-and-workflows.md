@@ -32,3 +32,6 @@ Metrics: oldest outbox age, publish lag, consumer lag, retry rate, DLQ depth, le
 
 ## Decision template
 Document broker capability assumptions, at-least-once semantics, ordering requirements, data sensitivity, failure classes, dedup store, dead-letter retention, replay tooling, reconciliation job, ownership, SLO and rollback plan.
+
+## What the auditor reports about dual writes (v1.6)
+`REL_DUAL_WRITE_WITHOUT_OUTBOX` fires when one function commits a database transaction and publishes through a producer/broker/queue that is a library object or project code that reaches the network, with no outbox or inbox table in sight. A project-owned `jobs.enqueue` that inserts into a table with the same session, or an in-process dispatcher that writes an `events` row, is not a dual write and is not reported: the atomicity problem starts where the message leaves the database. The relay that later publishes from the table is where at-least-once delivery and idempotent consumers (inbox) matter; consumer-side dedup detection remains on the backlog.
