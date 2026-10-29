@@ -545,7 +545,11 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
         if rels:
             facts.relationships[f"{module}.{stmt.name}" if module else stmt.name] = rels
 
-    # module-level bindings: factories, Annotated aliases, protected routers
+    # module-level bindings: factories, Annotated aliases, protected routers. Registered under every
+    # name the module can be imported as (src.app.x and app.x), so src-layout projects resolve them.
+    def qualified(name: str) -> List[str]:
+        return [f"{owner}.{name}" if owner else name for owner in object_modules]
+
     for stmt in tree.body:
         targets: List[ast.Name] = []
         value: Optional[ast.AST] = None
@@ -567,7 +571,8 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
                 alias_kind = TYPE_KINDS[dotted]
             elif dotted:
                 for t in targets:  # resolved later through re-exports (facade-imported AsyncSession)
-                    facts.alias_types.setdefault(f"{module}.{t.id}" if module else t.id, dotted)
+                    for key in qualified(t.id):
+                        facts.alias_types.setdefault(key, dotted)
             # any Annotated[..., Depends(f)] alias: remember f so auth-looking dependencies are
             # recognised through the alias from other modules (MemberDep, CurrentUser, ...)
             for sub in ast.walk(value):
@@ -576,23 +581,26 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
                     if cparts and cparts[-1] in {"Depends", "Security"} and sub.args:
                         inner = dotted_name(sub.args[0])
                         if inner:
+                            target = resolve(inner) or (f"{module}.{'.'.join(inner)}" if (inner[0] in bound and module) else inner[-1])
                             for t in targets:
-                                facts.dependency_aliases[f"{module}.{t.id}" if module else t.id] = resolve(inner) or inner[-1]
+                                for key in qualified(t.id):
+                                    facts.dependency_aliases[key] = target
         if alias_kind:
             for t in targets:
-                facts.aliases[f"{module}.{t.id}" if module else t.id] = alias_kind
+                for key in qualified(t.id):
+                    facts.aliases[key] = alias_kind
             continue
         if isinstance(value, ast.Call):
             parts = dotted_name(value.func)
             dotted = resolve(parts) if parts else None
             if dotted in FACTORY_KINDS:
                 for t in targets:
-                    key = f"{module}.{t.id}" if module else t.id
-                    facts.factories[key] = FACTORY_KINDS[dotted]
+                    for key in qualified(t.id):
+                        facts.factories[key] = FACTORY_KINDS[dotted]
                     facts.factory_last.setdefault(t.id, set()).add(FACTORY_KINDS[dotted])
             elif dotted in {"fastapi.APIRouter", "fastapi.routing.APIRouter"} and _has_keyword(value, "dependencies"):
                 for t in targets:
-                    facts.protected_routers.add(f"{module}.{t.id}" if module else t.id)
+                    facts.protected_routers.update(qualified(t.id))
             elif dotted in {"fastapi.FastAPI", "fastapi.applications.FastAPI"} and _has_keyword(value, "dependencies"):
                 facts.global_auth_signal = True
                 facts.global_auth_evidence.append(f"{rel}:{stmt.lineno} FastAPI(dependencies=...)")

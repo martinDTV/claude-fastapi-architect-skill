@@ -155,7 +155,7 @@ def _background(ctx: FileContext, func: FunctionInfo, record, kinds, evidence, g
             kind = kinds.get(name)
             if kind not in SESSION_KINDS:
                 continue
-            from_dependency = record is not None and name in record.dependency_kinds
+            from_dependency = record is not None and (name in record.dependency_kinds or name in record.depends)
             if func.route is not None or from_dependency:
                 request_scoped.append((name, kind, evidence.get(name, "verified")))
         if request_scoped:

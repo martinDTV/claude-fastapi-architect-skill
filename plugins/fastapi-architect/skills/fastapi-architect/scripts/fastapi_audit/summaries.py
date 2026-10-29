@@ -470,6 +470,10 @@ def build_summaries(
                     dotted = module_defs[parts[0]] + ("." + ".".join(parts[1:]) if len(parts) > 1 else "")
                 rec.depends[arg.arg] = dotted
             ann = annotation_to_dotted(arg.annotation, func.resolve) or ""
+            if ann and arg.arg not in rec.depends:  # `session: SessionDep` where SessionDep = Annotated[T, Depends(f)]
+                alias_target = facts.dependency_aliases.get(ann) or facts.dependency_aliases.get(facts.canonical(ann) or "")
+                if alias_target:
+                    rec.depends[arg.arg] = alias_target if "." in alias_target else None
             if ann.endswith("BackgroundTasks") or arg.arg == "background_tasks":
                 rec.background_task_param = arg.arg
             if any(tok in arg.arg.lower() for tok in PRINCIPAL_PARAM_RE) and arg.arg not in {"self", "cls"}:
