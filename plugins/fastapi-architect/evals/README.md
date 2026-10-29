@@ -53,6 +53,14 @@ plugins/fastapi-architect/evals/
 | `decision-not-add-complexity` | positive, decision (v1.5) | 6-endpoint tool: decline repository/UoW/CQRS/event bus; name the signals that would justify them |
 | `negative-sqlalchemy-etl-script` | negative (v1.5) | Standalone SQLAlchemy ETL script, no web framework: the skill must not fire |
 | `negative-nodejs-prisma-transactions` | negative (v1.5) | Node.js + Prisma lost update: the skill must not fire |
+| `indirect-dependency-through-attribute` | positive, diagnosis (v1.6) | Un-awaited `self._session.execute` in a method reached three modules away: confirms the defect, explains how the attribute's type is known statically, asks for the test |
+| `insufficient-evidence-tenant-binding` | positive, diagnosis (v1.6) | `SEC_TENANT_NOT_BOUND_TO_PRINCIPAL` with `evidence: unknown`: authentication is not binding; a question settled by a cross-tenant test, not a verdict |
+| `apparently-insecure-but-correct-shared-client` | positive, diagnosis (v1.6) | A shared `httpx.AsyncClient` and an in-process dispatcher writing through the same session are correct; session versus client, dual write versus same transaction |
+| `double-charge-after-retry` | positive, diagnosis (v1.6) | A non-idempotent payment applied twice after a client timeout: idempotency key with a unique constraint in the same transaction, replay, concurrent duplicates, proof |
+| `authorization-through-abstractions` | positive, diagnosis (v1.6) | Policy objects behind a composed dependency: legitimate; a tool must follow the chain and report insufficient evidence, tests still required |
+| `decision-modular-monolith-over-microservices` | positive, decision (v1.6) | Four modules sharing tables, five people, 200 rps: boundaries first, extraction later under stated conditions |
+| `adversarial-unbounded-retry-defended` | positive, adversarial (v1.6) | Pressure to suppress `RETRY_UNBOUNDED` and `ASYNC_TASK_REFERENCE_DROPPED` as "theoretical": declines with the documented behaviour and quick checks |
+| `negative-django-celery-task-retries` | negative (v1.6) | Django + Celery retry configuration: the skill must not fire |
 
 Graders per positive case: `quality` (LLM rubric, weight 2, concrete PASS/FAIL conditions that penalise unsupported claims), `keyword` (regex, weight 1, one technical term the answer must contain) and `skill-fired` (`tool_used: Skill`, `arm: with-only`). In a with/without run the `skill-fired` grader is reported as a plugin-fired indicator and does not count towards the score; with `--ablation none` it is scored. Negative cases carry a single free grader, `skill-not-fired` (`tool_used: Skill` with `min: 0`, `max: 0`).
 
@@ -141,3 +149,7 @@ Eight cases cover the v1.4 auditor categories: real risks on a fixture (`detect-
 ## v1.5 additions (2026-10-29)
 
 Twelve cases cover the interprocedural engine and the reliability rules: session flow across modules, indirect blocking, shared sessions in task groups, async lazy loading, non-idempotent retries, request-scoped resources in background tasks, tenant propagation into workers, lost responses, incremental refactor of a global session, a decision not to add complexity, and two negatives (standalone SQLAlchemy ETL, Node.js/Prisma). Rubrics judge substance, not phrasing. Structural validation covers all thirty-one cases offline; no paid runs were made for v1.5 (see `RELEASE-NOTES-v1.5.md`).
+
+## v1.6 additions (2026-10-29)
+
+Eight cases cover the v1.6 capabilities: an indirect dependency through an instance attribute, a finding with insufficient evidence (tenant binding), two apparently insecure patterns that are correct (shared HTTP client, in-process dispatcher), a non-idempotent operation that fails after a retry, authorization implemented through abstractions, the modular-monolith decision against a microservices migration, an adversarial attempt to suppress two documented findings, and a Django/Celery negative. Rubrics judge substance; the adversarial case passes only when the response declines politely with the documented behaviour. Structural validation covers all thirty-nine cases offline; no paid runs were made for v1.6 (see `RELEASE-NOTES-v1.6.md`).
