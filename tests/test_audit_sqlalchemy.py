@@ -163,6 +163,24 @@ class SaSessionsInlineTests(ProjectCase):
             """)
         self.assertEqual(self.findings("SA_ENGINE_CREATED_PER_CALL"), [])
 
+    def test_factory_annotated_local_or_parameter_types_the_session(self) -> None:
+        self.write("app/db.py", """
+            from fastapi import Request
+            from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+            async def get_session(request: Request):
+                factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
+                async with factory() as session:
+                    session.execute("select 1")      # AsyncSession from an annotated local factory
+                    yield session
+
+            async def worker(factory: async_sessionmaker[AsyncSession]) -> None:
+                async with factory() as session:
+                    session.commit()                 # same through a parameter
+            """)
+        found = self.findings("SA_ASYNC_SESSION_NOT_AWAITED")
+        self.assertEqual([(f["line"], f["evidence"]) for f in found], [(7, "verified"), (12, "verified")])
+
     def test_schema_1_2_fields_present_on_new_findings(self) -> None:
         self.write("app/x.py", """
             from sqlalchemy.orm import Session, sessionmaker

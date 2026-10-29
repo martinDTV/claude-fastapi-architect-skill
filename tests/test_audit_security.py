@@ -114,6 +114,57 @@ class SecurityInlineTests(ProjectCase):
             """)
         self.assertEqual([f["line"] for f in self.findings("SEC_RLS_SET_NOT_LOCAL")], [4])
 
+    def test_annotated_auth_alias_re_exported_through_a_facade_is_a_signal(self) -> None:
+        self.write("src/app/__init__.py", "")
+        self.write("src/app/modules/__init__.py", "")
+        self.write("src/app/modules/tenants/__init__.py", "")
+        self.write("src/app/modules/tenants/dependencies.py", """
+            from typing import Annotated
+            from fastapi import Depends
+
+            def require_member(tenant_id: str):
+                return tenant_id
+
+            def require_owner(ctx=Depends(require_member)):
+                return ctx
+
+            MemberDep = Annotated[str, Depends(require_member)]
+            OwnerDep = Annotated[str, Depends(require_owner)]
+            """)
+        self.write("src/app/modules/tenants/public.py", "from app.modules.tenants.dependencies import MemberDep, OwnerDep\n")
+        self.write("src/app/modules/ledger/__init__.py", "")
+        self.write("src/app/modules/ledger/router.py", """
+            from fastapi import APIRouter
+            from app.modules.tenants.public import MemberDep, OwnerDep
+
+            router = APIRouter(prefix="/tenants/{tenant_id}/accounts")
+
+            @router.get("/{account_id}")
+            async def read(account_id: str, ctx: MemberDep) -> dict:
+                return {"id": account_id}
+
+            @router.delete("/{account_id}")
+            async def delete(account_id: str, ctx: OwnerDep) -> None:
+                return None
+            """)
+        rules = self.rules()
+        self.assertNotIn("SEC_ROUTE_WITHOUT_AUTH_SIGNAL", rules)
+        self.assertNotIn("SEC_TENANT_ID_FROM_REQUEST", rules)
+
+    def test_resource_ids_are_not_tenant_identifiers(self) -> None:
+        self.write("app/routes.py", """
+            from fastapi import APIRouter
+
+            router = APIRouter()
+
+            @router.get("/accounts/{account_id}")
+            async def read(account_id: str) -> dict:
+                return {"id": account_id}
+            """)
+        rules = self.rules()
+        self.assertNotIn("SEC_TENANT_ID_FROM_REQUEST", rules)
+        self.assertIn("SEC_ROUTE_WITHOUT_AUTH_SIGNAL", rules)  # still informational
+
     def test_non_fastapi_modules_do_not_get_route_findings(self) -> None:
         self.write("app/flask_app.py", """
             from flask import Flask

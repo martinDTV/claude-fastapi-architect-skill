@@ -32,7 +32,7 @@ from .resolver import (
 CONFIG_FILENAME = ".audit-fastapi.json"
 AUTH_RE = re.compile(
     r"auth|user|principal|token|perm|require|tenant|scope|security|oauth|jwt|api_?key|"
-    r"current|identity|membership|guard|policy|login|bearer|credential|role|rbac|acl",
+    r"current|identity|member|owner|admin|guard|policy|login|bearer|credential|role|rbac|acl",
     re.I,
 )
 
@@ -61,6 +61,7 @@ class ProjectFacts:
     factories: Dict[str, str] = field(default_factory=dict)  # dotted -> produced kind
     factory_last: Dict[str, Set[str]] = field(default_factory=dict)  # last name -> kinds
     aliases: Dict[str, str] = field(default_factory=dict)  # dotted Annotated alias -> kind
+    dependency_aliases: Dict[str, str] = field(default_factory=dict)  # dotted Annotated alias -> Depends target (dotted or bare name)
     protected_routers: Set[str] = field(default_factory=set)  # dotted router names
     global_auth_signal: bool = False
     global_auth_evidence: List[str] = field(default_factory=list)
@@ -481,6 +482,16 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
             dotted = annotation_to_dotted(value, resolve)
             if dotted in TYPE_KINDS:
                 alias_kind = TYPE_KINDS[dotted]
+            # any Annotated[..., Depends(f)] alias: remember f so auth-looking dependencies are
+            # recognised through the alias from other modules (MemberDep, CurrentUser, ...)
+            for sub in ast.walk(value):
+                if isinstance(sub, ast.Call):
+                    cparts = dotted_name(sub.func)
+                    if cparts and cparts[-1] in {"Depends", "Security"} and sub.args:
+                        inner = dotted_name(sub.args[0])
+                        if inner:
+                            for t in targets:
+                                facts.dependency_aliases[f"{module}.{t.id}" if module else t.id] = resolve(inner) or inner[-1]
         if alias_kind:
             for t in targets:
                 facts.aliases[f"{module}.{t.id}" if module else t.id] = alias_kind

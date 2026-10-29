@@ -183,12 +183,30 @@ def function_kinds(
     """Map local names in ``func`` to a kind, from annotations, assignments and with-items."""
     kinds: Dict[str, str] = {}
     resolve = func.resolve
+    local_factories = dict(local_factories)  # may grow with annotated factory locals/params
+
+    def factory_annotation(annotation: Optional[ast.AST]) -> Optional[str]:
+        """``name: async_sessionmaker[AsyncSession]`` (local or parameter) names a factory."""
+        if annotation is None:
+            return None
+        base = annotation.value if isinstance(annotation, ast.Subscript) else annotation
+        parts = dotted_name(base)
+        dotted = resolve(parts) if parts else None
+        return FACTORY_KINDS.get(dotted or "")
+
     for arg in func.params():
         kind = kind_of_type(annotation_to_dotted(arg.annotation, resolve), facts)
         if kind:
             kinds[arg.arg] = kind
+        factory = factory_annotation(arg.annotation)
+        if factory:
+            local_factories[arg.arg] = factory
     for node in func.scope_nodes():
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            factory = factory_annotation(node.annotation)
+            if factory:
+                local_factories[node.target.id] = factory
+                continue
             kind = kind_of_type(annotation_to_dotted(node.annotation, resolve), facts)
             if kind:
                 kinds[node.target.id] = kind

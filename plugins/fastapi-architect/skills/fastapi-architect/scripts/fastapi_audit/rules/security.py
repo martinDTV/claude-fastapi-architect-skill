@@ -19,7 +19,7 @@ from . import FileContext
 
 CATEGORY = "security"
 
-TENANT_PARAMS = frozenset({"tenant_id", "org_id", "organization_id", "workspace_id", "account_id", "company_id"})
+TENANT_PARAMS = frozenset({"tenant_id", "org_id", "organization_id", "workspace_id", "company_id"})
 PUBLIC_PATH_RE = re.compile(
     r"^/?(|health|healthz|ready|readyz|live|livez|metrics|ping|version|docs|openapi\.json|redoc|status)/?$"
 )
@@ -34,8 +34,25 @@ CROSS_TENANT_TEST = (
 )
 
 
-def _param_signal(func: FunctionInfo) -> bool:
+def _alias_target_is_auth(ctx: FileContext, dotted: Optional[str]) -> bool:
+    """True when ``dotted`` names an Annotated alias whose Depends target looks like auth."""
+    if not dotted or ctx.facts is None:
+        return False
+    aliases = ctx.facts.dependency_aliases
+    target = aliases.get(dotted)
+    if target is None:
+        # re-exported through a facade (public.py) or imported with/without a source-root prefix:
+        # fall back to the alias short name when it is unique in the project
+        short = "." + dotted.rsplit(".", 1)[-1]
+        hits = {v for k, v in aliases.items() if k.endswith(short)}
+        if len(hits) == 1:
+            target = next(iter(hits))
+    return bool(target and AUTH_RE.search(target.rsplit(".", 1)[-1]))
+
+
+def _param_signal(ctx: FileContext, func: FunctionInfo) -> bool:
     defaults = func.param_defaults()
+    module = ctx.facts.file_module.get(ctx.relpath, "") if ctx.facts is not None else ""
     for arg in func.params():
         default = defaults.get(arg.arg)
         if isinstance(default, ast.Call):
@@ -52,6 +69,13 @@ def _param_signal(func: FunctionInfo) -> bool:
             dotted = annotation_to_dotted(arg.annotation, func.resolve)
             if dotted and AUTH_RE.search(dotted.rsplit(".", 1)[-1]):
                 return True
+            # Annotated alias defined in this or another module: X = Annotated[T, Depends(require_member)]
+            raw_parts = dotted_name(arg.annotation) if isinstance(arg.annotation, (ast.Name, ast.Attribute)) else None
+            if raw_parts:
+                imported = func.resolve(raw_parts)
+                local = f"{module}.{'.'.join(raw_parts)}" if module else ".".join(raw_parts)
+                if _alias_target_is_auth(ctx, imported) or _alias_target_is_auth(ctx, local):
+                    return True
             text = ast.unparse(arg.annotation) if hasattr(ast, "unparse") else ""
             if text and ("Depends(" in text or "Security(" in text) and AUTH_RE.search(text):
                 return True
@@ -93,7 +117,7 @@ def _route_rules(ctx: FileContext, out: List[Finding]) -> None:
         route = func.route
         if route is None:
             continue
-        if _param_signal(func) or _router_signal(ctx, func):
+        if _param_signal(ctx, func) or _router_signal(ctx, func):
             continue
         path = route.path or ""
         used = _used_names(func)
