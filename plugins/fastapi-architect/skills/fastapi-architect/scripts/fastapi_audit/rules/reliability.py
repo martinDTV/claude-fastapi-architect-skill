@@ -82,10 +82,33 @@ def _resolve_callable(ctx: FileContext, func: FunctionInfo, node: ast.AST, graph
 # --------------------------------------------------------------------------- #
 
 
+def _retried_writes(func: FunctionInfo, record, graph) -> Optional[Tuple[List[str], str]]:
+    """For a hand-written retry loop, only writes inside the retried block count: a write on the
+    give-up path (`if attempt == last: mark_failed()`) or a token refresh in the handler runs once."""
+    from ..summaries import retry_try_ranges
+
+    ranges = retry_try_ranges(func)
+    if not ranges:
+        return None
+
+    def inside(line: int) -> bool:
+        return any(a <= line <= b for a, b in ranges)
+
+    if any(inside(line) for line, _kind in record.writes):
+        kind = next(k for line, k in record.writes if inside(line))
+        return [record.key], kind
+    for site, callee in graph.edges.get(record.key, []):
+        if inside(site.lineno):
+            sub = _reachable_writes(graph, callee, 1, {record.key})
+            if sub:
+                return [record.key, *sub[0]], sub[1]
+    return None
+
+
 def _retry(ctx: FileContext, func: FunctionInfo, record, graph, out: List[Finding]) -> None:
     if record is None or not (record.retry_decorated or record.retry_loop):
         return
-    path = _reachable_writes(graph, record.key)
+    path = _reachable_writes(graph, record.key) if record.retry_decorated else _retried_writes(func, record, graph)
     if not path:
         return
     if _idempotency_signal(graph, record.key):

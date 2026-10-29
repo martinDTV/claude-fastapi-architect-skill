@@ -52,7 +52,7 @@ def _alias_target_is_auth(ctx: FileContext, dotted: Optional[str]) -> bool:
 
 CHAIN_DEPTH = 3
 TENANT_BINDING_RE = re.compile(r"member|tenant|org|workspace|company|scope|authorize|authorise|permission|policy|access|can_|allowed|guard", re.I)
-ADMIN_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|manager|staff|privilege|can_|allowed|scope|guard|require_", re.I)
+ADMIN_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|manager|staff|privilege|can_|allowed|scope|guard|require_|grant", re.I)
 PRIVILEGE_ATTRS = frozenset({"role", "roles", "is_admin", "is_superuser", "is_staff", "permissions", "scopes", "privileges", "groups", "is_owner"})
 PRIVILEGE_CALL_RE = re.compile(
     r"^((grant|revoke)_?(access|role|roles|permission|permissions|admin|privilege|privileges|scope|scopes)"
@@ -186,8 +186,13 @@ def _providers(ctx: FileContext, func: FunctionInfo) -> List[Tuple[str, Optional
                 if isinstance(sub, ast.Call):
                     parts = dotted_name(sub.func)
                     if parts and parts[-1] in {"Depends", "Security"} and sub.args:
-                        inner = dotted_name(sub.args[0])
-                        found = (func.resolve(inner) if inner else None, inner, inner[-1] if inner else "")
+                        arg0 = sub.args[0]
+                        inner = dotted_name(arg0)
+                        label = inner[-1] if inner else ""
+                        if inner is None and isinstance(arg0, ast.Call):  # Depends(require(p.X)): factory + its arguments
+                            inner = dotted_name(arg0.func)
+                            label = ast.unparse(arg0) if hasattr(ast, "unparse") else (inner[-1] if inner else "")
+                        found = (func.resolve(inner) if inner else None, inner, label)
                         break
             if found:
                 break
@@ -202,7 +207,9 @@ def _providers(ctx: FileContext, func: FunctionInfo) -> List[Tuple[str, Optional
                         hits = {v for k, v in aliases.items() if k.endswith(short)}
                         target = next(iter(hits)) if len(hits) == 1 else None
                     if target:
-                        found = (target if "." in target else None, [target.rsplit(".", 1)[-1]], target.rsplit(".", 1)[-1])
+                        labels = getattr(ctx.facts, "dependency_alias_labels", {})
+                        label = labels.get(alias or "") or next((v for k, v in labels.items() if alias and k.endswith("." + alias.rsplit(".", 1)[-1])), None) or target.rsplit(".", 1)[-1]
+                        found = (target if "." in target else None, [target.rsplit(".", 1)[-1]], label)
                         break
         if found:
             out.append((arg.arg, found[0], found[1], found[2]))

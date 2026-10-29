@@ -57,7 +57,7 @@ class TruthCorpusTests(unittest.TestCase):
         cls.score = precision.score(cls.truth, cls.engine_run)
 
     def test_markers_cover_the_rules_under_evaluation(self) -> None:
-        self.assertGreaterEqual(len(self.truth["expected"]), 15)
+        self.assertGreaterEqual(len(self.truth["expected"]), 16)
         self.assertGreaterEqual(len(self.truth["absent"]), 17)
         self.assertEqual(len(self.truth["edges"]), 7)
         self.assertEqual(len(self.truth["unresolved"]), 4)
@@ -275,6 +275,30 @@ class ReliabilityRuleTests(ProjectCase):
         rules = self.rules(options=audit.AuditOptions(interprocedural=False))
         self.assertIn("ASYNC_TASK_REFERENCE_DROPPED", rules)
         self.assertIn("REL_HTTP_CALL_WITHOUT_TIMEOUT", rules)
+
+
+class CalibrationRegressionTests(unittest.TestCase):
+    """Shapes that were false positives on real repositories; each has a truth-absent marker."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = audit_fixture("truth16")
+
+    def test_loop_retries_count_only_writes_inside_the_retried_block(self) -> None:
+        lines = lines_of(self.report, "RETRY_NON_IDEMPOTENT_WRITE", "app/modules/accounts/batches.py")
+        self.assertEqual(lines, [68])  # retried_write; not the give-up write (20) nor the two-pass purge (46)
+        self.assertEqual(lines_of(audit_fixture("interproc"), "RETRY_NON_IDEMPOTENT_WRITE", "src/app/retry.py"), [11, 25])
+
+    def test_commit_in_loop_ignores_token_refresh_retries_and_explicit_batches(self) -> None:
+        self.assertEqual(lines_of(self.report, "TX_COMMIT_IN_LOOP", "app/modules/accounts/batches.py"), [])
+        self.assertEqual(lines_of(self.report, "TX_COMMIT_IN_LOOP", "app/modules/accounts/repository.py"), [27])
+
+    def test_permission_factory_dependencies_count_as_policy_and_auth_signals(self) -> None:
+        self.assertEqual(lines_of(self.report, "SEC_PRIVILEGE_CHANGE_UNVERIFIED", "app/modules/accounts/batches.py"), [])
+        self.assertEqual(lines_of(self.report, "SEC_ROUTE_WITHOUT_AUTH_SIGNAL", "app/modules/accounts/batches.py"), [])
+        facts, _graph = graph_for(TRUTH)
+        self.assertEqual(facts.dependency_aliases["app.modules.accounts.batches.GrantContext"], "app.modules.accounts.batches.require")
+        self.assertIn("PERMISSIONS['grant']", facts.dependency_alias_labels["app.modules.accounts.batches.GrantContext"])
 
 
 class SecurityRuleTests(ProjectCase):

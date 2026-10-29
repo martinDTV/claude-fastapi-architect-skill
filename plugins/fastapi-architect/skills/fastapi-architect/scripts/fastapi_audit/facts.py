@@ -93,6 +93,7 @@ class ProjectFacts:
     module_objects: Set[str] = field(default_factory=set)  # module-level bindings that are not functions/classes (routers, factories, constants)
     module_instances: Dict[str, str] = field(default_factory=dict)  # module-level `obj = ProjectClass(...)` -> class dotted (resolved by the graph)
     summary_failures: List[str] = field(default_factory=list)  # files whose function summaries hit a resource limit (graph skipped them)
+    dependency_alias_labels: Dict[str, str] = field(default_factory=dict)  # alias -> source text of the Depends() argument (require(p.X))
     alias_types: Dict[str, str] = field(default_factory=dict)  # Annotated alias -> raw dotted type (resolved lazily through re-exports)
 
     # ---- lookups ------------------------------------------------------------
@@ -579,12 +580,17 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
                 if isinstance(sub, ast.Call):
                     cparts = dotted_name(sub.func)
                     if cparts and cparts[-1] in {"Depends", "Security"} and sub.args:
-                        inner = dotted_name(sub.args[0])
+                        arg0 = sub.args[0]
+                        inner = dotted_name(arg0)
+                        if inner is None and isinstance(arg0, ast.Call):  # Depends(require(p.X)): a dependency factory
+                            inner = dotted_name(arg0.func)
                         if inner:
                             target = resolve(inner) or (f"{module}.{'.'.join(inner)}" if (inner[0] in bound and module) else inner[-1])
+                            label = ast.unparse(arg0) if hasattr(ast, "unparse") else ".".join(inner)
                             for t in targets:
                                 for key in qualified(t.id):
                                     facts.dependency_aliases[key] = target
+                                    facts.dependency_alias_labels[key] = label
         if alias_kind:
             for t in targets:
                 for key in qualified(t.id):

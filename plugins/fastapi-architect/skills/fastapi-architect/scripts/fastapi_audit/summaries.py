@@ -183,7 +183,10 @@ def _depends_target(node: Optional[ast.AST], resolve) -> Optional[Tuple[bool, Op
             parts = dotted_name(sub.func)
             if parts and parts[-1] in {"Depends", "Security"}:
                 if sub.args:
-                    inner = dotted_name(sub.args[0])
+                    arg0 = sub.args[0]
+                    inner = dotted_name(arg0)
+                    if inner is None and isinstance(arg0, ast.Call):
+                        inner = dotted_name(arg0.func)  # Depends(require(p.X)): the factory is the provider
                     return True, (resolve(inner) if inner else None), inner
                 return True, None, None
     return None
@@ -222,13 +225,50 @@ def _string_constants(node: ast.AST) -> List[str]:
     return out
 
 
+def _direct_tries(loop: ast.AST) -> List[ast.Try]:
+    """Try statements that are the loop body itself (possibly under an `if` directly in the body)."""
+    out: List[ast.Try] = []
+    for stmt in getattr(loop, "body", []):
+        if isinstance(stmt, ast.Try):
+            out.append(stmt)
+        elif isinstance(stmt, ast.If):
+            out.extend(s for s in [*stmt.body, *stmt.orelse] if isinstance(s, ast.Try))
+    return out
+
+
+def _retry_shaped(loop: ast.AST) -> bool:
+    """A retry loop leaves on success (break/return inside the try) or goes around again from the
+    handler (continue). Nested tries inside inner loops (per-item error handling) do not count."""
+    for node in _direct_tries(loop):
+        exits = any(isinstance(n, (ast.Break, ast.Return)) for n in iter_scope_nodes([*node.body, *node.orelse]))
+        again = any(
+            any(isinstance(n, ast.Continue) for n in iter_scope_nodes(h.body))
+            or not any(isinstance(n, ast.Raise) for n in iter_scope_nodes(h.body))  # falls through to the next iteration
+            for h in node.handlers
+        )
+        if exits or again:
+            return True
+    return False
+
+
+def retry_try_ranges(func: FunctionInfo) -> List[Tuple[int, int]]:
+    """Line ranges of the retried blocks (try bodies directly inside retry loops): a write counts
+    as retried only when it happens there, not on a give-up or token-refresh path in a handler."""
+    ranges: List[Tuple[int, int]] = []
+    for node in func.scope_nodes():
+        if isinstance(node, (ast.For, ast.While)) and _retry_shaped(node):
+            for t in _direct_tries(node):
+                if t.body:
+                    ranges.append((t.body[0].lineno, getattr(t.body[-1], "end_lineno", t.body[-1].lineno)))
+    return ranges
+
+
 def _has_retry_loop(func: FunctionInfo) -> bool:
     """A loop whose body catches exceptions and goes around again: the shape of a hand-written retry."""
     for node in func.scope_nodes():
         if isinstance(node, (ast.For, ast.While)):
-            has_try = any(isinstance(n, ast.Try) for n in iter_scope_nodes(node.body))
-            if not has_try:
-                continue
+            if not _direct_tries(node):
+                continue  # nested per-item error handling is not a retry of the loop
             loop_text = ast.dump(node).lower()
             retry_vocabulary = any(tok in loop_text for tok in ("attempt", "retr", "tries"))
             if isinstance(node, ast.While):
@@ -246,7 +286,7 @@ def _has_retry_loop(func: FunctionInfo) -> bool:
             if isinstance(node.iter, ast.Call):
                 parts = dotted_name(node.iter.func)
                 iter_text = ".".join(parts) if parts else ""
-            if iter_text.endswith("range") or retry_vocabulary:
+            if (iter_text.endswith("range") or retry_vocabulary) and _retry_shaped(node):
                 return True
     return False
 

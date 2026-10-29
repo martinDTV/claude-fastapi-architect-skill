@@ -69,11 +69,18 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
         # tick by design. Neither is "one transaction per item".
         tries = [s for s in node.body if isinstance(s, ast.Try)]
         if tries and len(node.body) == len(tries) + sum(1 for s in node.body if isinstance(s, (ast.Expr, ast.Assign)) and not isinstance(getattr(s, "value", None), ast.Call)):
-            retry_like = any(isinstance(n, ast.Break) for t in tries for n in iter_scope_nodes(t.body))
+            retry_like = any(isinstance(n, (ast.Break, ast.Return)) for t in tries for n in iter_scope_nodes(t.body))
             if retry_like or isinstance(node, ast.While):
                 continue
+        # `if index % BATCH == 0: commit()` is explicit batching, which is what the rule asks for
+        batched: Set[int] = set()
+        for branch in iter_scope_nodes(node.body):
+            if isinstance(branch, ast.If) and any(isinstance(b, ast.BinOp) and isinstance(b.op, ast.Mod) for b in ast.walk(branch.test)):
+                batched |= {id(c) for c in _calls_in(branch.body)}
         for call in _calls_in(node.body):
             if not (isinstance(call.func, ast.Attribute) and call.func.attr == "commit"):
+                continue
+            if id(call) in batched:
                 continue
             if id(call) in reported:
                 break  # already reported for an enclosing loop
