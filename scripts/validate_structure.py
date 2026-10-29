@@ -34,7 +34,7 @@ assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
 for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
 assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
-for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_plugin_evals.py'):
+for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_plugin_evals.py'):
     assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
 evals_dir=root/'plugins/fastapi-architect/evals'
 cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
@@ -45,7 +45,11 @@ for d in cases:
     assert (d/'graders').is_dir() or (d/'case.yaml').is_file(), f'Eval case without graders: {d.name}'
 assert 'plugins/fastapi-architect/evals/results/' in (root/'.gitignore').read_text(encoding='utf-8'), 'evals results dir not git-ignored'
 assert (root/'tests/test_plugin_evals.py').is_file(), 'Missing tests/test_plugin_evals.py'
+example=root/'plugins/fastapi-architect/examples/tenant-ledger'
+for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py'):
+    assert (example/f).is_file(), f'Missing reference implementation file: {f}'
+assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing RELEASE-NOTES-v{major_minor}.md'
 assert f'v{major_minor}' in (root/'README.md').read_text(encoding='utf-8'), f'README does not mention v{major_minor}'
-print(f'OK: {len(refs)} references, all linked, manifest version {version}, eval JSON valid, auditor + entry point + tests + release notes present, {len(cases)} plugin eval cases')
+print(f'OK: {len(refs)} references, all linked, manifest version {version}, eval JSON valid, auditor + entry point + tests + release notes present, {len(cases)} plugin eval cases, reference implementation present')

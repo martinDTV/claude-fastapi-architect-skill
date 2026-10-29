@@ -76,6 +76,7 @@ plugins/fastapi-architect/
         ├── audit_fastapi.py              # read-only static auditor entry point (stdlib only)
         └── fastapi_audit/                # v1.4 auditor package: rules per category, facts, report, cli
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
+plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
@@ -168,3 +169,12 @@ python3 scripts/audit_fastapi.py /path/to/project --changed-files <(git diff --n
 - Session types come from annotations and module-level factories, so a correctly used global `sessionmaker` is never reported while a shared `Session` instance is. Architecture layers and business modules are inferred from paths or configured in `.audit-fastapi.json`; existing import-linter contracts are detected and treated as authoritative.
 - Migrations are never executed. Destructive operations are reported as changes that need review with their expand-contract context.
 - Tests: 149 across unit suites per category, deliberately correct and incorrect fixture projects, and PostgreSQL integration tests that reproduce the lost update, the session-level `SET` leak and the `NOT NULL` failure on an ephemeral cluster (`tests/integration`, skipped when PostgreSQL tools are absent). Release details in `RELEASE-NOTES-v1.4.md`.
+
+## Extension v1.5 — Interprocedural Analysis & Verified Reference Implementation
+
+The auditor gains a conservative interprocedural engine and the plugin ships its first verified reference application. Everything from v1.0 to v1.4 remains; every v1.4 command, option and report field is unchanged (report schema 1.3 is additive).
+
+- **Call graph.** Per-function summaries and syntactic resolution (imports, module-level names, `self.method`, instances of project classes, declared bases, `src.`/package aliases). Session kinds now flow from `Depends(f)` return types and from callers into untyped parameters; each finding states its `evidence` (`verified`, `inferred`, `unknown`) and cross-function findings carry a `call_path`. Limits are explicit and reported: `--max-call-depth` (default 4), a time budget, bounded propagation; `--no-interprocedural` restores v1.4 behaviour.
+- **Six rules on top of it.** Blocking reached through synchronous helpers, nested `session.begin()`, implicit lazy loads under `AsyncSession`, retried writes without an idempotency signal, request-scoped sessions handed to background tasks, and background-task context classification (captured / recreated / unverifiable). 41 rules in 9 categories; `references/audit-engine.md` documents the engine, `references/audit-rules.md` the rules.
+- **Reference implementation.** `plugins/fastapi-architect/examples/tenant-ledger`: multi-tenant ledger with PostgreSQL row-level security on a non-owner role, atomic and optimistic concurrency, idempotency keys, Alembic migrations, RFC 9457 errors and demo authentication clearly marked as not for production. Its 22 tests run against a throwaway PostgreSQL cluster and prove authorized/denied operations, cross-tenant denial through the API and below it, 50 concurrent deposits without a lost update, rollback, migrations from empty and from the previous revision, and two anti-patterns reproduced next to their fixes. `VERIFICATION.md` records the run.
+- Tests: 173 in the plugin plus 22 in the example. Evals: 31 cases (12 new), validated offline. Release details in `RELEASE-NOTES-v1.5.md`.
