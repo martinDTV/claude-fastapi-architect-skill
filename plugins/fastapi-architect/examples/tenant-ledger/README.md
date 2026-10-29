@@ -22,7 +22,7 @@ Requests identify themselves with the `X-Demo-User` header (`modules/tenants/sec
 
 ## Run the tests (no setup beyond PostgreSQL binaries)
 
-The suite starts a throwaway PostgreSQL cluster with `initdb`/`pg_ctl` in a temporary directory, runs the migrations, and tears it down. It needs the PostgreSQL client and server binaries on `PATH` (Homebrew `postgresql@16`, Debian `postgresql-16`) and `uv`.
+The suite (27 tests) starts a throwaway PostgreSQL cluster with `initdb`/`pg_ctl` in a temporary directory, runs the migrations, and tears it down. `tests/test_adversarial.py` reproduces, on that cluster, the scenarios the static auditor can only suspect: a shared session, a request-scoped session handed to a task, cancellation by timeout, a lost response retried with and without an idempotency key, and the RLS configuration invariants. It needs the PostgreSQL client and server binaries on `PATH` (Homebrew `postgresql@16`, Debian `postgresql-16`) and `uv`.
 
 ```bash
 cd plugins/fastapi-architect/examples/tenant-ledger
@@ -63,7 +63,7 @@ curl -s -X PATCH localhost:8000/api/v1/tenants/<tenant_id>/accounts/<account_id>
 python3 ../../../../scripts/audit_fastapi.py . --format markdown
 ```
 
-The only findings are the two deliberate ones in `modules/ledger/antipatterns.py` (`TX_READ_MODIFY_WRITE`, `SA_ASYNC_LAZY_LOAD_RISK`), which `tests/test_antipatterns.py` reproduces and fixes. `--exclude-path "*/antipatterns.py"` yields a clean report.
+The only findings are the four deliberate ones in `modules/ledger/antipatterns.py` (`TX_READ_MODIFY_WRITE`, `SA_ASYNC_LAZY_LOAD_RISK`, `SA_SESSION_SHARED_CONCURRENTLY`, `BG_REQUEST_SCOPED_RESOURCE`), which `tests/test_antipatterns.py` and `tests/test_adversarial.py` reproduce and fix, plus one informational note on the RLS migration's dynamic SQL. `--exclude-path "*/antipatterns.py"` yields a clean report.
 
 ## Layout
 

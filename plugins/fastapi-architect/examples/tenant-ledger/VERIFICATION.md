@@ -4,7 +4,7 @@ Label granted: **`verified`** for the stack below, following `references/referen
 
 | Item | Value |
 |---|---|
-| Date | 2026-10-29 |
+| Date | 2026-10-29 (initial record), renewed 2026-10-29 with the v1.6 adversarial tests |
 | Machine | macOS (Darwin 27.0, Apple Silicon), local only, no network services |
 | Python | 3.13.5 (venv created by uv 0.11.28 from `uv.lock`) |
 | FastAPI / Starlette | 0.162.0 |
@@ -22,24 +22,26 @@ $ uv sync --extra dev
 Resolved 33 packages
 
 $ uv run pytest -q
-......................
-22 passed in 3.95s
+...........................
+27 passed in 7.63s            (22 in the initial record; 5 adversarial tests added for v1.6)
 
 $ uv run ruff check src tests alembic
 All checks passed!
 $ uv run ruff format --check src tests alembic
-35 files already formatted
+40 files already formatted
 
-$ python3 ../../../../scripts/audit_fastapi.py .
-files scanned: 36  findings: 3 (high 0, medium 2, low 0, info 1)
-  alembic/versions/0002_rls.py:32  MIG_RAW_SQL                 info   (dynamic SQL: role name from configuration)
-  src/ledger/modules/ledger/antipatterns.py:20  TX_READ_MODIFY_WRITE      medium (deliberate, reproduced in tests)
-  src/ledger/modules/ledger/antipatterns.py:29  SA_ASYNC_LAZY_LOAD_RISK   medium (deliberate, reproduced in tests)
+$ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.6.0, schema 1.4)
+files scanned: 37  findings: 5 (high 2, medium 2, low 0, info 1)
+  alembic/versions/0002_rls.py:32  MIG_RAW_SQL                      info   (dynamic SQL: role name from configuration)
+  src/ledger/modules/ledger/antipatterns.py:20   TX_READ_MODIFY_WRITE            medium (deliberate, reproduced in tests)
+  src/ledger/modules/ledger/antipatterns.py:29   SA_ASYNC_LAZY_LOAD_RISK         medium (deliberate, reproduced in tests)
+  src/ledger/modules/ledger/antipatterns.py:71   SA_SESSION_SHARED_CONCURRENTLY  high   (deliberate, reproduced in tests)
+  src/ledger/modules/ledger/antipatterns.py:102  BG_REQUEST_SCOPED_RESOURCE      high   (deliberate, reproduced in tests)
 $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.py" --ignore MIG_RAW_SQL --fail-on info
 exit 0 (no findings)
 ```
 
-## What each test proves (22 tests, all against PostgreSQL)
+## What each test proves (27 tests, all against PostgreSQL)
 
 | Requirement | Test | Evidence |
 |---|---|---|
@@ -56,6 +58,11 @@ exit 0 (no findings)
 | Migration from empty | `test_migrations.py::test_upgrade_from_empty_then_check` | tables, 3 policies, RLS enabled and forced, `alembic check` clean |
 | Migration from the previous revision | `test_migrations.py::test_upgrade_from_the_previous_revision` | 0001 with data → head → downgrade 0001 |
 | Anti-pattern reproduced and fixed | `test_antipatterns.py` | read-modify-write loses a deposit (110 instead of 120), atomic UPDATE keeps both; implicit lazy load raises `MissingGreenlet`, `selectinload` fixes it |
+| Shared AsyncSession (v1.6) | `test_adversarial.py::test_one_session_shared_by_two_tasks_mixes_their_transactions` | two units of work on one session share one transaction: the unit that rolls back discards the other's +5 (balance 0); one session per task keeps the +5 (balance 5). asyncpg serialises the statements with a lock, so nothing raises: the damage is silent |
+| Request-scoped session in a task (v1.6) | `test_adversarial.py::test_request_session_handed_to_a_task_loses_its_context_after_the_response` | after the request scope closes, the task's write runs without tenant context and row-level security refuses it; a task that opens its own session and sets the context from ids succeeds |
+| Cancellation by timeout (v1.6) | `test_adversarial.py::test_cancellation_by_timeout_leaves_nothing_committed_and_the_connection_usable` | `wait_for` cancels during the wait after the UPDATE; rollback leaves balance 0; the session and pool keep working afterwards (balance 7) |
+| Lost response, retried (v1.6) | `test_adversarial.py::test_lost_response_retried_without_a_key_duplicates_and_with_a_key_does_not` | without a key the retry applies the deposit twice (20); with `Idempotency-Key` the retry replays the stored result (30, three entries in total) |
+| RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
 
 ## Defects found while verifying (and fixed before labelling)
 
