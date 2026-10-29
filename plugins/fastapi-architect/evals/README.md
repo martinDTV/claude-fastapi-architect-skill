@@ -41,6 +41,18 @@ plugins/fastapi-architect/evals/
 | `select-reference-zero-downtime-migration` | positive, decision (v1.4) | 80M-row type change and NOT NULL column: expand-contract, batches, CONCURRENTLY, rehearsal |
 | `detect-session-risks` | positive, tools (v1.4) | Runs the auditor on a fixture with a shared session, a lost update and a commit-in-loop; must reject the sessionmaker false positive (needs `--scaffold --allow-tools Bash`) |
 | `negative-django-project` | negative (v1.4) | Django REST Framework restructuring: the skill must not fire |
+| `trace-session-across-modules` | positive, diagnosis (v1.5) | Untyped session flowing route → service → repository; interprocedural reasoning, un-awaited commit, typed boundary |
+| `indirect-blocking-helper` | positive, diagnosis (v1.5) | Blocking call two calls below an async route; call path, offload/async fixes, no "more workers" |
+| `shared-session-taskgroup` | positive, diagnosis (v1.5) | Session shared across TaskGroup tasks: not a SQLAlchemy bug; session per task; HTTP clients differ |
+| `async-lazy-loading` | positive, diagnosis (v1.5) | MissingGreenlet from an implicit lazy load; loader options, lazy="raise" guard |
+| `non-idempotent-retry` | positive, decision (v1.5) | Retried payment POST: keep the retry, add idempotency key and reconciliation |
+| `background-tasks-request-session` | positive, diagnosis (v1.5) | Request session handed to BackgroundTasks: lifetime, session inside the task, outbox for durability |
+| `tenant-propagation-worker` | positive, decision (v1.5) | Tenant and principal context into a worker: captured in the payload, recreated per transaction, negative tests |
+| `lost-response-double-charge` | positive, diagnosis (v1.5) | Double charge after a timeout: idempotency at API, database and provider; reconciliation |
+| `incremental-refactor-session-handling` | positive, decision (v1.5) | Module-level Session instance: incremental migration to factory + dependency, no rewrite |
+| `decision-not-add-complexity` | positive, decision (v1.5) | 6-endpoint tool: decline repository/UoW/CQRS/event bus; name the signals that would justify them |
+| `negative-sqlalchemy-etl-script` | negative (v1.5) | Standalone SQLAlchemy ETL script, no web framework: the skill must not fire |
+| `negative-nodejs-prisma-transactions` | negative (v1.5) | Node.js + Prisma lost update: the skill must not fire |
 
 Graders per positive case: `quality` (LLM rubric, weight 2, concrete PASS/FAIL conditions that penalise unsupported claims), `keyword` (regex, weight 1, one technical term the answer must contain) and `skill-fired` (`tool_used: Skill`, `arm: with-only`). In a with/without run the `skill-fired` grader is reported as a plugin-fired indicator and does not count towards the score; with `--ablation none` it is scored. Negative cases carry a single free grader, `skill-not-fired` (`tool_used: Skill` with `min: 0`, `max: 0`).
 
@@ -125,3 +137,7 @@ Grader revisions are listed here on purpose: a rubric that fails a correct answe
 ## v1.4 additions (2026-10-28)
 
 Eight cases cover the v1.4 auditor categories: real risks on a fixture (`detect-session-risks`), a false positive to reject, an existing architecture to defend, a concurrency test to propose, a justified destructive migration, security that cannot be verified with AST alone, selection of the database-evolution guidance, and a Django negative. Structural validation (`tests/test_plugin_evals.py`) covers all nineteen cases without cost. Paid runs for v1.4 were a four-case sample (with-plugin only, one run each): `negative-django-project` 1.00 (not invoked), `reject-false-positive-sessionmaker` 1.00, `detect-session-risks` 1.00 and `security-not-verifiable-statically` 1.00 after one rubric revision each (the judge had scored wording instead of substance; the revision is recorded in the case files). Total 2.16 USD. See `RELEASE-NOTES-v1.4.md`.
+
+## v1.5 additions (2026-10-29)
+
+Twelve cases cover the interprocedural engine and the reliability rules: session flow across modules, indirect blocking, shared sessions in task groups, async lazy loading, non-idempotent retries, request-scoped resources in background tasks, tenant propagation into workers, lost responses, incremental refactor of a global session, a decision not to add complexity, and two negatives (standalone SQLAlchemy ETL, Node.js/Prisma). Rubrics judge substance, not phrasing. Structural validation covers all thirty-one cases offline; no paid runs were made for v1.5 (see `RELEASE-NOTES-v1.5.md`).
