@@ -28,6 +28,7 @@ class FileContext:
     local_factories: Dict[str, str] = field(default_factory=dict)  # module-level SessionLocal -> kind
     awaited: Set[int] = field(default_factory=set)  # ids of awaited Call nodes
     returned: Set[int] = field(default_factory=set)  # ids of Call nodes directly returned
+    contracts: List[object] = field(default_factory=list)  # v1.7: RouteContract per route of this file (filled by rules.security)
 
     def resolve(self, parts) -> Optional[str]:
         from ..resolver import resolve_in_scopes

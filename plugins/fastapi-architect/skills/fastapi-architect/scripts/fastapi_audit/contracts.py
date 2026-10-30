@@ -46,6 +46,23 @@ RESOURCE_DEP_RE = re.compile(r"access|owner|own|resource|verify|ensure|check|per
 AUTHZ_CALL_RE = re.compile(r"^(authorize|authorise|can|check|ensure|assert|permit|allow|verify|require|enforce|guard)", re.I)
 DECORATOR_AUTHZ_RE = re.compile(r"requires|require|permission|authoriz|authoris|role|scope|login_required|auth", re.I)
 RESOURCE_PARAM_RE = re.compile(r"(^|_)(id|uuid|slug|key)$", re.I)
+OPTIONAL_RE = re.compile(r"optional|anonymous|maybe|or_none|_or_guest", re.I)
+MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def route_bucket(c: "RouteContract") -> str:
+    """Disjoint classification used by the summary partition (every route lands in exactly one)."""
+    if c.public:
+        return "public_declared"
+    if c.authentication == "absent":
+        return "unauthenticated_not_public"
+    if c.authentication == "optional":
+        return "optional_authentication"
+    if c.authorization:
+        return "authenticated_authorization_visible"
+    if c.resource_params or c.tenant_params:
+        return "authenticated_authorization_unknown"
+    return "authenticated_only"
 
 
 @dataclass
@@ -55,7 +72,7 @@ class RouteContract:
     function: str
     method: str
     path: Optional[str]
-    authentication: str = "absent"  # present | absent
+    authentication: str = "absent"  # present | optional | absent
     authentication_evidence: List[str] = field(default_factory=list)
     authorization: List[str] = field(default_factory=list)  # role | scopes | decorator | membership | resource_dependency | principal_with_resource | authorization_call | tenant_comparison | router_dependencies
     authorization_evidence: List[str] = field(default_factory=list)
@@ -66,6 +83,7 @@ class RouteContract:
     resource_params: List[str] = field(default_factory=list)
     resource_calls_without_principal: List[str] = field(default_factory=list)  # "callee(line)" receiving a resource id but no principal
     evidence: str = "verified"
+    full_path: str = ""  # router prefix (same file) + route path
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -74,6 +92,8 @@ class RouteContract:
             "function": self.function,
             "method": self.method,
             "path": self.path,
+            "full_path": self.full_path,
+            "bucket": route_bucket(self),
             "authentication": self.authentication,
             "authentication_evidence": list(self.authentication_evidence),
             "authorization": list(self.authorization),
@@ -226,8 +246,19 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
                 principal.add(arg.arg)
         c.principal_params = sorted(principal)
         dep_text = router_dependency_text(ctx, func)
+        optional = False
+        for param, dotted, raw, label in providers:
+            if param not in principal:
+                continue
+            chain_names = [rec.name for rec in dependency_chain(ctx, dependency_record(ctx, dotted, raw))]
+            annotation = next((a.annotation for a in func.params() if a.arg == param), None)
+            ann_text = ast.unparse(annotation) if (annotation is not None and hasattr(ast, "unparse")) else ""
+            if OPTIONAL_RE.search(label) or any(OPTIONAL_RE.search(n) for n in chain_names) or "None" in ann_text or "Optional[" in ann_text:
+                optional = True
         if principal or param_signal(ctx, func):
-            c.authentication = "present"
+            c.authentication = "optional" if (optional and not router_signal(ctx, func)) else "present"
+            if c.authentication == "optional":
+                c.authentication_evidence.append("anonymous callers are accepted by the dependency")
         elif router_signal(ctx, func):
             c.authentication = "present"
             c.authentication_evidence.append("router/application dependencies or middleware" + (f": {dep_text}" if dep_text else ""))
@@ -284,5 +315,6 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             c.evidence = "unknown"
         elif c.authentication == "absent" and not c.public:
             c.evidence = "unknown"
+        c.full_path = (_router_prefix(ctx, route.receiver.split(".")[0]) or "") + (route.path or "")
         out.append(c)
     return out

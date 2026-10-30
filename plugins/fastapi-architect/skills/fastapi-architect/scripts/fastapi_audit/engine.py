@@ -14,6 +14,7 @@ from .model import (
     CATEGORIES,
     CONFIDENCE_DOWNGRADE,
     DISCLAIMER,
+    EVIDENCE_STATES,
     ENV_APPLICATION,
     ENV_MIGRATION,
     ENV_TEST,
@@ -24,14 +25,15 @@ from .model import (
     TOOL_NAME,
     TOOL_VERSION,
     Finding,
+    evidence_state_for,
     new_finding,
 )
 from .report import compare_with_baseline
 from .resolver import awaited_call_ids, collect_functions, module_imports, resolve_in_scopes
-from .rules import FileContext, architecture, async_rules, interprocedural, lifecycle, migrations, reliability, security, sqlalchemy_rules, transactions
+from .rules import FileContext, architecture, async_rules, declared, interprocedural, lifecycle, migrations, reliability, security, sqlalchemy_rules, transactions
 from .suppressions import line_comments, suppression_for
 
-FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security, interprocedural, reliability, lifecycle)
+FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security, interprocedural, reliability, lifecycle, declared)
 TEST_DOWNGRADE_PREFIXES = ("ASYNC_BLOCKING_CALL", "SA_", "TX_", "RETRY_", "BG_")
 ASYNC_TEST_NOTE = (
     " Test code: the stalled event loop is the test's own; confirm the call does not run "
@@ -154,10 +156,13 @@ def _contracts_block(facts: ProjectFacts) -> Dict[str, Any]:
         "authorization_unknown": sum(1 for c in routes if c["authentication"] == "present" and not c["authorization"] and (c["resource_params"] or c["tenant_params"])),
     }
     kinds: Dict[str, int] = {}
+    partition = {"public_declared": 0, "unauthenticated_not_public": 0, "optional_authentication": 0, "authenticated_authorization_visible": 0, "authenticated_only": 0, "authenticated_authorization_unknown": 0}
     for c in routes:
         for k in c["authorization"]:
             kinds[k] = kinds.get(k, 0) + 1
-    return {"summary": counts, "authorization_kinds": dict(sorted(kinds.items())), "routes": routes}
+        partition[c.get("bucket", "authenticated_only")] += 1
+    counts["optional_authentication"] = partition["optional_authentication"]
+    return {"summary": counts, "partition": partition, "authorization_kinds": dict(sorted(kinds.items())), "routes": routes}
 
 
 def _rule_enabled(rule: str, options: AuditOptions) -> bool:
@@ -178,7 +183,7 @@ def _classify(finding: Finding, environment: str, comments: Dict[int, str], hono
         confidence = CONFIDENCE_DOWNGRADE[confidence]
         message += ASYNC_TEST_NOTE if finding.rule == "ASYNC_BLOCKING_CALL" else GENERIC_TEST_NOTE
     suppression = suppression_for(finding.rule, comments.get(finding.line)) if honor_suppressions else None
-    return replace(
+    classified = replace(
         finding,
         confidence=confidence,
         message=message,
@@ -186,6 +191,7 @@ def _classify(finding: Finding, environment: str, comments: Dict[int, str], hono
         suppressed=suppression is not None,
         suppression=suppression,
     )
+    return replace(classified, evidence_state=evidence_state_for(classified))
 
 
 def analyse_source(
@@ -289,12 +295,13 @@ def audit_project(
 
     findings: List[Finding] = []
     for rel in sorted(facts.summary_failures):
-        findings.append(new_finding(
+        partial = new_finding(
             "ANALYSIS_PARTIAL", rel, 1, 0,
             "The interprocedural pass hit a resource limit (recursion or memory) while summarising this file; "
             "its functions are absent from the call graph. Per-file rules still ran on it.",
             confidence="high", environment=classify_environment(rel),
-        ))
+        )
+        findings.append(replace(partial, evidence_state=evidence_state_for(partial)))
     for entry in skipped:
         if entry["reason"] == "unreadable_directory":
             findings.append(new_finding(
@@ -327,7 +334,7 @@ def audit_project(
         findings.extend(analyse_source(data, rel, facts=facts, options=options))
 
     if options.categories is None or "architecture" in options.categories or (options.select_rules and any(r.startswith("ARCH_") for r in options.select_rules)):
-        project_findings = [f for f in architecture.run_project(facts) if _rule_enabled(f.rule, options)]
+        project_findings = [replace(f, evidence_state=evidence_state_for(f)) for f in architecture.run_project(facts) if _rule_enabled(f.rule, options)]
         findings.extend(project_findings)
 
     if options.only_files is not None:
@@ -345,8 +352,12 @@ def audit_project(
     by_environment: Dict[str, int] = {ENV_APPLICATION: 0, ENV_TEST: 0, ENV_MIGRATION: 0}
     by_category: Dict[str, int] = {c: 0 for c in CATEGORIES}
     by_verification: Dict[str, int] = {}
+    by_evidence_state: Dict[str, int] = {state: 0 for state in EVIDENCE_STATES}
     suppressed = 0
     for finding in findings:
+        if not finding.evidence_state:
+            finding = replace(finding, evidence_state=evidence_state_for(finding))
+        by_evidence_state[finding.evidence_state] += 1
         by_rule[finding.rule] = by_rule.get(finding.rule, 0) + 1
         by_severity[finding.severity] += 1
         by_environment[finding.environment] = by_environment.get(finding.environment, 0) + 1
@@ -370,6 +381,7 @@ def audit_project(
             "by_environment": by_environment,
             "by_category": by_category,
             "by_verification": dict(sorted(by_verification.items())),
+            "by_evidence_state": by_evidence_state,  # schema 1.5
             "suppressed": suppressed,
             "partial_analysis": partial,
         },

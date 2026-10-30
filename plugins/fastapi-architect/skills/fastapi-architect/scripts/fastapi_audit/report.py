@@ -126,6 +126,9 @@ def render_text(report: Dict[str, object]) -> str:
             )
     elif isinstance(inter, dict):
         lines.append("call graph: disabled (--no-interprocedural)")
+    states = summary.get("by_evidence_state") if isinstance(summary, dict) else None
+    if isinstance(states, dict):
+        lines.append("evidence states: " + ", ".join(f"{k} {v}" for k, v in states.items() if v))
     contracts = report.get("contracts")
     if isinstance(contracts, dict) and contracts.get("summary", {}).get("routes"):
         cs = contracts["summary"]
@@ -282,3 +285,116 @@ def list_rules_text() -> str:
     for rule, meta in sorted(RULES.items(), key=lambda kv: (kv[1]["category"], kv[0])):
         lines.append(f"{rule}  [{meta['severity']}/{meta['category']}/{meta['verification']}]  {meta['summary']}")
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# SARIF 2.1.0 (v1.7): CI and code-scanning import. Every earlier format is kept.
+# --------------------------------------------------------------------------- #
+
+SARIF_SCHEMA = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json"
+SARIF_LEVELS = {"high": "error", "medium": "warning", "low": "note", "info": "note"}
+INFORMATION_URI = "https://github.com/martinDTV/claude-fastapi-architect-skill"
+
+
+def to_sarif(report: Dict[str, object]) -> str:
+    """SARIF 2.1.0 document for ``report``: one run, one rule per catalogue entry used, one result per
+    finding with the stable fingerprint as a partial fingerprint, documented suppressions as
+    ``suppressions[].kind == "inSource"``, confidence/evidence/evidence_state/verification/call_path/
+    recommended_test as result properties, and the interprocedural/contracts summaries as run
+    properties. Deterministic: rules and results follow the report's order."""
+    from .model import RULES
+
+    findings = report["findings"]
+    assert isinstance(findings, list)
+    used = sorted({f["rule"] for f in findings})
+    rule_index = {rule: i for i, rule in enumerate(used)}
+    rules = []
+    for rule in used:
+        meta = RULES.get(rule, {})
+        rules.append(
+            {
+                "id": rule,
+                "name": rule.title().replace("_", ""),
+                "shortDescription": {"text": rule.replace("_", " ").capitalize()},
+                "fullDescription": {"text": meta.get("summary", "")},
+                "defaultConfiguration": {"level": SARIF_LEVELS.get(meta.get("severity", "low"), "note")},
+                "helpUri": INFORMATION_URI,
+                "properties": {"category": meta.get("category", ""), "verification": meta.get("verification", ""), "tags": [meta.get("category", "")]},
+            }
+        )
+    root = str(report.get("project_root", "")).rstrip("/") + "/"
+    results = []
+    for f in findings:
+        result: Dict[str, object] = {
+            "ruleId": f["rule"],
+            "ruleIndex": rule_index[f["rule"]],
+            "level": SARIF_LEVELS.get(f["severity"], "note"),
+            "message": {"text": f["message"]},
+            "locations": [
+                {
+                    "physicalLocation": {
+                        "artifactLocation": {"uri": f["file"], "uriBaseId": "%SRCROOT%"},
+                        "region": {"startLine": max(1, int(f["line"])), "startColumn": max(1, int(f["column"]) + 1)},
+                    },
+                    **({"logicalLocations": [{"name": f["function"], "kind": "function"}]} if f.get("function") else {}),
+                }
+            ],
+            "partialFingerprints": {"fastapiArchitect/fingerprint/v1": f["fingerprint"]},
+            "properties": {
+                "confidence": f["confidence"],
+                "evidence": f.get("evidence"),
+                "evidence_state": f.get("evidence_state"),
+                "verification": f.get("verification"),
+                "environment": f.get("environment"),
+                "category": f.get("category"),
+                "symbol": f.get("symbol"),
+                "call_path": f.get("call_path"),
+                "recommended_test": f.get("recommended_test"),
+            },
+        }
+        if f.get("suppressed"):
+            result["suppressions"] = [{"kind": "inSource", "justification": str(f.get("suppression") or "")}]
+        comparison = report.get("comparison")
+        if isinstance(comparison, dict):
+            fp = f["fingerprint"]
+            if any(item.get("fingerprint") == fp for item in comparison.get("new", [])):
+                result["baselineState"] = "new"
+            elif any(item.get("fingerprint") == fp for item in comparison.get("unchanged", [])):
+                result["baselineState"] = "unchanged"
+        results.append(result)
+    summary = report.get("summary")
+    assert isinstance(summary, dict)
+    document = {
+        "$schema": SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": TOOL_NAME,
+                        "version": TOOL_VERSION,
+                        "semanticVersion": TOOL_VERSION,
+                        "informationUri": INFORMATION_URI,
+                        "rules": rules,
+                    }
+                },
+                "originalUriBaseIds": {"%SRCROOT%": {"uri": "file://" + root}},
+                "invocations": [
+                    {
+                        "executionSuccessful": True,
+                        "properties": {"partial_analysis": bool(summary.get("partial_analysis")), "files_scanned": report.get("files_scanned"), "files_skipped": report.get("files_skipped")},
+                    }
+                ],
+                "results": results,
+                "properties": {
+                    "schema_version": report.get("schema_version"),
+                    "summary": summary,
+                    "interprocedural": report.get("interprocedural"),
+                    "contracts_summary": (report.get("contracts") or {}).get("summary") if isinstance(report.get("contracts"), dict) else None,
+                    "contracts_partition": (report.get("contracts") or {}).get("partition") if isinstance(report.get("contracts"), dict) else None,
+                    "disclaimer": report.get("disclaimer"),
+                },
+            }
+        ],
+    }
+    return json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"

@@ -15,13 +15,23 @@ TOOL_VERSION = "1.7.0"
 # 1.3: evidence and call_path per finding, interprocedural block, reliability category.
 # 1.4: resolution adds builtin/object/ambiguous; interprocedural adds edges, coverage, uncertainty,
 #      limits, attribute_kinds, files_skipped; config adds time_budget_s; ANALYSIS_PARTIAL rule.
-# 1.5: top-level `contracts` block (security contract per route); five rules.
+# 1.5: top-level `contracts` block (security contract per route); `evidence_state` per finding and
+#      `by_evidence_state` in the summary; `contracts` category for declared, opt-in contracts.
 # Every field of an earlier schema keeps its name, type and meaning.
 SCHEMA_VERSION = "1.5"
 
 EVIDENCE_VERIFIED = "verified"  # pattern and symbols resolved directly from the AST
 EVIDENCE_INFERRED = "inferred"  # a type or flow was propagated from callers/dependencies or guessed from names
 EVIDENCE_UNKNOWN = "unknown"  # the property could not be resolved; the finding is a question
+# v1.7 evidence states (schema 1.5): a single label per finding for reports and CI gates.
+STATE_REPRODUCED = "reproduced"  # never produced by static analysis; reserved for runtime records
+STATE_STATIC_CONFIRMED = "static_confirmed"  # pattern and symbols resolved from the source
+STATE_INFERRED = "inferred"  # a type or flow was propagated; confirm the target
+STATE_INSUFFICIENT = "insufficient"  # the property could not be decided statically: a question
+STATE_PARTIAL = "partial"  # the analysis of this file/pass did not complete
+STATE_SUPPRESSED = "suppressed"  # documented in source; kept for review
+EVIDENCE_STATES: Tuple[str, ...] = (STATE_REPRODUCED, STATE_STATIC_CONFIRMED, STATE_INFERRED, STATE_INSUFFICIENT, STATE_PARTIAL, STATE_SUPPRESSED)
+PARTIAL_RULES = frozenset({"ANALYSIS_PARTIAL", "FILE_SKIPPED", "PY_SYNTAX"})
 PYTHON_VERSION = platform.python_version()
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3}
@@ -45,6 +55,7 @@ CATEGORIES: Tuple[str, ...] = (
     "security",
     "architecture",
     "reliability",
+    "contracts",  # v1.7: declared, opt-in architectural contracts
     "files",
 )
 
@@ -625,6 +636,58 @@ RULES.update(
     }
 )
 
+RULES.update(
+    {
+        # ---- v1.7 declared contracts (opt-in through .audit-fastapi.json) and consumers ---
+        "CONTRACT_ROUTE_AUTH_REQUIRED": {
+            "severity": "high",
+            "category": "contracts",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "The project declares (contracts.route_auth_required) that routes under these paths "
+                "must be authenticated, and this route shows no authentication and is not declared public."
+            ),
+        },
+        "CONTRACT_MUTATION_AUTHZ_REQUIRED": {
+            "severity": "medium",
+            "category": "contracts",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "The project declares (contracts.mutation_authorization_required) that mutating routes "
+                "under these paths must show an authorization kind, and this one shows only authentication."
+            ),
+        },
+        "CONTRACT_IMPORT_FORBIDDEN": {
+            "severity": "medium",
+            "category": "contracts",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "The project declares (contracts.forbidden_imports) that these modules must not import "
+                "those modules, and this file does."
+            ),
+        },
+        "CONTRACT_COMMIT_OUTSIDE_LAYER": {
+            "severity": "medium",
+            "category": "contracts",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "The project declares (contracts.commit_layers) which layers own transactions, and this "
+                "file, classified in another layer, commits."
+            ),
+        },
+        "REL_CONSUMER_WITHOUT_INBOX": {
+            "severity": "low",
+            "category": "reliability",
+            "verification": VERIFICATION_NOT_STATIC,
+            "summary": (
+                "A message/event consumer writes to the database and shows no signal that recognises a "
+                "redelivery (inbox table, processed-ids insert with ON CONFLICT, idempotency key). Brokers "
+                "deliver at least once; whether a duplicate is applied twice cannot be decided statically."
+            ),
+        },
+    }
+)
+
 RULE_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     category: tuple(sorted(r for r, meta in RULES.items() if meta["category"] == category))
     for category in CATEGORIES
@@ -652,6 +715,7 @@ class Finding:
     recommended_test: Optional[str] = None  # schema 1.2
     evidence: str = EVIDENCE_VERIFIED  # schema 1.3
     call_path: Optional[Tuple[str, ...]] = None  # schema 1.3: caller -> ... -> symbol
+    evidence_state: str = ""  # schema 1.5: one of EVIDENCE_STATES (set by the engine after classification)
 
     @property
     def fingerprint(self) -> str:
@@ -687,10 +751,25 @@ class Finding:
             "fingerprint": self.fingerprint,
             "evidence": self.evidence,
             "call_path": list(self.call_path) if self.call_path else None,
+            "evidence_state": self.evidence_state or evidence_state_for(self),
         }
 
     def sort_key(self) -> Tuple[str, int, int, str, str, str]:
         return (self.file, self.line, self.column, self.rule, self.symbol or "", self.message)
+
+
+def evidence_state_for(finding: "Finding") -> str:
+    """Single label for a finding: suppressed > partial > insufficient > inferred > static_confirmed.
+    ``reproduced`` is never produced here: static analysis cannot execute anything."""
+    if finding.suppressed:
+        return STATE_SUPPRESSED
+    if finding.rule in PARTIAL_RULES:
+        return STATE_PARTIAL
+    if finding.evidence == EVIDENCE_UNKNOWN or finding.verification == VERIFICATION_NOT_STATIC:
+        return STATE_INSUFFICIENT
+    if finding.evidence == EVIDENCE_INFERRED:
+        return STATE_INFERRED
+    return STATE_STATIC_CONFIRMED
 
 
 def new_finding(

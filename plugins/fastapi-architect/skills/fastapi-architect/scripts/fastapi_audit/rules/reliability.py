@@ -480,6 +480,7 @@ def _dual_write(ctx: FileContext, func: FunctionInfo, record, kinds, out: List[F
     if not commits or not publishes:
         return
     names = {n.id for n in ast.walk(func.node) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(func.node) if isinstance(n, ast.Attribute)}
+    names |= {k.arg for n in ast.walk(func.node) if isinstance(n, ast.Call) for k in n.keywords if k.arg}  # dedupe_key=..., idempotency_key=...
     texts = [n.value for n in ast.walk(func.node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     if any(OUTBOX_RE.search(n) for n in names) or any(OUTBOX_RE.search(t) for t in texts):
         return
@@ -527,3 +528,54 @@ def _run_v16(ctx: FileContext, func: FunctionInfo, record, kinds, out: List[Find
     _retry_unbounded(ctx, func, out)
     _http_timeout(ctx, func, kinds, out)
     _dual_write(ctx, func, record, kinds, out)
+    _consumer_without_inbox(ctx, func, record, kinds, out)
+
+
+# --------------------------------------------------------------------------- #
+# v1.7: message/event consumers without a redelivery guard
+# --------------------------------------------------------------------------- #
+
+CONSUMER_NAME_RE = _re.compile(r"^(on_|handle_?|consume_?|process_(message|event|delivery|notification|webhook)|dispatch_(message|event))", _re.I)
+CONSUMER_PARAM_RE = _re.compile(r"^(message|msg|event|delivery|payload|record|envelope|notification)(_id)?$", _re.I)
+INBOX_RE = _re.compile(r"inbox|processed|dedup|idempot|on conflict|on_conflict|seen|already_handled|message_id|delivery_id|event_id", _re.I)
+
+
+def _consumer_without_inbox(ctx: FileContext, func: FunctionInfo, record, kinds, out: List[Finding]) -> None:
+    if record is None or record.is_route or func.class_name and func.name in {"__init__"}:
+        return
+    if not CONSUMER_NAME_RE.search(func.name):
+        return
+    params = [a.arg for a in func.params()]
+    if not any(CONSUMER_PARAM_RE.search(p) for p in params if p not in {"self", "cls"}):
+        return
+    if not record.writes:
+        return
+    names = {n.id for n in ast.walk(func.node) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(func.node) if isinstance(n, ast.Attribute)}
+    names |= {k.arg for n in ast.walk(func.node) if isinstance(n, ast.Call) for k in n.keywords if k.arg}  # dedupe_key=..., idempotency_key=...
+    texts = " ".join(c.value for c in ast.walk(func.node) if isinstance(c, ast.Constant) and isinstance(c.value, str))
+    id_params = [p for p in params if p.endswith("_id")]
+    # a guard is visible when an id-looking parameter is used in a query/text or an inbox/processed/dedup name appears
+    used_ids = [p for p in id_params if any(isinstance(n, ast.Name) and n.id == p for n in ast.walk(func.node) if not isinstance(getattr(n, "ctx", None), ast.Param))]
+    guarded = bool(INBOX_RE.search(texts)) or any(INBOX_RE.search(n) for n in names - set(params)) or (used_ids and INBOX_RE.search(" ".join(used_ids)) and INBOX_RE.search(texts + " ".join(names)))
+    if guarded or record.idempotency_signal:
+        return
+    out.append(
+        new_finding(
+            "REL_CONSUMER_WITHOUT_INBOX",
+            ctx.relpath,
+            func.lineno,
+            getattr(func.node, "col_offset", 0),
+            (
+                f"'{func.qualname}' looks like a message/event consumer (name and parameters) and writes to the database, "
+                "but nothing visible recognises a redelivery: no inbox/processed table, no insert of the message id with "
+                "ON CONFLICT, no idempotency key. Brokers deliver at least once; if the handler is not idempotent by design, "
+                "a duplicate applies the change twice. Not verifiable statically."
+            ),
+            confidence="low",
+            symbol=func.name,
+            function=func.qualname,
+            environment=ctx.environment,
+            evidence="unknown",
+            recommended_test="Deliver the same message twice (same id) and assert exactly one effect.",
+        )
+    )

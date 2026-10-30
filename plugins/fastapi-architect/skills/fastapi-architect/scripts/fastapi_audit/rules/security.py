@@ -582,6 +582,7 @@ def run(ctx: FileContext) -> List[Finding]:
     if ctx.fastapi_imported or any(f.route for f in ctx.functions):
         _route_rules(ctx, out)
         contracts = build_contracts(ctx, _providers, _dependency_chain, _dependency_record, _param_signal, _router_signal)
+        ctx.contracts = contracts  # consumed by rules.declared in the same pass
         by_function = {c.function: c for c in contracts}
         if ctx.facts is not None:
             ctx.facts.route_contracts.extend(c.to_dict() for c in contracts)

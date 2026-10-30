@@ -11,7 +11,7 @@ from typing import List, Optional, Sequence, Set
 from .discovery import DEFAULT_MAX_FILE_BYTES
 from .engine import AuditOptions, audit_project
 from .model import CATEGORIES, RULES, SEVERITY_ORDER, TOOL_NAME, TOOL_VERSION
-from .report import list_rules_text, render_markdown, render_text, to_json
+from .report import list_rules_text, render_markdown, render_text, to_json, to_sarif
 
 
 def _split_csv(values: Optional[Sequence[str]]) -> List[str]:
@@ -32,10 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("path", nargs="?", help="project directory or single .py file")
     parser.add_argument("--json", action="store_true", help="print the JSON report on stdout (same as --format json)")
     parser.add_argument(
-        "--format", choices=("text", "json", "markdown"), default=None,
-        help="output format on stdout (default text; --output always writes JSON)",
+        "--format", choices=("text", "json", "markdown", "sarif"), default=None,
+        help="output format on stdout (default text; --output always writes JSON; sarif = SARIF 2.1.0)",
     )
     parser.add_argument("--output", metavar="FILE", help="write the JSON report to FILE (the only write this tool performs)")
+    parser.add_argument("--sarif", metavar="FILE", help="also write a SARIF 2.1.0 document to FILE (for CI / code scanning)")
     parser.add_argument("--exclude", action="append", default=[], metavar="DIRNAME", help="additional directory name to skip (repeatable)")
     parser.add_argument("--include-hidden", action="store_true", help="also scan dot-directories (the default exclusion list still applies)")
     parser.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES, help=f"skip files larger than this many bytes (default {DEFAULT_MAX_FILE_BYTES})")
@@ -170,8 +171,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except OSError as exc:
             reason = exc.strerror or exc.__class__.__name__
             output_error = f"{TOOL_NAME}: error: cannot write report to {args.output}: {reason}"
+    if args.sarif:
+        try:
+            with open(args.sarif, "w", encoding="utf-8") as handle:
+                handle.write(to_sarif(report))
+        except OSError as exc:
+            reason = exc.strerror or exc.__class__.__name__
+            output_error = f"{TOOL_NAME}: error: cannot write SARIF to {args.sarif}: {reason}"
     if fmt == "json":
         sys.stdout.write(payload)
+    elif fmt == "sarif":
+        sys.stdout.write(to_sarif(report))
     elif fmt == "markdown":
         sys.stdout.write(render_markdown(report))
     elif not args.output:
