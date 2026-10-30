@@ -59,11 +59,14 @@ class ContractTests(unittest.TestCase):
         summary = self.report["contracts"]["summary"]
         self.assertEqual(summary["routes"], len(self.report["contracts"]["routes"]))
         self.assertEqual(summary["unauthenticated_not_public"], 1)  # /orders
-        self.assertEqual(summary["public"], 3)
+        self.assertEqual(summary["public"], 2)  # declared only; /health is exposure_undetermined
+        self.assertEqual(summary["exposure_undetermined"], 1)
         self.assertIn("role", self.report["contracts"]["authorization_kinds"])
 
     def test_public_routes_by_path_config_and_marker(self) -> None:
         self.assertEqual(self.routes["health"]["public_source"], "path")
+        self.assertFalse(self.routes["health"]["public"])  # a convention is recorded, never a declaration
+        self.assertEqual(self.routes["health"]["bucket"], "exposure_undetermined")
         self.assertEqual(self.routes["provider_webhook"]["public_source"], "config")
         self.assertEqual(self.routes["pricing"]["public_source"], "marker")
         self.assertFalse(self.routes["orders"]["public"])
@@ -211,7 +214,8 @@ class CompatibilityTests(ProjectCase):
         a = self.cli(".", "--format", "json").stdout
         b = self.cli(".", "--format", "json").stdout
         self.assertEqual(a, b)
-        self.assertEqual(json.loads(a)["contracts"]["summary"]["public"], 1)
+        summary = json.loads(a)["contracts"]["summary"]
+        self.assertEqual((summary["public"], summary["exposure_undetermined"]), (0, 1))  # /health is a convention, not a declaration
 
 
 if __name__ == "__main__":  # pragma: no cover
@@ -258,8 +262,9 @@ class ContractPartitionTests(unittest.TestCase):
     def test_partition_is_disjoint_and_complete(self) -> None:
         partition = self.report["contracts"]["partition"]
         self.assertEqual(sum(partition.values()), self.report["contracts"]["summary"]["routes"])
-        self.assertEqual(set(partition), {"public_declared", "unauthenticated_not_public", "optional_authentication", "authenticated_authorization_visible", "authenticated_only", "authenticated_authorization_unknown"})
-        self.assertEqual(partition["public_declared"], 3)
+        self.assertEqual(set(partition), {"public_declared", "exposure_undetermined", "unauthenticated_not_public", "optional_authentication", "authenticated_authorization_visible", "authenticated_only", "authenticated_authorization_unknown"})
+        self.assertEqual(partition["public_declared"], 2)  # webhook (config) and pricing (marker)
+        self.assertEqual(partition["exposure_undetermined"], 1)  # /health by naming convention only
         self.assertEqual(partition["unauthenticated_not_public"], 1)
 
     def test_inherited_router_dependencies_and_resource_kinds(self) -> None:
@@ -330,12 +335,16 @@ class ConfigIsDataTests(ProjectCase):
         self.cli(".", "--format", "sarif")
         self.assertFalse(marker.exists(), "the auditor executed project Python")
 
-    def test_malformed_contract_declarations_are_ignored_not_executed(self) -> None:
+    def test_malformed_contract_declarations_fail_closed_without_executing_anything(self) -> None:
         self.write(".audit-fastapi.json", '{"contracts": {"forbidden_imports": ["__import__(\'os\')"], "route_auth_required": 42, "commit_layers": [1]}}')
         self.write("app/a.py", "import time\nasync def h():\n    time.sleep(1)\n")
-        report = self.run_audit()
-        self.assertFalse(any(f["rule"].startswith("CONTRACT_") for f in report["findings"]))
-        self.assertEqual(lines_of(report, "ASYNC_BLOCKING_CALL"), [3])
+        with self.assertRaises(audit.ConfigError) as caught:
+            self.run_audit()
+        self.assertGreaterEqual(len(caught.exception.errors), 3)
+        proc = self.cli(".", "--format", "json")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stdout, "")  # no report that looks complete
+        self.assertIn("contracts.route_auth_required", proc.stderr)
 
 
 class SarifTests(ProjectCase):
@@ -409,3 +418,95 @@ class ConsumerInboxTests(ProjectCase):
         items = by_rule(report)["REL_CONSUMER_WITHOUT_INBOX"]
         self.assertEqual([(f["file"], f["line"], f["evidence"], f["evidence_state"]) for f in items], [("app/services/consumers.py", 7, "unknown", "insufficient")])
         self.assertEqual(lines_of(report, "REL_CONSUMER_WITHOUT_INBOX", "app/services/reliability.py"), [])  # consume() has an inbox
+
+
+class ConfigValidationTests(ProjectCase):
+    """The contracts section fails closed; everything older keeps its lenient behaviour."""
+
+    def _ok(self, config: str) -> None:
+        self.write(".audit-fastapi.json", config)
+        self.write("app/a.py", "import time\nasync def h():\n    time.sleep(1)\n")
+        report = self.run_audit()
+        self.assertEqual(lines_of(report, "ASYNC_BLOCKING_CALL"), [3])
+
+    def _bad(self, config: str, *fragments: str) -> None:
+        self.write(".audit-fastapi.json", config)
+        self.write("app/a.py", "import time\nasync def h():\n    time.sleep(1)\n")
+        with self.assertRaises(audit.ConfigError) as caught:
+            self.run_audit()
+        joined = " ".join(caught.exception.errors)
+        for fragment in fragments:
+            self.assertIn(fragment, joined)
+        proc = self.cli(".", "--format", "json")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn(".audit-fastapi.json", proc.stderr)
+
+    def test_valid_declarations_pass(self) -> None:
+        self._ok('{"public_routes": ["/public/*"], "tenant_params": ["clinic_id"], "contracts": {"route_auth_required": ["/api/*"], "mutation_authorization_required": ["/api/*"], "forbidden_imports": [{"from": "app.api", "to": "app.infra", "x-reason": "ADR 12"}], "commit_layers": ["service", "custom"], "x-owner": "platform"}, "layers": {"custom": ["*/custom/*"]}}')
+
+    def test_absent_contracts_keep_the_previous_behaviour(self) -> None:
+        self._ok('{"layers": {"service": ["*/svc/*"]}, "exclude": ["vendor"], "ignore_rules": ["ROUTE_NO_RETURN_ANNOTATION"], "unknown_key": {"anything": 1}}')
+        self._ok('{}')
+
+    def test_wrong_types_and_unknown_properties(self) -> None:
+        self._bad('{"contracts": []}', "contracts: expected an object")
+        self._bad('{"contracts": {"route_auth_required": "/api/*"}}', "contracts.route_auth_required: expected a list")
+        self._bad('{"contracts": {"route_auth_required": ["/api/*"], "forbid": []}}', "contracts.forbid: unknown property")
+        self._bad('{"contracts": {}}', "declares nothing")
+        self._bad('{"tenant_params": "clinic_id"}', "tenant_params: expected a list")
+        self._bad('{"public_routes": [1]}', "public_routes[0]: expected a string")
+
+    def test_invalid_globs_and_patterns(self) -> None:
+        self._bad('{"contracts": {"route_auth_required": ["api/*"]}}', "route globs must start with '/'")
+        self._bad('{"contracts": {"route_auth_required": ["/api/[a"]}}', "unbalanced brackets")
+        self._bad('{"contracts": {"route_auth_required": [" /api/*"]}}', "whitespace")
+        self._bad('{"contracts": {"route_auth_required": []}}', "must not be empty")
+
+    def test_required_fields_and_incompatible_rules(self) -> None:
+        self._bad('{"contracts": {"forbidden_imports": [{"from": "app.api"}]}}', "missing required property 'to'")
+        self._bad('{"contracts": {"forbidden_imports": [{"from": "app.api", "to": "app.api"}]}}', "same module")
+        self._bad('{"contracts": {"forbidden_imports": [{"from": "app", "to": "app.infra"}]}}', "nest one another")
+        self._bad('{"contracts": {"forbidden_imports": [{"from": "app.api", "to": "os.path", "via": 1}]}}', "unknown property")
+        self._bad('{"contracts": {"commit_layers": ["svc"]}}', "unknown layer 'svc'")
+        self._bad('{"public_routes": ["/api/*"], "contracts": {"route_auth_required": ["/api/*"]}}', "also listed in public_routes")
+
+    def test_errors_carry_the_configuration_location(self) -> None:
+        self.write("custom.json", '{"contracts": {"commit_layers": [1]}}')
+        self.write("app/a.py", "x = 1\n")
+        proc = self.cli(".", "--config", "custom.json", "--format", "json")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("custom.json", proc.stderr)
+        self.assertIn("contracts.commit_layers[0]", proc.stderr)
+
+
+class RegressionV17Tests(unittest.TestCase):
+    """Specific fixtures for the defects corrected in the third review (the held-out corpora are not re-scored)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = audit_fixture("regressions_v17")
+        cls.routes = {c["function"]: c for c in cls.report["contracts"]["routes"]}
+
+    def test_health_convention_never_overrides_a_declared_contract(self) -> None:
+        self.assertEqual(self.routes["status"]["bucket"], "exposure_undetermined")
+        self.assertEqual(self.routes["status"]["public_source"], "path")
+        self.assertFalse(self.routes["status"]["public"])
+        self.assertEqual(lines_of(self.report, "CONTRACT_ROUTE_AUTH_REQUIRED"), [35, 45])  # /api/status and /api/orders
+        self.assertEqual(lines_of(self.report, "SEC_ROUTE_WITHOUT_AUTH_SIGNAL"), [45])  # convention keeps the informational rule silent
+        self.assertEqual(self.routes["health"]["bucket"], "exposure_undetermined")
+        self.assertEqual(self.routes["prices"]["bucket"], "public_declared")
+        partition = self.report["contracts"]["partition"]
+        self.assertEqual(sum(partition.values()), len(self.routes))
+        self.assertEqual((partition["public_declared"], partition["exposure_undetermined"], partition["unauthenticated_not_public"]), (1, 2, 1))
+
+    def test_one_question_per_route(self) -> None:
+        questions = {}
+        for f in self.report["findings"]:
+            if f["rule"] in {"SEC_TENANT_NOT_BOUND_TO_PRINCIPAL", "SEC_RLS_CONTEXT_FROM_REQUEST", "SEC_PRIVILEGE_CHANGE_UNVERIFIED", "SEC_RESOURCE_AUTHZ_UNVERIFIED"}:
+                questions.setdefault(f["function"], []).append(f["rule"])
+        self.assertEqual(questions["reroute"], ["SEC_TENANT_NOT_BOUND_TO_PRINCIPAL"])
+        self.assertEqual(questions["set_role"], ["SEC_PRIVILEGE_CHANGE_UNVERIFIED"])
+        self.assertEqual(questions["shipment"], ["SEC_RESOURCE_AUTHZ_UNVERIFIED"])
+        self.assertEqual(self.routes["reroute"]["resource_params"], ["shipment_id"])  # the id stays visible in the contract
+        self.assertEqual(self.routes["reroute"]["tenant_params"], ["depot_id"])
