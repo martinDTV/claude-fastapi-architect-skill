@@ -47,10 +47,11 @@ assert 'plugins/fastapi-architect/evals/results/' in (root/'.gitignore').read_te
 assert (root/'tests/test_plugin_evals.py').is_file(), 'Missing tests/test_plugin_evals.py'
 # v1.6: ground-truth corpus and the precision/benchmark script
 assert (root/'tests/fixtures/truth16/README.md').is_file(), 'Missing tests/fixtures/truth16/README.md'
-for part in ('dev','acceptance'):
+for part in ('dev','acceptance','holdout'):
     assert (root/f'tests/fixtures/truth17/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth17/{part}/EXPECTATIONS.md'
 assert (root/'scripts/audit_precision.py').is_file(), 'Missing scripts/audit_precision.py'
 compile((root/'scripts/audit_precision.py').read_text(encoding='utf-8'),'audit_precision.py','exec')
+assert (root/'tests/fixtures/contracts_declared/.audit-fastapi.json').is_file(), 'Missing declared-contracts fixture'
 example=root/'plugins/fastapi-architect/examples/tenant-ledger'
 for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py','tests/test_adversarial.py','tests/test_tenant_binding.py'):
     assert (example/f).is_file(), f'Missing reference implementation file: {f}'
