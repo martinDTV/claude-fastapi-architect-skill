@@ -794,7 +794,7 @@ SCHEMA_15_FINDING_KEYS = {"rule", "severity", "confidence", "file", "line", "col
 class CompatibilityTests(ProjectCase):
     def test_schema_16_is_a_superset_of_15(self) -> None:
         report = audit_fixture("truth18/dev")
-        self.assertEqual(report["schema_version"], "1.6")
+        self.assertGreaterEqual(tuple(int(x) for x in report["schema_version"].split(".")), (1, 6))
         self.assertTrue(SCHEMA_15_REPORT_KEYS <= set(report))
         for finding in report["findings"]:
             self.assertTrue(SCHEMA_15_FINDING_KEYS <= set(finding))

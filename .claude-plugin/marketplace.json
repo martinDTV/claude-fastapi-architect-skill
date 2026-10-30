@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Right-sized architecture and code standards for FastAPI backends.",
-    "version": "1.8.0"
+    "version": "1.9.0"
   },
   "plugins": [
     {
       "name": "fastapi-architect",
       "source": "./plugins/fastapi-architect",
       "description": "Chooses the right architecture for a FastAPI project (prototype, modular monolith, ports and adapters, or microservices), enforces module boundaries, and applies production code standards.",
-      "version": "1.8.0",
+      "version": "1.9.0",
       "category": "development",
       "keywords": ["fastapi", "python", "architecture", "backend", "microservices", "modular-monolith", "sqlalchemy"]
     }

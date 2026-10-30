@@ -19,7 +19,7 @@ from typing import Callable, Dict, List, Optional
 
 from .model import Finding
 
-REMEDIATION_SCHEMA = "1"
+REMEDIATION_SCHEMA = "2"  # v1.9: adds recipe / automatable / tool (additive)
 STATUS_PROPOSED = "proposed"
 
 CERTAINTY_BY_STATE = {
@@ -35,6 +35,7 @@ CERTAINTY_BY_STATE = {
 def _base(finding: Finding, problem: str, fix: List[str], invariants: List[str], tests: List[str], risk: str, risk_why: str) -> Dict[str, object]:
     state = finding.evidence_state or "static_confirmed"
     certainty = CERTAINTY_BY_STATE.get(state, "low")
+    recipe = _recipe_for(finding)
     if certainty == "low":
         fix = [
             "Confirm the finding first: the analysis could not establish it statically (see evidence); "
@@ -58,11 +59,21 @@ def _base(finding: Finding, problem: str, fix: List[str], invariants: List[str],
             "details": dict(finding.details) if finding.details else None,
         },
         "certainty": certainty,
+        "recipe": recipe,  # v1.9: automatic recipe of scripts/audit_remediate.py, or None (manual steps only)
+        "automatable": recipe is not None,
+        "tool": "scripts/audit_remediate.py" if recipe is not None else None,
         "proposed_fix": fix,
         "invariants": invariants,
         "tests": tests,
         "regression_risk": {"level": risk, "why": risk_why},
     }
+
+
+def _recipe_for(finding: Finding) -> Optional[str]:
+    """Recipe id when ``scripts/audit_remediate.py`` can patch this finding in an isolated copy (v1.9)."""
+    from .remediate.patches import recipe_for  # local import: the remediate package imports the engine
+
+    return recipe_for({"rule": finding.rule, "details": dict(finding.details) if finding.details else {}})
 
 
 def _commit_in_loop(f: Finding) -> Dict[str, object]:
