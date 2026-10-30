@@ -75,7 +75,8 @@ plugins/fastapi-architect/
     └── scripts/
         ├── audit_fastapi.py              # read-only static auditor entry point (stdlib only)
         ├── audit_diff.py                 # report comparison tool (v1.8)
-        └── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, cli
+        ├── audit_remediate.py            # verified remediation tool (v1.9)
+        └── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, remediate/, cli
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
 plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
@@ -83,6 +84,7 @@ scripts/audit_fastapi.py                  # root entry point forwarding to the s
 scripts/validate_structure.py             # packaging, links and version checks
 scripts/audit_precision.py                # precision/recall/coverage/time/memory of the auditor, current vs. a previous commit
 scripts/audit_diff.py                     # compare two audit reports by fingerprint: new, no longer detected, persistent, confidence/severity changes (v1.8)
+scripts/audit_remediate.py                # patch findings in an isolated copy, re-audit and re-test; never writes to the project (v1.9)
 tests/                                    # auditor suites per category, fixtures (incl. the truth16/17/18 ground-truth corpora), PostgreSQL integration tests
 ```
 
@@ -216,3 +218,13 @@ The auditor classifies more call sites without inventing project edges, reads th
 - **Remediation foundations.** Five rules carry a `remediation` object: problem, evidence, certainty (from the evidence state), proposed fix as steps, invariants, tests, regression risk. `status: proposed`, `applied: false`, `verified: false`, always; the auditor never edits code.
 - **Report comparison.** `scripts/audit_diff.py BEFORE.json AFTER.json` and the richer `--baseline` block: new, no longer detected, persistent, severity/confidence/evidence-state changes, suppression transitions, partial-analysis reliability. A finding that is not reported any more is "no longer detected", never "resolved".
 - **Measured.** `tests/fixtures/truth18` (`dev` scored in-process, `acceptance` scored once at release time): on `dev` the v1.7 engine scored F1 0.308, expected edges 1/6 and unresolved statuses 7/16; v1.8 scores 1.0, 6/6 and 16/16. Clivana (read-only) 55 → 52 findings: the three that disappeared are a convergence loop, a cursor-paginated job and a bounded batch deletion; AgentForge 11 → 15: four indirect-blocking findings in operator scripts (async code calling a worktree manager that shells out to git, followed through a two-level attribute chain); the resource question the first cut asked on a shared-token route was withdrawn once contracts record `principal_kind` (a `-> None` credential check identifies no caller). Time +6 % on the largest repository, memory flat. The reference implementation gains a PostgreSQL test for the new rule (30 tests); it corrected the rule's first draft. Release details in `RELEASE-NOTES-v1.8.md`.
+
+## Extension v1.9 — Verified Remediation & Safe Refactoring
+
+The auditor proposes; `scripts/audit_remediate.py` applies the proposal **in an isolated copy**, audits again and, when authorized, runs the project's tests before and after. The project itself is never written to; the human applies the diff. Everything from v1.0 to v1.8 remains (report schema 1.7 adds `remediation.recipe` / `automatable` / `tool`).
+
+- **States that say what was checked.** `blocked` (a precondition failed; the manual recipe applies), `audit_clean` (the finding is no longer detected and nothing new appeared; tests not executed), `verified` (`audit_clean` plus the authorized tests passed in the copy; `defect_observed_before_patch` tells whether they failed before), `rejected` (the patch did not apply, left the finding, introduced findings, or the tests failed after it). `applied_to_project` is always `false`; `original_untouched` is proven by a digest.
+- **Three recipes end to end.** Remove a `commit()` inside `with session.begin()`, add the missing `await` on an `AsyncSession` coroutine, move a per-item `commit()` after its loop. Each one checks its preconditions on the AST (nested commits, early returns, lambdas, statements sharing a line are blocked), produces a unified diff that `git apply` accepts, and is specified with invariants, tests and rollback in `references/safe-refactoring.md`. Deliberate loops have no automatic recipe by design.
+- **Isolation, enforced and tested.** The copy excludes `.git`, environments and caches; nothing runs without `--authorize-execution`; commands run without a shell, from an allow-list (`python*`, `pytest`, `uv`, extensible), with a fresh `HOME`, an explicit environment pass-through, closed stdin, a timeout and CPU/file-size limits. Network isolation is not provided: use a container when the tests need one.
+- **Reproduction in fixtures and on PostgreSQL.** `tests/fixtures/remediation19` observes the three defects with a faithful fake session (three failing tests become five passing after the recipes); `tenant-ledger` gains a deselected `remediation` target that fails on the anti-pattern and passes after the recipe on a real PostgreSQL cluster, which the tool runs inside the copy.
+- **Compatible.** The 59 rules, JSON, SARIF, fingerprints, suppressions, declared contracts and the comparison tool are unchanged; the remediation run is a separate artefact (`remediation_run/1.0`). Release details in `RELEASE-NOTES-v1.9.md`.
