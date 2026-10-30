@@ -79,6 +79,26 @@ example=root/'plugins/fastapi-architect/examples/tenant-ledger'
 for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py','tests/test_adversarial.py','tests/test_tenant_binding.py'):
     assert (example/f).is_file(), f'Missing reference implementation file: {f}'
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
+# v2.0: design engine (contract, advisor, blueprint, generator, verification, report), tool (skill + root shim), examples, fixtures, docs
+design=base/'scripts/fastapi_design'
+for mod in ('__init__.py','spec.py','advisor.py','blueprint.py','generator.py','verify.py','report.py','pipeline.py'):
+    assert (design/mod).is_file(), f'Missing fastapi_design/{mod}'
+    compile((design/mod).read_text(encoding='utf-8'),str(design/mod),'exec')
+design_tool=base/'scripts/design_fastapi.py'
+design_shim=root/'scripts/design_fastapi.py'
+assert design_tool.is_file(), f'Missing design tool: {design_tool}'
+assert design_shim.is_file() and 'design_fastapi.py' in design_shim.read_text(encoding='utf-8'), 'Root design_fastapi.py does not forward to the skill tool'
+compile(design_tool.read_text(encoding='utf-8'),str(design_tool),'exec')
+for spec_name in ('inventory-service.json','orders-platform.json'):
+    spec_doc=json.loads((base.parent.parent/'examples/specs'/spec_name).read_text(encoding='utf-8'))
+    assert spec_doc.get('schema')=='fastapi-architect/spec/1.0', f'examples/specs/{spec_name}: unexpected schema'
+assert (base.parent.parent/'examples/generated/inventory-service/.fastapi-architect/generation.json').is_file(), 'Missing generated example manifest'
+assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
+assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
+assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file(), 'Missing v2.0 test modules'
+assert (base/'references/design-contracts.md').is_file(), 'Missing references/design-contracts.md'
+assert (root/'docs/architecture/design-engine-v2.md').is_file(), 'Missing docs/architecture/design-engine-v2.md'
+assert 'architecture/design-engine-v2.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the architecture record'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'

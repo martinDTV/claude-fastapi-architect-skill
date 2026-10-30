@@ -1,0 +1,90 @@
+# Design engine (v2.0): architecture record
+
+Status: first increment, implemented and tested locally; not published.
+
+## Decision
+
+FastAPI Architect v2.0 adds a **design engine** next to the audit (v1.3–v1.8) and remediation (v1.9) engines,
+without rewriting either. The engine is a pipeline of pure, deterministic steps with one impure step (writing
+files) guarded by explicit flags, and one executing step (running generated tests) guarded by the v1.9 trust
+model:
+
+```
+spec.json ──validate──▶ Spec (provenance, digest)
+                 ──recommend──▶ Recommendation (style, rejected, assumptions, pending)
+                 ──build──▶ Blueprint {path: content}        pure, sorted, no timestamps
+                 ──generate──▶ target directory              idempotent, never overwrites without --overwrite
+                 ──audit_generated──▶ audit report           static, reuses fastapi_audit.engine
+                 ──run_generated_tests──▶ test evidence      only through select_executor + runner adapters
+                 ──report──▶ architecture_report/1.0
+```
+
+Package: `plugins/fastapi-architect/skills/fastapi-architect/scripts/fastapi_design/` (`spec.py`, `advisor.py`,
+`blueprint.py`, `generator.py`, `verify.py`, `report.py`, `pipeline.py`); CLI `design_fastapi.py` in the skill
+with a root shim in `scripts/`; contract documented in `references/design-contracts.md`.
+
+## Why a declarative contract first
+
+The engine must separate three things the author needs to see apart: what was **required**, what was
+**assumed**, and what is **pending**. A JSON contract with strict validation and provenance gives that for free:
+every default is recorded as an assumption, every `status: pending` decision and open question is carried into
+the report, and the digest ties the generated project to the exact contract. The contract is data, never
+executed, and validated fail-closed like `.audit-fastapi.json` (same style, same error reporting with JSON paths).
+
+## Why the advisor is rule-based and conservative
+
+The brief forbids imposing DDD, microservices, CQRS or hexagonal architecture by default. The advisor therefore
+starts from the cheapest structure (layered) and only moves up when the contract shows the cost is paid for:
+module count, scope and team size for the modular monolith; outbound integrations, criticality or contract tests
+for ports and adapters; stated independent deployment plus team/module justification for microservices. Each
+rejected alternative is reported with its reason, so the author can overrule with `style_preference` (honoured,
+with a warning). Signals that hint at CQRS/eventing (eventual consistency, a broker, auditability) become pending
+decisions with pointers to the references, not structure.
+
+## Why generation is a blueprint plus a guarded writer
+
+Keeping the blueprint pure makes determinism and idempotency testable (two builds compare equal; a committed
+snapshot equals a fresh generation). The writer owns every safety rule: empty target or `--allow-existing`,
+conflicts never replaced without `--overwrite`, no deletion, atomic writes, path safety, manifest with file
+digests and no timestamps. Existing projects can therefore be extended module by module without risk.
+
+## Why the auditor had to learn one more fact
+
+The generated projects mount every business router into `api_router = APIRouter(prefix="/api/v1",
+dependencies=[Depends(require_api_key)])`. FastAPI applies those dependencies to every included router, but the
+auditor only recognised the router that carried them, so the generated code was reported as unauthenticated.
+Rather than bend the generated code towards the auditor, the facts pass now records `X.include_router(Y)` edges
+and propagates protection to a fixpoint (any file order, any depth, names expanded to every import form). The
+change is covered by a regression fixture with a negative control, and the dev/acceptance corpora and the two
+calibration projects score identically before and after (per-rule tp/fp/fn/tn unchanged).
+
+## Trust model for generated code
+
+Generated code is the tool's own output, but it is still code: it runs only when the operator passes
+`--authorize-execution` with a trust profile the executor accepts (`fixture` or `trusted`; `untrusted` fails
+closed), through the same `LocalProcessExecutor` and runner adapters as v1.9 (process hygiene, not a sandbox;
+structured evidence bound to the run). The generated project is used as the workspace project directly instead
+of being copied: it is not a foreign project, and its digest is compared before and after the run.
+
+## Verified in this increment
+
+- 48 example and fixture contracts validated (6 valid fixtures, 9 invalid fixtures with their expected JSON
+  paths, 2 example contracts); every generatable contract produces a project whose Python parses.
+- `inventory-service` (layered, in-memory, API key): generated, audited clean (0 findings, 5 authenticated
+  routes, 1 public), its 9 generated tests passed through the trust model with pytest-junit evidence; the
+  generated snapshot is committed under `plugins/fastapi-architect/examples/generated/inventory-service` and a
+  test asserts it equals a fresh generation.
+- `orders-platform` (hexagonal, PostgreSQL, multi-tenant, two integrations): generated into a temporary
+  directory, audited with one informational finding (import-linter present); its tests are generated but skip
+  without `DATABASE_URL` and are not executed by the suite (no PostgreSQL claim is made for generated code).
+
+## Limits and next increments
+
+- Alembic environment and first migration for PostgreSQL contracts; a PostgreSQL run of a generated project under
+  the same opt-in discipline as `tenant-ledger`.
+- OAuth2/JWT and session authentication, authorization policies, tenant membership binding (the auditor's
+  `authorization_unknown` contracts and the advisor's pending decisions point at them).
+- Prefix composition through `include_router` in the auditor, so `public_routes` can be declared with full paths.
+- Extending an existing (non-generated) project from a contract; the writer already supports adding files to a
+  non-empty target, the blueprint does not yet read an existing layout.
+- Docker, CI and pre-commit files from `assets/`, workers and outbox from the references.

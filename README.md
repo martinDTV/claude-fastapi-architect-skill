@@ -65,7 +65,8 @@ plugins/fastapi-architect/
     │   ├── data-layer.md                 # SQLAlchemy 2.x, transactions, repositories, Alembic, multi-tenancy
     │   ├── testing.md                    # fixtures, per-test rollback, unit and integration tests
     │   ├── security-and-config.md        # settings, secrets, OIDC/JWT, authorization, CORS
-    │   └── operations.md                 # logging, request IDs, tracing, health checks, Docker, CI
+    │   ├── operations.md                 # logging, request IDs, tracing, health checks, Docker, CI
+    │   └── design-contracts.md           # v2.0: architecture contract, advisor rules, generation safety, report schema
     ├── assets/
     │   ├── pyproject.toml                # uv, ruff, mypy, pytest, import-linter configured
     │   ├── Dockerfile                    # multi-stage, uv, non-root
@@ -76,15 +77,19 @@ plugins/fastapi-architect/
         ├── audit_fastapi.py              # read-only static auditor entry point (stdlib only)
         ├── audit_diff.py                 # report comparison tool (v1.8)
         ├── audit_remediate.py            # verified remediation tool (v1.9)
-        └── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, remediate/, cli
+        ├── design_fastapi.py             # design engine entry point: contract -> recommendation -> project -> verification (v2.0)
+        ├── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, remediate/, cli
+        └── fastapi_design/               # design package: spec (contract), advisor, blueprint, generator, verify, report, pipeline (v2.0)
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
-plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS)
+plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS);
+                                          # specs/: example architecture contracts; generated/inventory-service: backend generated from the first one (v2.0)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
 scripts/audit_precision.py                # precision/recall/coverage/time/memory of the auditor, current vs. a previous commit
 scripts/audit_diff.py                     # compare two audit reports by fingerprint: new, no longer detected, persistent, confidence/severity changes (v1.8)
 scripts/audit_remediate.py                # patch findings in an isolated copy, re-audit and re-test; never writes to the project (v1.9)
+scripts/design_fastapi.py                 # validate an architecture contract, recommend a structure, generate the project, audit it and run its tests under the trust model (v2.0)
 tests/                                    # auditor suites per category, fixtures (incl. the truth16/17/18 ground-truth corpora), PostgreSQL integration tests
 docs/                                     # documentation index (docs/README.md), release notes (docs/releases/), tooling architecture records (docs/architecture/)
 ```
@@ -231,3 +236,13 @@ The auditor proposes; `scripts/audit_remediate.py` applies the proposal **in an 
 - **Three recipes, verified on PostgreSQL.** Remove a `commit()` inside `with session.begin()`, add the missing `await` on an `AsyncSession` coroutine (errors now surface: documented), move a per-item `commit()` after its loop (all or nothing: documented). Preconditions on the AST block nested commits, early returns, lambdas and shared lines; diffs are accepted by `git apply`. `tenant-ledger` ships five deselected reproducers; the tool verified the example's four findings on a throwaway cluster, one copy each, and verified their composition on one more copy against the regression suite of the corrected code (the test that documents the anti-pattern carries the `antipattern_demo` marker and keeps running in the default suite).
 - **Adversarial controls.** Suppressing the finding instead of fixing it, editing a test, introducing an independent regression, a reproducer that already passed, a reproducer that fails after, skipped or missing tests, a stale baseline, a candidate for another file or base, infrastructure failures, timeouts, configuration errors and denied execution each end in a distinct state and reason code (`tests/test_audit_v19.py`).
 - **Compatible.** The 59 rules, JSON, SARIF, fingerprints, suppressions, declared contracts, the opt-in loop policy and the comparison tool are unchanged; the v1.8 remediation proposal contract is intact; the remediation run is a separate artefact. Capability matrix and limits in `references/safe-refactoring.md`; release details in [`docs/releases/RELEASE-NOTES-v1.9.md`](docs/releases/RELEASE-NOTES-v1.9.md).
+
+## Extension v2.0 — Architecture & Engineering Foundations (first increment: design engine)
+
+FastAPI Architect now **designs and builds** backends as well as auditing and remediating them. `scripts/design_fastapi.py` reads a declarative, versioned architecture contract (`fastapi-architect/spec/1.0`), recommends a structure with its reasons, generates a runnable FastAPI project into an isolated directory, audits it with the existing engine and runs its tests through the v1.9 trust model. Nothing from v1.0 to v1.9 is rewritten; the 59 rules, JSON, SARIF, fingerprints, suppressions, contracts and the remediation run are unchanged (tool version 2.0.0, audit schema 1.7).
+
+- **Contract, not conversation.** Functional modules and entities, scope, non-functional requirements, persistence, security and multi-tenancy, integrations, infrastructure, decisions, components and testing in plain JSON, validated strictly with every error at its JSON path (unknown keys, reserved names, cycles, inconsistent choices such as authorization without authentication). Every value carries its **provenance** (`explicit` or `assumed`); pending decisions and open questions travel into the report; a canonical digest ties the generated project to the exact contract.
+- **A reasoned recommendation, never a default dogma.** Layered for a small scope; modular monolith once modules, scope or team justify boundaries (import-linter contracts generated); ports and adapters only in the modules that integrate with the outside; microservices only when independent deployment is stated and the team and module count justify it. Each rejected alternative is reported with its reason; an explicit preference is honoured with a warning; DDD, CQRS and event sourcing never appear as structure, only as pending decisions when the signals call for them.
+- **Safe, deterministic generation.** App factory with lifespan, RFC 9457 problem details, pydantic-settings, API key compared in constant time, per-module schemas/models/repositories/services/dependencies/routers for the declared operations only, tenant scoping on every repository call, PostgreSQL through SQLAlchemy 2 async sessions with one commit per use case, tests through the HTTP boundary, and an `.audit-fastapi.json` that declares the design. Two runs produce identical bytes; re-running changes nothing; a non-empty target needs `--allow-existing` (missing files only); a differing file is never replaced without `--overwrite`; nothing is deleted; a manifest records every file's sha256 without timestamps.
+- **Verified with the engines that already exist.** The generated project is audited (clean for the examples: the auditor now propagates router dependencies through `include_router`, with the dev/acceptance corpora scoring identically before and after) and its tests run only with `--authorize-execution` and a trust profile the executor accepts, with nonce-bound runner evidence. The first generated backend, `inventory-service`, is committed under `plugins/fastapi-architect/examples/generated/` and a test asserts it equals a fresh generation; `orders-platform` (hexagonal, PostgreSQL, multi-tenant, two integrations) is generated and audited in the suite without executing its tests.
+- **Honest limits.** OAuth2/JWT and session authentication are accepted by the contract and refused by the generator; PostgreSQL projects ship without an Alembic environment and their tests skip without `DATABASE_URL`; authorization policies, tenant membership binding, outbox/inbox and service splitting are pending decisions, not code. Contract and report schemas in `references/design-contracts.md`; design record in [`docs/architecture/design-engine-v2.md`](docs/architecture/design-engine-v2.md); release details in [`docs/releases/RELEASE-NOTES-v2.0.md`](docs/releases/RELEASE-NOTES-v2.0.md).
