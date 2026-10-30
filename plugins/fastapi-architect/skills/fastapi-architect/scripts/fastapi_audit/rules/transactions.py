@@ -170,9 +170,21 @@ def _session_commits(stmts: List[ast.stmt], kinds: Dict[str, str]) -> List[ast.C
     return [c for c in _calls_in(stmts) if isinstance(c.func, ast.Attribute) and c.func.attr == "commit" and _session_receiver(c, kinds) is not None]
 
 
+POLICY_SINGLE_TX = "single_transaction_per_use_case"
+LOWER_CONFIDENCE = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _single_transaction_policy(ctx: FileContext) -> bool:
+    """Opt-in ``transactions.single_transaction_per_use_case`` in ``.audit-fastapi.json`` (validated, default false)."""
+    config = getattr(ctx.facts, "config", None) if ctx.facts is not None else None
+    section = config.get("transactions") if isinstance(config, dict) else None
+    return bool(isinstance(section, dict) and section.get(POLICY_SINGLE_TX) is True)
+
+
 def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None, skip: Optional[Set[int]] = None) -> None:
     reported: Set[int] = set()
     skip = skip or set()
+    policy = _single_transaction_policy(ctx)
     for node in func.scope_nodes():
         if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             continue
@@ -206,10 +218,36 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
             # finding is unchanged, so its fingerprint is stable, and the kind and evidence live in details.
             loop_kind, loop_evidence = classify_commit_loop(node, call)
             _census(ctx, loop_kind)
-            if loop_kind in DELIBERATE_LOOP_KINDS:
-                reported.discard(id(call))
-                continue
             name = receiver_name(call)
+            if loop_kind in DELIBERATE_LOOP_KINDS:
+                if not policy:
+                    reported.discard(id(call))
+                    continue
+                # opt-in: the project declares one transaction per use case, so a deliberate per-batch,
+                # per-page or per-pass commit is a policy finding; a distinct message (no shared history)
+                out.append(
+                    new_finding(
+                        "TX_COMMIT_IN_LOOP",
+                        ctx.relpath,
+                        call.lineno,
+                        call.col_offset,
+                        (
+                            f"'{name}.commit()' runs inside a {loop_kind} loop in '{func.qualname}' (loop at line {node.lineno}; "
+                            f"{loop_evidence}). The project declares transactions.single_transaction_per_use_case, so a commit per "
+                            "batch, page or pass is reported even though the loop's structure shows it is deliberate: every "
+                            "iteration is its own transaction and a failure half-way leaves earlier work committed. Commit once "
+                            "after the loop, or document this loop as an exception."
+                        ),
+                        confidence=LOWER_CONFIDENCE[confidence],
+                        symbol="session.commit",
+                        function=func.qualname,
+                        environment=ctx.environment,
+                        evidence=ev,
+                        recommended_test="Make a later iteration fail and assert whether earlier batches, pages or passes should remain committed under the project's policy.",
+                        details={"loop_kind": loop_kind, "loop_evidence": loop_evidence, "loop_line": node.lineno, "policy": POLICY_SINGLE_TX},
+                    )
+                )
+                break
             out.append(
                 new_finding(
                     "TX_COMMIT_IN_LOOP",

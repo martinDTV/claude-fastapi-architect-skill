@@ -18,6 +18,11 @@ Policy for ``contracts`` (documented in references/audit-rules.md):
 - ``commit_layers``: non-empty list of layer names, each a default layer or a layer declared in
   ``layers``;
 - a glob cannot appear both in ``public_routes`` and in an authentication/authorization contract.
+
+``transactions`` (v1.8, also strict): an object whose only property is the boolean
+``single_transaction_per_use_case``; when true, commit loops the engine classifies as deliberate
+(batch, paginated, convergence) are reported as ``TX_COMMIT_IN_LOOP`` with the policy named in
+``details.policy``. Off by default: the default report is unchanged.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_LAYERS = ("domain", "adapter", "repository", "service", "router", "core", "models", "schemas", "other")
 CONTRACT_KEYS = ("route_auth_required", "mutation_authorization_required", "forbidden_imports", "commit_layers")
 GLOB_CONTRACTS = ("route_auth_required", "mutation_authorization_required")
+TRANSACTION_KEYS = ("single_transaction_per_use_case",)  # v1.8: opt-in; deliberate commit loops become findings
 
 
 class ConfigError(ValueError):
@@ -83,6 +89,16 @@ def validate_config(config: Dict[str, Any], source: Optional[str] = None) -> Lis
             for i, item in enumerate(value):
                 if not isinstance(item, str) or not IDENT_RE.match(item):
                     errors.append(f"tenant_params[{i}]: expected a Python identifier, got {item!r}")
+    if "transactions" in config:  # v1.8 review: opt-in policy, strict like contracts
+        section = config["transactions"]
+        if not isinstance(section, dict):
+            errors.append(f"transactions: expected an object with {', '.join(TRANSACTION_KEYS)}, got {type(section).__name__}")
+        else:
+            for key in section:
+                if key not in TRANSACTION_KEYS and not str(key).startswith("x-"):
+                    errors.append(f"transactions.{key}: unknown property (known: {', '.join(TRANSACTION_KEYS)}; use an 'x-' prefix for annotations)")
+            if "single_transaction_per_use_case" in section and not isinstance(section["single_transaction_per_use_case"], bool):
+                errors.append(f"transactions.single_transaction_per_use_case: expected true or false, got {section['single_transaction_per_use_case']!r}")
     if "contracts" not in config:
         return errors
     contracts = config["contracts"]
