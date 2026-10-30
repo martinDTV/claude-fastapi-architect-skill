@@ -15,6 +15,7 @@ from .discovery import (
     classify_environment,
     iter_python_files,
 )
+from .config_schema import ConfigError, validate_config  # noqa: F401
 from .engine import AuditOptions, analyse_source, audit_project, audit_source
 from .facts import CONFIG_FILENAME, ProjectFacts, collect_facts
 from .callgraph import DEFAULT_MAX_CALL_DEPTH, CallGraph, CallGraphStats
@@ -46,6 +47,8 @@ from .report import compare_with_baseline, fingerprint_of, list_rules_text, rend
 from .suppressions import MARKER_RE, NOQA_CODES_BY_RULE, NOQA_RE, line_comments, suppression_for
 
 __all__ = [
+    "ConfigError",
+    "validate_config",
     "AuditOptions",
     "CATEGORIES",
     "CONFIDENCE_DOWNGRADE",

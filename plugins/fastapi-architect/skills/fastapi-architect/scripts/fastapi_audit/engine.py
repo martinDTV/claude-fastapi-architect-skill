@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from .discovery import DEFAULT_MAX_FILE_BYTES, classify_environment, iter_python_files
+from .config_schema import ConfigError, validate_config
 from .facts import ProjectFacts, collect_facts, load_config, module_name_for
 from .kinds import module_level_factories
 from .model import (
@@ -150,13 +151,14 @@ def _contracts_block(facts: ProjectFacts) -> Dict[str, Any]:
     counts = {
         "routes": len(routes),
         "authenticated": sum(1 for c in routes if c["authentication"] == "present"),
-        "public": sum(1 for c in routes if c["public"]),
-        "unauthenticated_not_public": sum(1 for c in routes if c["authentication"] == "absent" and not c["public"]),
+        "public": sum(1 for c in routes if c["public"]),  # declared only (config glob or marker)
+        "exposure_undetermined": sum(1 for c in routes if c.get("bucket") == "exposure_undetermined"),
+        "unauthenticated_not_public": sum(1 for c in routes if c["authentication"] == "absent" and not c["public"] and c.get("bucket") != "exposure_undetermined"),
         "authorization_visible": sum(1 for c in routes if c["authorization"]),
         "authorization_unknown": sum(1 for c in routes if c["authentication"] == "present" and not c["authorization"] and (c["resource_params"] or c["tenant_params"])),
     }
     kinds: Dict[str, int] = {}
-    partition = {"public_declared": 0, "unauthenticated_not_public": 0, "optional_authentication": 0, "authenticated_authorization_visible": 0, "authenticated_only": 0, "authenticated_authorization_unknown": 0}
+    partition = {"public_declared": 0, "exposure_undetermined": 0, "unauthenticated_not_public": 0, "optional_authentication": 0, "authenticated_authorization_visible": 0, "authenticated_only": 0, "authenticated_authorization_unknown": 0}
     for c in routes:
         for k in c["authorization"]:
             kinds[k] = kinds.get(k, 0) + 1
@@ -266,6 +268,9 @@ def audit_project(
 
     config_root = root_abs if os.path.isdir(root_abs) else os.path.dirname(root_abs)
     config, config_source = load_config(config_root, options.config_path)
+    problems = validate_config(config, config_source)
+    if problems:
+        raise ConfigError(config_source, problems)  # fail closed: no report is produced
     excluded = list(options.excluded_dirs) + [str(d) for d in config.get("exclude", []) if isinstance(d, str)]
     include_globs = list(options.include_globs) + [str(g) for g in config.get("include_paths", []) if isinstance(g, str)]
     exclude_globs = list(options.exclude_globs) + [str(g) for g in config.get("exclude_paths", []) if isinstance(g, str)]

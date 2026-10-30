@@ -398,6 +398,8 @@ def _privilege_change(ctx: FileContext, func: FunctionInfo, out: List[Finding]) 
             if ADMIN_RE.search(rec.name):
                 return
     for arg in func.params():
+        if arg.arg in PRIVILEGE_ATTRS:
+            continue  # `role: str` is the value being assigned, not a policy signal
         if ADMIN_RE.search(arg.arg) and arg.arg not in TENANT_PARAMS:
             return
         if arg.annotation is not None and ADMIN_RE.search(ast.unparse(arg.annotation) if hasattr(ast, "unparse") else ""):
@@ -469,7 +471,10 @@ def _route_rules(ctx: FileContext, out: List[Finding]) -> None:
             )
             continue
         if route_public(ctx, func):
-            continue  # health-style path, `public_routes` in .audit-fastapi.json, or `# audit-fastapi: public`
+            # declared public (`public_routes`, `# audit-fastapi: public`) or a health-check naming convention; the
+            # convention keeps this informational rule silent, but the contract records the exposure as undetermined
+            # and a declared `route_auth_required` contract is never overridden by it
+            continue
         out.append(
             new_finding(
                 "SEC_ROUTE_WITHOUT_AUTH_SIGNAL",
@@ -588,10 +593,14 @@ def run(ctx: FileContext) -> List[Finding]:
             ctx.facts.route_contracts.extend(c.to_dict() for c in contracts)
         for func in ctx.functions:
             if func.route is not None:
+                before = len(out)
                 _tenant_binding(ctx, func, out)
                 _privilege_change(ctx, func, out)
                 contract = by_function.get(func.qualname)
-                if contract is not None:
+                if contract is not None and len(out) == before:
+                    # the tenant questions (RLS context / tenant binding) and the privilege question name the
+                    # same root cause on this route, who may act on the ids it receives, with more specific
+                    # evidence; the generic resource question is not repeated (ids stay listed in the contract)
                     _resource_authorization(ctx, contract, func, out)
     _rls_rules(ctx, out)
     return out

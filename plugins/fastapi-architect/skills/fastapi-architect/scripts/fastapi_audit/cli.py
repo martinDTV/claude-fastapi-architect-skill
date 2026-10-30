@@ -158,7 +158,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stderr.write(f"{TOOL_NAME}: error: path does not exist: {exc}\n")
         return 2
     except ValueError as exc:
-        sys.stderr.write(f"{TOOL_NAME}: error: invalid config: {exc}\n")
+        problems = getattr(exc, "errors", None)
+        if problems:
+            sys.stderr.write(f"{TOOL_NAME}: error: invalid configuration in {getattr(exc, 'source', 'config')} ({len(problems)} problem(s)); no report produced:\n")
+            for problem in problems:
+                sys.stderr.write(f"  - {problem}\n")
+        else:
+            sys.stderr.write(f"{TOOL_NAME}: error: invalid config: {exc}\n")
         return 2
 
     fmt = args.format or ("json" if args.json else "text")

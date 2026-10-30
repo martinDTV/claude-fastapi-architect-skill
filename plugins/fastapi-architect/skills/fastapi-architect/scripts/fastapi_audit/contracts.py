@@ -51,11 +51,14 @@ MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
 def route_bucket(c: "RouteContract") -> str:
-    """Disjoint classification used by the summary partition (every route lands in exactly one)."""
+    """Disjoint classification used by the summary partition (every route lands in exactly one):
+    public_declared (config glob or marker) > unauthenticated routes, split into exposure_undetermined
+    (a health-check naming convention suggests public, nothing declares it) and unauthenticated_not_public
+    > optional_authentication > authenticated buckets by what relates the caller to the action."""
     if c.public:
         return "public_declared"
     if c.authentication == "absent":
-        return "unauthenticated_not_public"
+        return "exposure_undetermined" if c.public_source == "path" else "unauthenticated_not_public"
     if c.authentication == "optional":
         return "optional_authentication"
     if c.authorization:
@@ -112,17 +115,16 @@ class RouteContract:
 # --------------------------------------------------------------------------- #
 
 
+DECLARED_PUBLIC_SOURCES = frozenset({"config", "marker"})
+
+
 def route_public(ctx, func: FunctionInfo, comments: Optional[Dict[int, str]] = None) -> Optional[str]:
-    """``path`` | ``config`` | ``marker`` when the route is public on purpose, else None."""
+    """``config`` | ``marker`` when the route is declared public; ``path`` when only a health-check naming
+    convention suggests it (not a declaration: the exposure stays undetermined); else None."""
     route = func.route
     if route is None:
         return None
     path = route.path or ""
-    if PUBLIC_PATH_RE.match(path):
-        # "" and "/" are public landings only on the application itself; on a prefixed router they are
-        # the collection endpoint (`@router.get("")`), which v1.4 wrongly treated as public
-        if path.strip("/") or route.receiver.split(".")[0] in {"app", "application", "api"}:
-            return "path"
     globs = []
     if ctx.facts is not None:
         globs = [g for g in ctx.facts.config.get("public_routes", []) if isinstance(g, str)]
@@ -136,6 +138,12 @@ def route_public(ctx, func: FunctionInfo, comments: Optional[Dict[int, str]] = N
     lines = {func.lineno, *[d.lineno for d in getattr(func.node, "decorator_list", [])]}
     if any(PUBLIC_MARKER_RE.search(comments.get(line, "") or "") for line in lines):
         return "marker"
+    # declarations first; the naming convention is only consulted when nothing was declared
+    if PUBLIC_PATH_RE.match(path):
+        # "" and "/" are public landings only on the application itself; on a prefixed router they are
+        # the collection endpoint (`@router.get("")`), which v1.4 wrongly treated as public
+        if path.strip("/") or route.receiver.split(".")[0] in {"app", "application", "api"}:
+            return "path"
     return None
 
 
@@ -208,7 +216,8 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
         c = RouteContract(file=ctx.relpath, line=func.lineno, function=func.qualname, method=route.method, path=route.path)
         source = route_public(ctx, func, comments)
         if source:
-            c.public, c.public_source = True, source
+            c.public_source = source
+            c.public = source in DECLARED_PUBLIC_SOURCES  # a naming convention never declares anything
         used = {n.id for n in ast.walk(func.node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         params = [a.arg for a in func.params()]
         tenant_names = tenant_param_set(ctx)
@@ -314,7 +323,7 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
         if c.authentication == "present" and not c.authorization and (c.resource_params or c.tenant_params):
             c.evidence = "unknown"
         elif c.authentication == "absent" and not c.public:
-            c.evidence = "unknown"
+            c.evidence = "unknown"  # includes the health-convention routes: convention is not evidence
         c.full_path = (_router_prefix(ctx, route.receiver.split(".")[0]) or "") + (route.path or "")
         out.append(c)
     return out

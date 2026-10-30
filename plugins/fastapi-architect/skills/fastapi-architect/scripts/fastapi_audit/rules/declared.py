@@ -37,10 +37,7 @@ def _declared(ctx: FileContext) -> Dict[str, Any]:
 
 
 def _globs(value: Any) -> List[str]:
-    if isinstance(value, bool):
-        return ["/*"] if value else []
-    if isinstance(value, str):
-        return [value]
+    """Validated upstream by config_schema.validate_config: a list of '/...' globs."""
     return [str(g) for g in value] if isinstance(value, list) else []
 
 

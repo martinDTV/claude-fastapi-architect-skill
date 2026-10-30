@@ -356,11 +356,9 @@ def to_sarif(report: Dict[str, object]) -> str:
             result["suppressions"] = [{"kind": "inSource", "justification": str(f.get("suppression") or "")}]
         comparison = report.get("comparison")
         if isinstance(comparison, dict):
-            fp = f["fingerprint"]
-            if any(item.get("fingerprint") == fp for item in comparison.get("new", [])):
-                result["baselineState"] = "new"
-            elif any(item.get("fingerprint") == fp for item in comparison.get("unchanged", [])):
-                result["baselineState"] = "unchanged"
+            new_fps = {item.get("fingerprint") for item in comparison.get("new", [])}
+            # the comparison lists new and fixed fingerprints; a current finding that is not new is unchanged
+            result["baselineState"] = "new" if f["fingerprint"] in new_fps else "unchanged"
         results.append(result)
     summary = report.get("summary")
     assert isinstance(summary, dict)
