@@ -1,52 +1,69 @@
 # Safe refactoring recipes and verified remediation (v1.9)
 
-The auditor reports; `scripts/audit_remediate.py` proposes, applies **in an isolated copy**, and verifies. It never writes to the audited project: the output is a state per finding and a unified diff a human applies with `git apply`. This document is the contract behind each state and the manual recipe behind each automatic one.
+The auditor reports; `scripts/audit_remediate.py` proposes, applies **in isolated copies**, and verifies. It never writes to the audited project: the output is a state per finding, with its evidence, and a unified diff a human applies with `git apply`. This document is the contract behind each state, the trust model behind every execution, and the manual recipe behind each automatic one.
 
-## States, and what each one may claim
+## Trust model: what runs, where, and when
 
-| State | Claim | Required evidence |
+| Step | Executes project code? | Needs |
 |---|---|---|
-| `proposed` | a recipe exists for the finding | the audit report (`remediation.recipe`) |
-| `blocked` | no safe automatic patch | a failed precondition, named in `reason`; the manual recipe below applies |
-| `patched` | the patch applied in the copy; verification incomplete | intermediate only |
-| `audit_clean` | after the patch the finding is **no longer detected** in the copy and **no new finding** appeared | two audits of the copy compared by fingerprint |
-| `verified` | `audit_clean` **and** the authorized test command passed in the copy after the patch | the command's exit status, recorded with its output tail; `defect_observed_before_patch` says whether the same command failed before |
-| `rejected` | the patch did not apply, broke parsing, left the finding, introduced findings, or the tests failed after it | `reason` |
+| Audit of the project and of each copy | no | nothing |
+| Candidate patch (AST preconditions, unified diff, parse check) | no | nothing |
+| Re-audit of the patched copy, regression check, test-file digest | no | nothing |
+| Linked reproducer before/after, suite in the combined copy | **yes** | `--authorize-execution` **and** a trust profile with a scope that contains the project **and** a registered executor that accepts that profile |
 
-Never claimed: that the project is fixed. `applied_to_project` is always `false`; `original_untouched` is computed from a digest of the project's Python files before and after the run and a difference aborts the run with an error. The test command verifies the **suite**, not one case at a time: when several cases are patched in one run, a failing suite rejects all of them (run them one by one with `--fingerprint` to attribute).
+Trust profiles: `fixture` (the plugin's own fixtures and examples), `trusted` (a project the operator declares trustworthy), `untrusted` (the default). The declaration is recorded in the run report (`authorization.declared_by`, `technical_guarantee: false`); **it is a statement by the operator, not a security property**. Only one executor ships: `local` (`isolation_level: process_hygiene`). It accepts `fixture` and `trusted`; for `untrusted` the run fails closed (`execution.denied_code: executor_unavailable`, every case at most `audit_clean`) until an executor with `isolation_level: isolated` is registered. `Executor` (`fastapi_audit/remediate/executors.py`) is the seam for such a runner: it declares its isolation level, its guarantees and what it does not provide, decides which profiles it accepts, and runs a command in a workspace.
 
-## Isolation: guarantees and limits
+What the local executor guarantees (each enforced and tested): the copy excludes `.git`, virtual environments, caches and build output; the command is split without a shell and its program must be an interpreter (`python`, `python3`, `python3.x`), `pytest` or `uv` (extend with `--allow-command`); it runs with the copy as working directory, a fresh `HOME` inside the workspace, only the pass-through variables (`PATH`, locale, `TMPDIR`; add names with `--env-passthrough`, for example `UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR`), stdin closed, a wall-clock timeout, CPU-time and file-size limits on POSIX; the project's digest is compared before and after the run.
 
-Guaranteed and tested: the copy excludes `.git`, virtual environments, caches and build output; nothing executes without `--authorize-execution`; the command is split without a shell and refused when it contains shell metacharacters or when its program is not an interpreter (`python`, `python3`, `python3.x`), `pytest` or `uv` (extend with `--allow-command`); it runs with the copy as working directory, a fresh `HOME` inside the workspace, only the pass-through variables (`PATH`, locale, `TMPDIR`; add names with `--env-passthrough`, for example `UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR` for `uv`), stdin closed, a wall-clock timeout, and CPU-time and file-size limits on POSIX.
+What it does **not** provide, and the report repeats on every case: network isolation; filesystem confinement beyond the fresh `HOME` (the tests can write anywhere the user can); memory limits; protection against a malicious test suite, which runs with the operator's privileges. Filtering command text is not a sandbox and is not presented as one: the program allow-list only narrows *what* is launched, not what the launched tests may do. A project whose tests you would not run on this machine must be remediated inside a container or not at all; `--trust trusted` does not change that.
 
-Not guaranteed: network isolation, confinement of writes outside the copy, memory limits. A project whose tests reach the network or write outside their tree must be remediated inside a container; the run report says so (`isolation.network`).
+## States and their evidence
+
+| State | Claim | Required evidence | `reason_code` values |
+|---|---|---|---|
+| `proposed` | a recipe exists | the audit report (`remediation.recipe`) | |
+| `blocked` | no safe automatic patch | a failed precondition | `precondition_failed` |
+| `patched` | the candidate is applied in the case's copy | intermediate only | |
+| `audit_clean` | after the patch the finding is **no longer detected** (not even as suppressed) and **no new finding** appeared anywhere in the copy; **no test executed** | two audits of the copy compared by fingerprint | `execution_unauthorized`, `executor_unavailable`, `scope_mismatch` |
+| `verified` | `audit_clean` **and** the case's linked reproducer **failed before** and **passed after** the patch, run by a named executor, with test files untouched | the two runs with exit status, runner counts and output tail; the model refuses the transition when anything is missing | `verified` |
+| `rejected` | the candidate is wrong or invalid | the check that failed | `not_reproduced`, `stale_baseline`, `candidate_mismatch`, `patch_failed`, `finding_persists` (active or suppressed), `tests_modified`, `regression_introduced`, `tests_failed_after` |
+| `inconclusive` | the evidence does not support a verdict; **never a defect of the patch** | the run that could not decide | `no_linked_tests`, `defect_not_reproduced`, `tests_skipped`, `no_tests`, `infrastructure_error`, `timeout`, `command_refused` |
+
+Rules the pipeline enforces: `audit_clean` never equals `verified`; a test that did not run never counts as passed; a skipped test or an empty collection never satisfies an obligation; a baseline change (`base_sha256` of the audited file differs from the copy) invalidates the candidate; runner-internal, usage and fixture-setup errors (a database that did not start, a selector that does not resolve) are infrastructure, not verdicts; `verified` is refused by the model itself (`missing_evidence_for_verified`) when any piece is missing. The historical v1.8 `remediation` block of the audit report keeps its meaning (`status: proposed`, `applied: false`, `verified: false`) and only gains `recipe`, `automatable`, `tool`.
+
+## Evidence per finding
+
+Each case carries: the finding (rule, file, line, function, fingerprint); `base_sha256` of the audited file; the candidate (`candidate_id`, recipe, edits, diff, original and patched digests); the reproducer (the linked command) with its run **before** and **after** (exit status, runner, counts, outcome, executor); the two audits of the copy (target present / suppressed, new findings); `regressions`; `invariants` with how each was checked (`audit`, `parse`, `linked_tests`, `not_checked`) and whether it held; `tests_untouched`; the executor and its isolation level; `limitations` (what the executor does not provide, whether the file is test code, whether the combined copy failed); the state, its reason code and the full history.
+
+Linking: `--link FINGERPRINT=CMD`, `--link FILE:LINE=CMD` or `--link RULE=CMD` (precedence in that order). A rule-level link is only right when every case of that rule is observed by the same tests; otherwise link by file and line. One finding, one copy, one reproducer: a suite that covers several findings cannot attribute a verdict to one of them, so a case without a link is `inconclusive` when execution was granted. `--test-command` is the suite-level command run in the **combined** copy (every `verified`/`audit_clean` candidate applied together) before and after; its result is reported as `combined` / `summary.composable` and, when it fails, as a limitation on each candidate; individual verdicts keep their own evidence.
 
 ## Recipes
 
-Each recipe states preconditions (checked on the AST; a failure blocks the case), the change, the invariants that must hold, the tests that demonstrate them, and the rollback (always: discard the copy; nothing happened to the project).
+Each recipe states preconditions (checked on the AST; a failure blocks the case), the change, the invariants that must hold and how the pipeline checks them, the tests that demonstrate them, and the rollback (always: discard the copy; nothing happened to the project).
 
-### `remove_commit_inside_begin` — `TX_COMMIT_INSIDE_BEGIN_BLOCK`
+### `remove_commit_inside_begin` — `TX_COMMIT_INSIDE_BEGIN_BLOCK` (maturity: postgresql-verified)
 
 - Preconditions: the `commit()` is an expression statement alone on its line inside `with x.begin()` / `async with x.begin()`; the file parses before and after.
 - Change: delete the statement (replace by `pass` when it was the only statement of its block).
-- Invariants: every statement of the block runs inside the transaction the block owns; all writes of the block are visible together after exit and absent together after an exception; no `InvalidRequestError` on the statement that followed the commit.
-- Tests: the block's writes are visible from a second session after exit; raising inside the block leaves none of them; on SQLAlchemy 2.0 with PostgreSQL the statement after the former commit no longer raises (`examples/tenant-ledger/tests/test_remediation_targets.py`).
+- Invariants: every statement of the block runs inside the transaction the block owns; all writes of the block are visible together after exit and absent together after an exception; no `InvalidRequestError` on the statement that followed the commit. Checked by: audit (finding gone, nothing new), parse, linked tests.
+- PostgreSQL evidence: `examples/tenant-ledger/tests/test_remediation_targets.py::test_commit_inside_begin_is_remediated` and `::test_commit_per_item_inside_begin_is_remediated` fail on the anti-pattern (SQLAlchemy 2.0.55 raises on the statement after the inner commit) and pass after the recipe.
 - Manual variant: if the early commit was intended, drop the `begin()` block and manage the transaction explicitly.
 
-### `add_await` — `SA_ASYNC_SESSION_NOT_AWAITED`
+### `add_await` — `SA_ASYNC_SESSION_NOT_AWAITED` (maturity: postgresql-verified)
 
-- Preconditions: the call is inside an `async def` (not a lambda or comprehension), not already awaited; the file parses after inserting `await`.
-- Change: `session.execute(...)` → `await session.execute(...)` (also as `return await ...` and `x = await ...`).
-- Invariants: the statement executes exactly once and its result is used; no `coroutine was never awaited` warning.
-- Tests: run under `-W error::RuntimeWarning`; assert the statement's effect from a second session.
-- Manual variant (blocked case): a synchronous function must become `async def` and be awaited up the chain, or use a synchronous `Session`.
+- Preconditions: the call is inside an `async def` (not a lambda or comprehension), not already awaited; the file parses after inserting `await`. A synchronous function is blocked (manual recipe below).
+- Change: `session.execute(...)` → `await session.execute(...)` (also `return await ...` and `x = await ...`).
+- Invariants: the statement executes exactly once; no `coroutine was never awaited` warning; **exceptions raised by the statement now propagate at the call site** (a documented behaviour change: before the fix they could not, because nothing ran).
+- PostgreSQL evidence: `::test_note_without_await_executes_exactly_once_without_warnings` (entry count +1, no warning after `gc.collect()`) and `::test_note_without_await_surfaces_database_errors_after_the_fix` (a foreign-key violation raises after the fix) fail on the anti-pattern and pass after the recipe.
+- Negative controls: `add_await` is blocked inside `def`, inside lambdas and comprehensions, and when the call is already awaited (unit tests); a candidate that leaves the finding, suppresses it, edits a test or introduces another un-awaited call is rejected (adversarial tests).
+- Manual variant (blocked case): make the function `async def` and await it up the chain, or use a synchronous `Session`.
 
-### `move_commit_after_loop` — `TX_COMMIT_IN_LOOP` with `loop_kind: per_item`
+### `move_commit_after_loop` — `TX_COMMIT_IN_LOOP` with `loop_kind: per_item` (maturity: postgresql-verified for the shape tested; changes failure semantics)
 
 - Preconditions: the commit is a direct child of the loop body, alone on its line; the loop contains no `return` and defines no function; the loop reported by the audit matches the source. Deliberate loops (`batch`, `paginated`, `convergence`, and loops reported only under the opt-in policy) have **no** automatic recipe: changing their transaction boundary is a design decision.
 - Change: delete the per-item commit and insert the same statement after the loop at the loop's indentation (only delete when a commit on the same receiver already follows the loop).
-- Invariants: either every item is committed or none is; the number of committed rows after a successful run is unchanged; a failure half-way leaves nothing committed.
-- Tests: make a later iteration fail and assert nothing is committed; count transactions (one).
+- Invariants: either every item is committed or none is; a failure half-way leaves nothing committed; the committed rows after a successful run are unchanged. This is a deliberate change of failure semantics (all or nothing instead of partial progress); the recipe refuses loops with `return`, where it would also change the success path.
+- PostgreSQL evidence: `::test_deposit_each_is_atomic_when_an_amount_is_rejected` (two accepted amounts followed by one the `CHECK (balance >= 0)` constraint rejects: before the fix the balance moved by the first two, after the fix it is unchanged and the error propagates) fails on the anti-pattern and passes after the recipe. Shapes beyond this one (per-item work with side effects outside the database, loops whose body sets per-item transaction context) are covered only by the fake session in the fixture and by the invariants above; treat them as needing their own reproducer.
 - Manual variant: when partial progress is wanted, batch explicitly under a visible size test and make the per-item write idempotent (then the loop is `batch` and the auditor is silent).
 
 ### Manual-only recipes (reported with `automatable: false`)
@@ -54,16 +71,29 @@ Each recipe states preconditions (checked on the AST; a failure blocks the case)
 - `ASYNC_BLOCKING_CALL_INDIRECT`: offload the helper (`anyio.to_thread.run_sync`), make the chain async, or declare the route with plain `def`; test concurrent latency.
 - `SEC_RESOURCE_AUTHZ_UNVERIFIED`: load the resource through a dependency that receives the principal, or scope the repository call by the principal; test as an unrelated user.
 
+## Capability matrix
+
+| Rule | Proposal in the audit report | Structured patch | Reproduction | Verified with fakes (`tests/fixtures/remediation19`) | Verified with PostgreSQL (`tenant-ledger`) | Execution safety | Known limits |
+|---|---|---|---|---|---|---|---|
+| `TX_COMMIT_INSIDE_BEGIN_BLOCK` | yes | `remove_commit_inside_begin` | fixture test + two PostgreSQL targets | yes | yes (statement after the commit; loop shape) | local executor only (process hygiene) | commits that share a line or sit in larger expressions are blocked |
+| `SA_ASYNC_SESSION_NOT_AWAITED` | yes | `add_await` | fixture test + two PostgreSQL targets | yes | yes (executed once, no warning, errors surface) | local executor only | synchronous functions, lambdas and comprehensions are blocked; errors now propagate (documented) |
+| `TX_COMMIT_IN_LOOP` (`per_item`) | yes | `move_commit_after_loop` | fixture test + one PostgreSQL target | yes | yes (atomicity under a rejected amount) | local executor only | loops with `return`, nested commits and deliberate kinds are blocked; all-or-nothing semantics |
+| `ASYNC_BLOCKING_CALL_INDIRECT` | yes | no (manual) | no | no | no | not applicable | — |
+| `SEC_RESOURCE_AUTHZ_UNVERIFIED` | yes | no (manual) | no | no | no | not applicable | — |
+| other 54 rules | no | no | no | no | no | not applicable | — |
+
 ## Using the tool
 
 ```
-python3 scripts/audit_remediate.py PROJECT --select TX_COMMIT_INSIDE_BEGIN_BLOCK            # static: audit_clean at best
-python3 scripts/audit_remediate.py PROJECT --authorize-execution --test-command "pytest -q" --patch-dir patches --output run.json
-git apply patches/TX_COMMIT_INSIDE_BEGIN_BLOCK-<fingerprint>.diff                             # the human step
+python3 scripts/audit_remediate.py PROJECT --select TX_COMMIT_INSIDE_BEGIN_BLOCK                       # static: audit_clean at best, nothing executed
+python3 scripts/audit_remediate.py PROJECT --authorize-execution --trust trusted --trust-scope PROJECT \
+    --link "src/app/x.py:42=pytest -q tests/test_x.py::test_commit_once" \
+    --test-command "pytest -q" --patch-dir patches --output run.json --strict
+git apply patches/TX_COMMIT_IN_LOOP-<fingerprint>-<candidate>.diff                                   # the human step
 ```
 
-`--format json` prints the run report (`remediation_run/1.0`), `--keep-workspace` leaves the copy for inspection, `--fail-on-rejected` gates CI. The audit report's `remediation` block names the recipe (`recipe`, `automatable`, `tool`) so a consumer knows which findings the tool can act on.
+`--format json` prints the run report (`remediation_run/1.1`), `--keep-workspace` leaves the copies for inspection, `--fail-on-rejected` and `--strict` gate CI (`--strict` fails unless every case is `verified`). The audit report's `remediation` block names the recipe (`recipe`, `automatable`, `tool`).
 
 ## Towards v2.0
 
-Per-case workspaces (attribute test results to one patch), container-based isolation (network and filesystem), recipes for more rules (offloading a blocking helper, adding a timeout, closing a session), an explicit `apply` step that writes to the project only after a recorded human approval, and runtime records (`evidence_state: reproduced`) fed back into the audit report.
+An executor with `isolation_level: isolated` (container or microVM: network off, read-only mounts, memory limits) registered behind the same `Executor` interface so untrusted projects stop failing closed; automatic discovery of reproducers from per-test results; recipes for more rules (offloading a blocking helper, adding a timeout, closing a session); an explicit `apply` step that writes to the project only after a recorded human approval; and runtime records (`evidence_state: reproduced`) fed back into the audit report from a remediation run.
