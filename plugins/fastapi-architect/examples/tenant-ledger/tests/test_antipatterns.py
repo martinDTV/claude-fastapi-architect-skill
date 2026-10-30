@@ -3,12 +3,19 @@
 import uuid
 
 import pytest
-from sqlalchemy.exc import MissingGreenlet
+from sqlalchemy.exc import InvalidRequestError, MissingGreenlet
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ledger.core.db import set_tenant_context
 from ledger.modules.ledger import repository
-from ledger.modules.ledger.antipatterns import entries_eager, entries_lazy, naive_deposit
+from ledger.modules.ledger.antipatterns import (
+    commit_inside_begin,
+    commit_per_item_inside_begin,
+    deltas_in_one_block,
+    entries_eager,
+    entries_lazy,
+    naive_deposit,
+)
 from tests.conftest import h, make_account
 
 pytestmark = pytest.mark.anyio
@@ -80,3 +87,27 @@ async def test_implicit_lazy_load_raises_missing_greenlet_and_selectinload_fixes
     async with factory() as session:
         await set_tenant_context(session, tenant)
         assert await entries_eager(session, aid) == 1
+
+
+async def test_commit_inside_begin_block_raises_on_the_next_statement(client, app_engine, acme):
+    """TX_COMMIT_INSIDE_BEGIN_BLOCK, reproduced on PostgreSQL with SQLAlchemy 2.0: the inner commit
+    closes the block's transaction; the statement after it raises InvalidRequestError, so the first
+    delta is committed and the second never happens. The loop shape fails on the second iteration.
+    Without the inner commit both deltas are committed together on exit."""
+    account = await make_account(client, acme["id"], "alice")
+    tenant, aid = uuid.UUID(acme["id"]), uuid.UUID(account["id"])
+    start = await _balance(client, acme["id"], account["id"])
+    factory = async_sessionmaker(app_engine, expire_on_commit=False)
+    with pytest.raises(InvalidRequestError, match="closed transaction inside context manager"):
+        async with factory() as session:
+            await commit_inside_begin(session, tenant, aid)
+    assert await _balance(client, acme["id"], account["id"]) == start + 1
+    with pytest.raises(InvalidRequestError, match="closed transaction inside context manager"):
+        async with factory() as session:
+            await commit_per_item_inside_begin(session, tenant, aid, [1, 1])
+    assert (
+        await _balance(client, acme["id"], account["id"]) == start + 2
+    )  # first iteration committed, second raised
+    async with factory() as session:
+        await deltas_in_one_block(session, tenant, aid)
+    assert await _balance(client, acme["id"], account["id"]) == start + 4

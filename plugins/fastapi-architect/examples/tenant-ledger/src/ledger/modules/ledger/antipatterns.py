@@ -158,3 +158,41 @@ async def list_accounts_bound(session: AsyncSession, principal: Principal, tenan
         select(_Account).where(_Account.tenant_id == tenant_id).order_by(_Account.name)
     )
     return [row.name for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# v1.8: commit() inside `with session.begin()` (tests/test_antipatterns.py)
+# --------------------------------------------------------------------------- #
+
+
+async def commit_inside_begin(session: AsyncSession, tenant_id: UUID, account_id: UUID) -> None:
+    """`session.begin()` owns the transaction and commits it on exit. The explicit commit inside the
+    block closes that transaction early; with SQLAlchemy 2.0 the next statement raises
+    InvalidRequestError ("Can't operate on closed transaction inside context manager"), so the first
+    delta is committed and the second never runs."""
+    async with session.begin():
+        await set_tenant_context(session, tenant_id)
+        await repository.apply_delta(session, tenant_id, account_id, 1)
+        await session.commit()  # audit: TX_COMMIT_INSIDE_BEGIN_BLOCK
+        await repository.apply_delta(
+            session, tenant_id, account_id, 1
+        )  # raises: the block's transaction is closed
+
+
+async def commit_per_item_inside_begin(
+    session: AsyncSession, tenant_id: UUID, account_id: UUID, amounts: list[int]
+) -> None:
+    """The loop shape: the second iteration's statement runs after the first iteration's commit."""
+    async with session.begin():
+        await set_tenant_context(session, tenant_id)
+        for amount in amounts:
+            await repository.apply_delta(session, tenant_id, account_id, amount)
+            await session.commit()  # audit: TX_COMMIT_INSIDE_BEGIN_BLOCK
+
+
+async def deltas_in_one_block(session: AsyncSession, tenant_id: UUID, account_id: UUID) -> None:
+    """The fix: let the block commit once, at the end."""
+    async with session.begin():
+        await set_tenant_context(session, tenant_id)
+        await repository.apply_delta(session, tenant_id, account_id, 1)
+        await repository.apply_delta(session, tenant_id, account_id, 1)

@@ -22,28 +22,31 @@ $ uv sync --extra dev
 Resolved 33 packages
 
 $ uv run pytest -q
-.............................
-29 passed in 7.36s            (22 in the initial record; 5 adversarial tests added for v1.6; 2 tenant-binding tests for v1.7)
+..............................
+30 passed in 7.90s            (22 in the initial record; 5 adversarial tests added for v1.6; 2 tenant-binding tests for v1.7; 1 commit-inside-begin test for v1.8)
 
 $ uv run ruff check src tests alembic
 All checks passed!
 $ uv run ruff format --check src tests alembic
 41 files already formatted
 
-$ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.7.0, schema 1.5)
-files scanned: 38  findings: 6 (high 2, medium 3, low 0, info 1)
+$ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.8.0, schema 1.6)
+files scanned: 38  findings: 8 (high 4, medium 3, low 0, info 1)
   alembic/versions/0002_rls.py:32  MIG_RAW_SQL                      info   (dynamic SQL: role name from configuration)
   src/ledger/modules/ledger/antipatterns.py:20   TX_READ_MODIFY_WRITE            medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:29   SA_ASYNC_LAZY_LOAD_RISK         medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:71   SA_SESSION_SHARED_CONCURRENTLY  high   (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:102  BG_REQUEST_SCOPED_RESOURCE      high   (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:142  SEC_RLS_CONTEXT_FROM_REQUEST    medium (deliberate, reproduced in tests)
+  src/ledger/modules/ledger/antipatterns.py:176  TX_COMMIT_INSIDE_BEGIN_BLOCK    high   (deliberate, reproduced in tests; v1.8)
+  src/ledger/modules/ledger/antipatterns.py:190  TX_COMMIT_INSIDE_BEGIN_BLOCK    high   (deliberate, loop shape, reproduced in tests; v1.8)
+  the six earlier fingerprints are identical to the v1.7 record; the two new findings carry a `remediation` block (status proposed, never applied)
   contracts: 13 routes, authenticated 12, public 1 (/health, declared in .audit-fastapi.json; a naming convention alone would leave it as exposure undetermined), unauthenticated and not public 0, authorization visible 9, authorization unknown 1 (the deliberate unbound route)
 $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.py" --ignore MIG_RAW_SQL --fail-on info
 exit 0 (no findings)
 ```
 
-## What each test proves (29 tests, all against PostgreSQL)
+## What each test proves (30 tests, all against PostgreSQL)
 
 | Requirement | Test | Evidence |
 |---|---|---|
@@ -66,6 +69,7 @@ exit 0 (no findings)
 | Lost response, retried (v1.6) | `test_adversarial.py::test_lost_response_retried_without_a_key_duplicates_and_with_a_key_does_not` | without a key the retry applies the deposit twice (20); with `Idempotency-Key` the retry replays the stored result (30, three entries in total) |
 | RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
 | Tenant check present but not bound (v1.7) | `test_tenant_binding.py::test_rls_context_from_the_requested_tenant_leaks_and_membership_binding_closes_it` | with the RLS context set from the URL tenant, a member of ACME reads Globex's accounts (`["globex-ops"]`) although RLS is correctly configured; binding membership first (the real `require_member`) yields 404 for Globex and the ACME rows for ACME |
+| commit() inside `with session.begin()` (v1.8) | `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement` | SQLAlchemy 2.0.55 on PostgreSQL: the inner commit closes the block's transaction and the next statement raises `InvalidRequestError` ("Can't operate on closed transaction inside context manager"); the first delta is committed, the second never runs; the loop shape fails on its second iteration; without the inner commit both deltas are visible together after exit. This record corrected the rule's first draft, which claimed the later statements ran in an unmanaged transaction |
 | Tenant id alone never authorizes (v1.7) | `test_tenant_binding.py::test_a_tenant_id_alone_never_authorizes_a_background_worker` | a worker handed only a tenant id writes into that tenant: the binding must happen where the principal is known, before the id is handed over |
 
 ## Defects found while verifying (and fixed before labelling)
