@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_REL = "plugins/fastapi-architect/skills/fastapi-architect/scripts"
-MARKER_RE = re.compile(r"#\s*truth(-absent|-edge|-unresolved)?:\s*([A-Za-z0-9_.]+)")
+MARKER_RE = re.compile(r"#\s*truth(-absent|-edge|-unresolved)?:\s*([A-Za-z0-9_.]+)(?:\s+evidence=(verified|inferred|unknown))?")
 
 
 # --------------------------------------------------------------------------- #
@@ -142,11 +142,11 @@ def load_truth(corpus: str) -> Dict[str, Any]:
             spans = _function_spans(tree)
             for lineno, text in enumerate(source.splitlines(), start=1):
                 for m in MARKER_RE.finditer(text):
-                    kind, value = m.group(1) or "", m.group(2)
+                    kind, value, evidence = m.group(1) or "", m.group(2), m.group(3)
                     span = next(((s, e, n) for s, e, n in spans if s <= lineno <= e), (lineno, lineno, "<module>"))
                     item = {"file": rel, "line": lineno, "span": [span[0], span[1]], "function": span[2]}
                     if kind == "":
-                        expected.append({**item, "rule": value})
+                        expected.append({**item, "rule": value, "evidence": evidence})
                     elif kind == "-absent":
                         absent.append({**item, "rule": value})
                     elif kind == "-edge":
@@ -167,6 +167,7 @@ def score(truth: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
     matched_findings: set = set()
     per_rule: Dict[str, Dict[str, int]] = {r: {"tp": 0, "fp": 0, "fn": 0, "tn": 0} for r in rules}
     fn_list, fp_list = [], []
+    evidence_mismatch: List[str] = []
     for exp in truth["expected"]:
         hit = None
         for i, f in enumerate(findings):
@@ -181,6 +182,8 @@ def score(truth: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
         else:
             matched_findings.add(hit)
             per_rule[exp["rule"]]["tp"] += 1
+            if exp.get("evidence") and findings[hit].get("evidence") != exp["evidence"]:
+                evidence_mismatch.append(f"{exp['rule']} {exp['file']}:{exp['line']} expected evidence={exp['evidence']} got {findings[hit].get('evidence')}")
     for i, f in enumerate(findings):
         if i not in matched_findings:
             per_rule[f["rule"]]["fp"] += 1
@@ -195,6 +198,12 @@ def score(truth: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
     precision = tp / (tp + fp) if tp + fp else 1.0
     recall = tp / (tp + fn) if tp + fn else 1.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    fpr = fp / (fp + tn) if fp + tn else 0.0  # of the documented negatives, how many were reported
+    fnr = fn / (fn + tp) if fn + tp else 0.0
+    evidence_counts = {"verified": 0, "inferred": 0, "unknown": 0}
+    for f in findings:
+        evidence_counts[f.get("evidence") or "verified"] = evidence_counts.get(f.get("evidence") or "verified", 0) + 1
+    unknown_rate = evidence_counts["unknown"] / len(findings) if findings else 0.0
     # call resolution truth
     sites = run.get("sites", {})
     edge_hits, edge_miss = 0, []
@@ -221,6 +230,9 @@ def score(truth: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
         "rules_evaluated": rules,
         "tp": tp, "fp": fp, "fn": fn, "tn": tn,
         "precision": round(precision, 3), "recall": round(recall, 3), "f1": round(f1, 3),
+        "false_positive_rate": round(fpr, 3), "false_negative_rate": round(fnr, 3),
+        "unknown_rate": round(unknown_rate, 3), "evidence_counts": evidence_counts,
+        "evidence_mismatches": evidence_mismatch,
         "per_rule": per_rule,
         "false_negatives": fn_list, "false_positives": fp_list,
         "edges": {"expected": len(truth["edges"]), "resolved": edge_hits, "missing": edge_miss},
@@ -256,9 +268,12 @@ def render(result: Dict[str, Any]) -> str:
         lines.append("|---|" + "---|" * len(cols))
         for label, k in (("True positives", "tp"), ("False positives", "fp"), ("False negatives", "fn"), ("Negatives kept silent", "tn"),
                          ("Precision", "precision"), ("Recall", "recall"), ("F1", "f1"),
+                         ("False positive rate", "false_positive_rate"), ("False negative rate", "false_negative_rate"),
+                         ("Unknown-evidence rate", "unknown_rate"),
                          ("Project-call coverage", "project_call_coverage"), ("Classified sites", "classified_ratio"),
                          ("Call sites", "call_sites"), ("Time (s)", "elapsed_s"), ("Peak RSS (MB)", "max_rss_mb")):
             lines.append(f"| {label} | " + " | ".join(str(c.get(k)) for c in cols) + " |")
+        lines.append("| Evidence verified / inferred / unknown | " + " | ".join("/".join(str(c["evidence_counts"].get(k, 0)) for k in ("verified", "inferred", "unknown")) for c in cols) + " |")
         lines.append("| Expected edges resolved | " + " | ".join(f"{c['edges']['resolved']}/{c['edges']['expected']}" for c in cols) + " |")
         lines.append("| Expected unresolved kept | " + " | ".join(f"{c['unresolved']['correct']}/{c['unresolved']['expected']}" for c in cols) + " |")
         lines.append("")
@@ -268,12 +283,14 @@ def render(result: Dict[str, Any]) -> str:
             lines.append(f"| `{rule}` | " + " | ".join("/".join(str(c["per_rule"].get(rule, {}).get(k, 0)) for k in ("tp", "fp", "fn", "tn")) for c in cols) + " |")
         lines.append("")
         last = cols[-1]
-        if last["false_negatives"] or last["false_positives"] or last["edges"]["missing"] or last["unresolved"]["wrong"]:
+        if last["false_negatives"] or last["false_positives"] or last["edges"]["missing"] or last["unresolved"]["wrong"] or last["evidence_mismatches"]:
             lines.append(f"Open items for v{last['version']}:")
             for item in last["false_negatives"]:
                 lines.append(f"- FN {item}")
             for item in last["false_positives"]:
                 lines.append(f"- FP {item}")
+            for item in last["evidence_mismatches"]:
+                lines.append(f"- evidence {item}")
             for item in last["edges"]["missing"]:
                 lines.append(f"- edge {item}")
             for item in last["unresolved"]["wrong"]:
