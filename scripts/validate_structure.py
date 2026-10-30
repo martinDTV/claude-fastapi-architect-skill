@@ -34,7 +34,7 @@ assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
 for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
 assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
-for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_plugin_evals.py'):
+for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_sarif_schema.py','test_plugin_evals.py'):
     assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
 evals_dir=root/'plugins/fastapi-architect/evals'
 cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
@@ -52,6 +52,10 @@ for part in ('dev','acceptance','holdout'):
 assert (root/'scripts/audit_precision.py').is_file(), 'Missing scripts/audit_precision.py'
 compile((root/'scripts/audit_precision.py').read_text(encoding='utf-8'),'audit_precision.py','exec')
 assert (root/'tests/fixtures/contracts_declared/.audit-fastapi.json').is_file(), 'Missing declared-contracts fixture'
+assert (root/'tests/fixtures/regressions_v17/.audit-fastapi.json').is_file(), 'Missing v1.7 regression fixture'
+assert (root/'tests/schemas/sarif-schema-2.1.0.json').is_file(), 'Missing vendored SARIF schema'
+assert (root/'scripts/validate_sarif.py').is_file(), 'Missing scripts/validate_sarif.py'
+compile((root/'scripts/validate_sarif.py').read_text(encoding='utf-8'),'validate_sarif.py','exec')
 example=root/'plugins/fastapi-architect/examples/tenant-ledger'
 for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py','tests/test_adversarial.py','tests/test_tenant_binding.py'):
     assert (example/f).is_file(), f'Missing reference implementation file: {f}'

@@ -63,7 +63,7 @@ curl -s -X PATCH localhost:8000/api/v1/tenants/<tenant_id>/accounts/<account_id>
 python3 ../../../../scripts/audit_fastapi.py . --format markdown
 ```
 
-The only findings are the five deliberate ones in `modules/ledger/antipatterns.py` (`TX_READ_MODIFY_WRITE`, `SA_ASYNC_LAZY_LOAD_RISK`, `SA_SESSION_SHARED_CONCURRENTLY`, `BG_REQUEST_SCOPED_RESOURCE`, `SEC_RLS_CONTEXT_FROM_REQUEST`), which `tests/test_antipatterns.py`, `tests/test_adversarial.py` and `tests/test_tenant_binding.py` reproduce and fix, plus one informational note on the RLS migration's dynamic SQL. The `contracts` block of the report lists every route with its authentication and authorization kinds. `--exclude-path "*/antipatterns.py"` yields a clean report.
+The only findings are the five deliberate ones in `modules/ledger/antipatterns.py` (`TX_READ_MODIFY_WRITE`, `SA_ASYNC_LAZY_LOAD_RISK`, `SA_SESSION_SHARED_CONCURRENTLY`, `BG_REQUEST_SCOPED_RESOURCE`, `SEC_RLS_CONTEXT_FROM_REQUEST`), which `tests/test_antipatterns.py`, `tests/test_adversarial.py` and `tests/test_tenant_binding.py` reproduce and fix, plus one informational note on the RLS migration's dynamic SQL. The `contracts` block of the report lists every route with its authentication and authorization kinds; `.audit-fastapi.json` declares `/health` as public on purpose, because a health-check naming convention is never treated as a declaration. `--exclude-path "*/antipatterns.py"` yields a clean report.
 
 ## Layout
 

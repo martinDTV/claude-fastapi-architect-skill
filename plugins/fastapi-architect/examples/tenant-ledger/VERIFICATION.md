@@ -38,7 +38,7 @@ files scanned: 38  findings: 6 (high 2, medium 3, low 0, info 1)
   src/ledger/modules/ledger/antipatterns.py:71   SA_SESSION_SHARED_CONCURRENTLY  high   (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:102  BG_REQUEST_SCOPED_RESOURCE      high   (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:142  SEC_RLS_CONTEXT_FROM_REQUEST    medium (deliberate, reproduced in tests)
-  contracts: 13 routes, authenticated 12, public 1, unauthenticated and not public 0, authorization visible 9, authorization unknown 1 (the deliberate unbound route)
+  contracts: 13 routes, authenticated 12, public 1 (/health, declared in .audit-fastapi.json; a naming convention alone would leave it as exposure undetermined), unauthenticated and not public 0, authorization visible 9, authorization unknown 1 (the deliberate unbound route)
 $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.py" --ignore MIG_RAW_SQL --fail-on info
 exit 0 (no findings)
 ```
