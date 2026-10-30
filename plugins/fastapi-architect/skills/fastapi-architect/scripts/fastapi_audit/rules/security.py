@@ -54,7 +54,7 @@ def _alias_target_is_auth(ctx: FileContext, dotted: Optional[str]) -> bool:
 
 CHAIN_DEPTH = 3
 TENANT_BINDING_RE = re.compile(r"member|tenant|org|workspace|company|scope|authorize|authorise|permission|policy|access|can_|allowed|guard", re.I)
-ADMIN_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|manager|staff|privilege|can_|allowed|scope|guard|require_|grant", re.I)
+ADMIN_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|privilege|can_|allowed|scope|guard|require_|grant", re.I)
 PRIVILEGE_ATTRS = frozenset({"role", "roles", "is_admin", "is_superuser", "is_staff", "permissions", "scopes", "privileges", "groups", "is_owner"})
 PRIVILEGE_CALL_RE = re.compile(
     r"^((grant|revoke)_?(access|role|roles|permission|permissions|admin|privilege|privileges|scope|scopes)"

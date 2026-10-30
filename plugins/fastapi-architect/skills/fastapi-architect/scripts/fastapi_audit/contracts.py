@@ -38,7 +38,9 @@ def tenant_param_set(ctx) -> frozenset:
     if ctx is not None and getattr(ctx, "facts", None) is not None:
         extra = [str(x) for x in ctx.facts.config.get("tenant_params", []) if isinstance(x, str)]
     return TENANT_PARAMS | frozenset(extra)
-ROLE_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|manager|staff|privilege|can_|allowed|scope|guard|require|grant|needs|checker", re.I)
+# "staff"/"manager" are user types more often than privileges (current_staff is authentication):
+# privilege attributes such as is_staff are matched separately by PRIVILEGE_ATTRS in rules.security
+ROLE_RE = re.compile(r"admin|owner|superuser|role|perm|policy|authoriz|authoris|rbac|acl|privilege|can_|allowed|scope|guard|require|grant|needs|checker", re.I)
 MEMBERSHIP_RE = re.compile(r"member|tenant|org|workspace|company|clinic|belongs|same_", re.I)
 RESOURCE_DEP_RE = re.compile(r"access|owner|own|resource|verify|ensure|check|permit|allow|can_|authoriz|authoris|load_|get_(?!current)", re.I)
 AUTHZ_CALL_RE = re.compile(r"^(authorize|authorise|can|check|ensure|assert|permit|allow|verify|require|enforce|guard)", re.I)
