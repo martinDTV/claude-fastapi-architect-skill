@@ -34,7 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS_REL = "plugins/fastapi-architect/skills/fastapi-architect/scripts"
-MARKER_RE = re.compile(r"#\s*truth(-absent|-edge|-unresolved)?:\s*([A-Za-z0-9_.]+)(?:\s+evidence=(verified|inferred|unknown))?")
+MARKER_RE = re.compile(r"#\s*truth(-absent|-edge|-unresolved)?:\s*([A-Za-z0-9_.]+)((?:\s+[a-z_]+=[A-Za-z0-9_]+)*)")
+ATTR_RE = re.compile(r"([a-z_]+)=([A-Za-z0-9_]+)")
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +70,7 @@ def collect_run(root: str) -> Dict[str, Any]:
         "version": report["tool"]["version"],
         "schema": report["schema_version"],
         "findings": [
-            {"rule": f["rule"], "file": f["file"], "line": f["line"], "confidence": f["confidence"], "evidence": f.get("evidence")}
+            {"rule": f["rule"], "file": f["file"], "line": f["line"], "confidence": f["confidence"], "evidence": f.get("evidence"), "details": f.get("details")}
             for f in report["findings"]
         ],
         "interprocedural": report.get("interprocedural"),
@@ -142,11 +143,12 @@ def load_truth(corpus: str) -> Dict[str, Any]:
             spans = _function_spans(tree)
             for lineno, text in enumerate(source.splitlines(), start=1):
                 for m in MARKER_RE.finditer(text):
-                    kind, value, evidence = m.group(1) or "", m.group(2), m.group(3)
+                    kind, value = m.group(1) or "", m.group(2)
+                    attrs = dict(ATTR_RE.findall(m.group(3) or ""))
                     span = next(((s, e, n) for s, e, n in spans if s <= lineno <= e), (lineno, lineno, "<module>"))
                     item = {"file": rel, "line": lineno, "span": [span[0], span[1]], "function": span[2]}
                     if kind == "":
-                        expected.append({**item, "rule": value, "evidence": evidence})
+                        expected.append({**item, "rule": value, "evidence": attrs.get("evidence"), "attrs": {k: v for k, v in attrs.items() if k != "evidence"}})
                     elif kind == "-absent":
                         absent.append({**item, "rule": value})
                     elif kind == "-edge":
@@ -184,6 +186,10 @@ def score(truth: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
             per_rule[exp["rule"]]["tp"] += 1
             if exp.get("evidence") and findings[hit].get("evidence") != exp["evidence"]:
                 evidence_mismatch.append(f"{exp['rule']} {exp['file']}:{exp['line']} expected evidence={exp['evidence']} got {findings[hit].get('evidence')}")
+            for key, value in (exp.get("attrs") or {}).items():  # e.g. loop_kind=paginated against details.loop_kind
+                got = (findings[hit].get("details") or {}).get(key)
+                if str(got) != value:
+                    evidence_mismatch.append(f"{exp['rule']} {exp['file']}:{exp['line']} expected {key}={value} got {got}")
     for i, f in enumerate(findings):
         if i not in matched_findings:
             per_rule[f["rule"]]["fp"] += 1
