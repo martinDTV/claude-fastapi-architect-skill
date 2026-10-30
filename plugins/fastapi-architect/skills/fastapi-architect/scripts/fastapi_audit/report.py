@@ -32,28 +32,174 @@ def fingerprint_of(finding: Dict[str, Any]) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def compare_with_baseline(report: Dict[str, object], baseline: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
-    """Classify current non-suppressed findings as new/unchanged against a previous report."""
-    current = [f for f in report["findings"] if not f.get("suppressed")]  # type: ignore[index]
-    previous = [f for f in baseline.get("findings", []) if not f.get("suppressed")]
-    prev_map = {fingerprint_of(f): f for f in previous}
-    cur_map = {fingerprint_of(f): f for f in current}
-    new = sorted(
-        ({"fingerprint": fp, "rule": f["rule"], "file": f["file"], "line": f["line"], "severity": f["severity"]} for fp, f in cur_map.items() if fp not in prev_map),
-        key=lambda d: (d["file"], d["line"], d["rule"]),
+COMPARISON_NOTE = (
+    "'fixed' and 'no_longer_detected' list findings the current run did not report. That is not evidence "
+    "that the defect was corrected: the code may have moved, the file may have been skipped, the rule may have "
+    "changed, or the analysis may be partial. Confirm with the recommended test of each finding."
+)
+
+
+def _brief(fp: str, f: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "fingerprint": fp,
+        "rule": f.get("rule"),
+        "file": f.get("file"),
+        "line": f.get("line"),
+        "severity": f.get("severity"),
+        "confidence": f.get("confidence"),  # schema 1.6
+        "evidence_state": f.get("evidence_state"),  # schema 1.6 (None for baselines before 1.5)
+    }
+
+
+def compare_reports(report: Dict[str, object], baseline: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
+    """Compare two audit reports by fingerprint (v1.8). Keeps the v1.4 keys (``new``, ``fixed``, ``unchanged``
+    over non-suppressed findings) and adds persistent findings, severity/confidence/evidence changes,
+    suppression transitions and a reliability flag. Wording: a finding that is not reported any more is
+    *no longer detected*; the tool never claims it was resolved."""
+    current_all = [f for f in report["findings"] if isinstance(f, dict)]  # type: ignore[index]
+    previous_all = [f for f in baseline.get("findings", []) if isinstance(f, dict)]
+    cur_all = {fingerprint_of(f): f for f in current_all}
+    prev_all = {fingerprint_of(f): f for f in previous_all}
+    cur_map = {fp: f for fp, f in cur_all.items() if not f.get("suppressed")}
+    prev_map = {fp: f for fp, f in prev_all.items() if not f.get("suppressed")}
+    sort_key = lambda d: (str(d["file"]), int(d["line"] or 0), str(d["rule"]))  # noqa: E731
+    new = sorted((_brief(fp, f) for fp, f in cur_map.items() if fp not in prev_map), key=sort_key)
+    fixed = sorted((dict(_brief(fp, f), status="no_longer_detected") for fp, f in prev_map.items() if fp not in cur_map), key=sort_key)
+    persistent: List[Dict[str, Any]] = []
+    severity_changes: List[Dict[str, Any]] = []
+    confidence_changes: List[Dict[str, Any]] = []
+    evidence_changes: List[Dict[str, Any]] = []
+    for fp in cur_map:
+        if fp not in prev_map:
+            continue
+        cur, prev = cur_map[fp], prev_map[fp]
+        item = dict(_brief(fp, cur), baseline_line=prev.get("line"))
+        persistent.append(item)
+        for field_name, bucket in (("severity", severity_changes), ("confidence", confidence_changes), ("evidence_state", evidence_changes)):
+            before, after = prev.get(field_name), cur.get(field_name)
+            if before is not None and after is not None and before != after:
+                bucket.append({"fingerprint": fp, "rule": cur.get("rule"), "file": cur.get("file"), "line": cur.get("line"), "from": before, "to": after})
+    persistent.sort(key=sort_key)
+    for bucket in (severity_changes, confidence_changes, evidence_changes):
+        bucket.sort(key=sort_key)
+    newly_suppressed = sorted(
+        (dict(_brief(fp, f), suppression=f.get("suppression")) for fp, f in cur_all.items() if f.get("suppressed") and fp in prev_all and not prev_all[fp].get("suppressed")),
+        key=sort_key,
     )
-    fixed = sorted(
-        ({"fingerprint": fp, "rule": f.get("rule"), "file": f.get("file"), "line": f.get("line"), "severity": f.get("severity")} for fp, f in prev_map.items() if fp not in cur_map),
-        key=lambda d: (str(d["file"]), int(d["line"] or 0), str(d["rule"])),
+    unsuppressed = sorted(
+        (_brief(fp, f) for fp, f in cur_all.items() if not f.get("suppressed") and fp in prev_all and prev_all[fp].get("suppressed")),
+        key=sort_key,
     )
-    unchanged = sum(1 for fp in cur_map if fp in prev_map)
+    new_suppressed = sorted((dict(_brief(fp, f), suppression=f.get("suppression")) for fp, f in cur_all.items() if f.get("suppressed") and fp not in prev_all), key=sort_key)
+    still_reported = {item["fingerprint"] for item in newly_suppressed}
+    no_longer_detected = [item for item in fixed if item["fingerprint"] not in still_reported]  # suppressed is still detected
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    bsummary = baseline.get("summary") if isinstance(baseline.get("summary"), dict) else {}
+    partial_current = bool(summary.get("partial_analysis"))  # type: ignore[union-attr]
+    partial_baseline = bool(bsummary.get("partial_analysis"))
+    baseline_tool = baseline.get("tool", {}).get("version") if isinstance(baseline.get("tool"), dict) else None
     return {
         "baseline": name,
         "baseline_schema": baseline.get("schema_version"),
-        "counts": {"new": len(new), "fixed": len(fixed), "unchanged": unchanged},
+        "baseline_tool_version": baseline_tool,  # schema 1.6
+        "current_tool_version": TOOL_VERSION,  # schema 1.6
+        "counts": {"new": len(new), "fixed": len(fixed), "unchanged": len(persistent)},  # v1.4 contract, unchanged
+        "changes": {  # schema 1.6
+            "no_longer_detected": len(no_longer_detected),  # fixed minus the findings that are still reported but newly suppressed
+            "persistent": len(persistent),
+            "severity_changes": len(severity_changes),
+            "confidence_changes": len(confidence_changes),
+            "evidence_changes": len(evidence_changes),
+            "newly_suppressed": len(newly_suppressed),
+            "unsuppressed": len(unsuppressed),
+            "new_suppressed": len(new_suppressed),
+        },
         "new": new,
         "fixed": fixed,
+        "no_longer_detected": no_longer_detected,  # schema 1.6
+        "persistent": persistent,  # schema 1.6
+        "severity_changes": severity_changes,  # schema 1.6
+        "confidence_changes": confidence_changes,  # schema 1.6
+        "evidence_changes": evidence_changes,  # schema 1.6
+        "suppression_changes": {"newly_suppressed": newly_suppressed, "unsuppressed": unsuppressed, "new_suppressed": new_suppressed},  # schema 1.6
+        "partial": {  # schema 1.6
+            "current": partial_current,
+            "baseline": partial_baseline,
+            "comparison_reliable": not (partial_current or partial_baseline) and baseline_tool is not None,
+        },
+        "tool_changed": bool(baseline_tool) and baseline_tool != TOOL_VERSION,  # schema 1.6: rule changes may explain new/no-longer-detected
+        "note": COMPARISON_NOTE,
     }
+
+
+def compare_with_baseline(report: Dict[str, object], baseline: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
+    """Classify current non-suppressed findings as new/unchanged against a previous report (v1.4 entry point)."""
+    return compare_reports(report, baseline, name)
+
+
+def render_comparison_text(comparison: Dict[str, Any]) -> List[str]:
+    counts = comparison["counts"]
+    lines = [f"baseline {comparison.get('baseline')}: new {counts['new']}, fixed {counts['fixed']}, unchanged {counts['unchanged']}"]
+    c = comparison.get("changes")
+    if isinstance(c, dict):  # schema 1.6 comparison
+        tools = f"{comparison.get('baseline_tool_version') or '?'} -> {comparison.get('current_tool_version')}"
+        reliable = comparison.get("partial", {}).get("comparison_reliable")
+        lines.append(
+            f"  comparison (tool {tools}): no longer detected {c['no_longer_detected']}, persistent {c['persistent']} "
+            f"(severity changes {c['severity_changes']}, confidence changes {c['confidence_changes']}, evidence changes {c['evidence_changes']}), "
+            f"newly suppressed {c['newly_suppressed']}, unsuppressed {c['unsuppressed']}; reliable: {'yes' if reliable else 'no (partial analysis or unknown baseline tool)'}"
+        )
+        lines.append("  note: no longer detected is not resolved; confirm with each finding's recommended test")
+        for label, items in (("new", comparison["new"]), ("no longer detected", comparison["no_longer_detected"])):
+            for item in items:
+                lines.append(f"  {label}: {item['file']}:{item['line']} {item['rule']} ({item['severity']}, {item.get('confidence')})")
+        for label, items in (("severity", comparison["severity_changes"]), ("confidence", comparison["confidence_changes"]), ("evidence", comparison["evidence_changes"])):
+            for item in items:
+                lines.append(f"  {label} change: {item['file']}:{item['line']} {item['rule']} {item['from']} -> {item['to']}")
+        for item in comparison["suppression_changes"]["newly_suppressed"]:
+            lines.append(f"  newly suppressed: {item['file']}:{item['line']} {item['rule']} ({item.get('suppression')})")
+        for item in comparison["suppression_changes"]["unsuppressed"]:
+            lines.append(f"  unsuppressed: {item['file']}:{item['line']} {item['rule']}")
+    return lines
+
+
+def render_comparison_markdown(comparison: Dict[str, Any]) -> List[str]:
+    counts = comparison["counts"]
+    out = ["", f"## Comparison with baseline `{comparison.get('baseline')}`", ""]
+    out.append(f"New: {counts['new']}, fixed: {counts['fixed']}, unchanged: {counts['unchanged']}.")
+    c = comparison.get("changes")
+    if isinstance(c, dict):
+        out.append("")
+        out.append(
+            f"Tool {comparison.get('baseline_tool_version') or '?'} -> {comparison.get('current_tool_version')}. "
+            f"No longer detected: {c['no_longer_detected']}; persistent: {c['persistent']}; severity changes: {c['severity_changes']}; "
+            f"confidence changes: {c['confidence_changes']}; evidence changes: {c['evidence_changes']}; newly suppressed: {c['newly_suppressed']}; "
+            f"unsuppressed: {c['unsuppressed']}. Reliable: {'yes' if comparison.get('partial', {}).get('comparison_reliable') else 'no'}."
+        )
+        out.append("")
+        out.append(f"> {comparison.get('note')}")
+    for label, items in (("New", comparison["new"]), ("No longer detected" if isinstance(c, dict) else "Fixed", comparison["fixed"])):
+        if items:
+            out.append("")
+            out.append(f"### {label}")
+            for item in items:
+                out.append(f"- `{item['file']}:{item['line']}` {item['rule']} ({item['severity']}{', ' + item['confidence'] if item.get('confidence') else ''})")
+    if isinstance(c, dict):
+        for label, items in (("Severity changes", comparison["severity_changes"]), ("Confidence changes", comparison["confidence_changes"]), ("Evidence changes", comparison["evidence_changes"])):
+            if items:
+                out.append("")
+                out.append(f"### {label}")
+                for item in items:
+                    out.append(f"- `{item['file']}:{item['line']}` {item['rule']}: {item['from']} -> {item['to']}")
+        sc = comparison["suppression_changes"]
+        if sc["newly_suppressed"] or sc["unsuppressed"]:
+            out.append("")
+            out.append("### Suppression changes")
+            for item in sc["newly_suppressed"]:
+                out.append(f"- newly suppressed `{item['file']}:{item['line']}` {item['rule']} ({item.get('suppression')})")
+            for item in sc["unsuppressed"]:
+                out.append(f"- unsuppressed `{item['file']}:{item['line']}` {item['rule']}")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -139,8 +285,7 @@ def render_text(report: Dict[str, object]) -> str:
         )
     comparison = report.get("comparison")
     if isinstance(comparison, dict):
-        c = comparison["counts"]
-        lines.append(f"baseline {comparison.get('baseline')}: new {c['new']}, fixed {c['fixed']}, unchanged {c['unchanged']}")
+        lines.extend(render_comparison_text(comparison))
     findings = report["findings"]
     assert isinstance(findings, list)
     active = [item for item in findings if not item["suppressed"]]
@@ -219,17 +364,7 @@ def render_markdown(report: Dict[str, object]) -> str:
         out.append(f"| {key} | {count} |")
     comparison = report.get("comparison")
     if isinstance(comparison, dict):
-        c = comparison["counts"]
-        out.append("")
-        out.append(f"## Comparison with baseline `{comparison.get('baseline')}`")
-        out.append("")
-        out.append(f"New: {c['new']}, fixed: {c['fixed']}, unchanged: {c['unchanged']}.")
-        for label, items in (("New", comparison["new"]), ("Fixed", comparison["fixed"])):
-            if items:
-                out.append("")
-                out.append(f"### {label}")
-                for item in items:
-                    out.append(f"- `{item['file']}:{item['line']}` {item['rule']} ({item['severity']})")
+        out.extend(render_comparison_markdown(comparison))
     active = [f for f in findings if not f["suppressed"]]
     suppressed = [f for f in findings if f["suppressed"]]
     out.append("")
