@@ -123,3 +123,38 @@ async def slow_deposit(
     await repository.apply_delta(session, tenant_id, account_id, amount)
     await asyncio.sleep(pause)
     await session.commit()
+
+
+# --------------------------------------------------------------------------- #
+# v1.7 adversarial scenario (tests/test_tenant_binding.py): RLS context from the requested tenant
+# --------------------------------------------------------------------------- #
+
+from fastapi import APIRouter  # noqa: E402
+from sqlalchemy import select  # noqa: E402, F811
+
+from ledger.modules.ledger.models import Account as _Account  # noqa: E402
+from ledger.modules.tenants.public import Principal, PrincipalDep, require_member  # noqa: E402
+
+unbound_router = APIRouter()  # never included in the application
+
+
+@unbound_router.get("/tenants/{tenant_id}/accounts-unbound")
+async def list_accounts_unbound(tenant_id: UUID, principal: PrincipalDep, session: SessionDep) -> list[str]:
+    """The shape of the defect: authenticated, a tenant check that is real (the RLS context is set)
+    but fed from the URL, never bound to the principal. The policies then show whatever tenant the
+    caller names."""
+    await set_tenant_context(session, tenant_id)  # audit: SEC_RLS_CONTEXT_FROM_REQUEST
+    rows = await session.scalars(
+        select(_Account).where(_Account.tenant_id == tenant_id).order_by(_Account.name)
+    )
+    return [row.name for row in rows]
+
+
+async def list_accounts_bound(session: AsyncSession, principal: Principal, tenant_id: UUID) -> list[str]:
+    """The fix: the real membership dependency binds tenant and principal (404 for non-members) and
+    only then sets the context."""
+    await require_member(tenant_id, principal, session)
+    rows = await session.scalars(
+        select(_Account).where(_Account.tenant_id == tenant_id).order_by(_Account.name)
+    )
+    return [row.name for row in rows]

@@ -4,7 +4,7 @@ Label granted: **`verified`** for the stack below, following `references/referen
 
 | Item | Value |
 |---|---|
-| Date | 2026-10-29 (initial record), renewed 2026-10-29 with the v1.6 adversarial tests |
+| Date | 2026-10-29 (initial record), renewed 2026-10-29 with the v1.6 adversarial tests and the v1.7 tenant-binding tests |
 | Machine | macOS (Darwin 27.0, Apple Silicon), local only, no network services |
 | Python | 3.13.5 (venv created by uv 0.11.28 from `uv.lock`) |
 | FastAPI / Starlette | 0.162.0 |
@@ -22,26 +22,28 @@ $ uv sync --extra dev
 Resolved 33 packages
 
 $ uv run pytest -q
-...........................
-27 passed in 7.63s            (22 in the initial record; 5 adversarial tests added for v1.6)
+.............................
+29 passed in 7.36s            (22 in the initial record; 5 adversarial tests added for v1.6; 2 tenant-binding tests for v1.7)
 
 $ uv run ruff check src tests alembic
 All checks passed!
 $ uv run ruff format --check src tests alembic
-40 files already formatted
+41 files already formatted
 
-$ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.6.0, schema 1.4)
-files scanned: 37  findings: 5 (high 2, medium 2, low 0, info 1)
+$ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.7.0, schema 1.5)
+files scanned: 38  findings: 6 (high 2, medium 3, low 0, info 1)
   alembic/versions/0002_rls.py:32  MIG_RAW_SQL                      info   (dynamic SQL: role name from configuration)
   src/ledger/modules/ledger/antipatterns.py:20   TX_READ_MODIFY_WRITE            medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:29   SA_ASYNC_LAZY_LOAD_RISK         medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:71   SA_SESSION_SHARED_CONCURRENTLY  high   (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:102  BG_REQUEST_SCOPED_RESOURCE      high   (deliberate, reproduced in tests)
+  src/ledger/modules/ledger/antipatterns.py:142  SEC_RLS_CONTEXT_FROM_REQUEST    medium (deliberate, reproduced in tests)
+  contracts: 13 routes, authenticated 12, public 1, unauthenticated and not public 0, authorization visible 9, authorization unknown 1 (the deliberate unbound route)
 $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.py" --ignore MIG_RAW_SQL --fail-on info
 exit 0 (no findings)
 ```
 
-## What each test proves (27 tests, all against PostgreSQL)
+## What each test proves (29 tests, all against PostgreSQL)
 
 | Requirement | Test | Evidence |
 |---|---|---|
@@ -63,6 +65,8 @@ exit 0 (no findings)
 | Cancellation by timeout (v1.6) | `test_adversarial.py::test_cancellation_by_timeout_leaves_nothing_committed_and_the_connection_usable` | `wait_for` cancels during the wait after the UPDATE; rollback leaves balance 0; the session and pool keep working afterwards (balance 7) |
 | Lost response, retried (v1.6) | `test_adversarial.py::test_lost_response_retried_without_a_key_duplicates_and_with_a_key_does_not` | without a key the retry applies the deposit twice (20); with `Idempotency-Key` the retry replays the stored result (30, three entries in total) |
 | RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
+| Tenant check present but not bound (v1.7) | `test_tenant_binding.py::test_rls_context_from_the_requested_tenant_leaks_and_membership_binding_closes_it` | with the RLS context set from the URL tenant, a member of ACME reads Globex's accounts (`["globex-ops"]`) although RLS is correctly configured; binding membership first (the real `require_member`) yields 404 for Globex and the ACME rows for ACME |
+| Tenant id alone never authorizes (v1.7) | `test_tenant_binding.py::test_a_tenant_id_alone_never_authorizes_a_background_worker` | a worker handed only a tenant id writes into that tenant: the binding must happen where the principal is known, before the id is handed over |
 
 ## Defects found while verifying (and fixed before labelling)
 
