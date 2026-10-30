@@ -22,7 +22,7 @@ Requests identify themselves with the `X-Demo-User` header (`modules/tenants/sec
 
 ## Run the tests (no setup beyond PostgreSQL binaries)
 
-The suite (30 tests) starts a throwaway PostgreSQL cluster with `initdb`/`pg_ctl` in a temporary directory, runs the migrations, and tears it down. `tests/test_adversarial.py` reproduces, on that cluster, the scenarios the static auditor can only suspect: a shared session, a request-scoped session handed to a task, cancellation by timeout, a lost response retried with and without an idempotency key, and the RLS configuration invariants; `tests/test_tenant_binding.py` shows a tenant check that is present but not bound to the principal, and the membership binding that closes it. It needs the PostgreSQL client and server binaries on `PATH` (Homebrew `postgresql@16`, Debian `postgresql-16`) and `uv`.
+The suite (30 tests, plus one `remediation`-marked target deselected by default) starts a throwaway PostgreSQL cluster with `initdb`/`pg_ctl` in a temporary directory, runs the migrations, and tears it down. `tests/test_adversarial.py` reproduces, on that cluster, the scenarios the static auditor can only suspect: a shared session, a request-scoped session handed to a task, cancellation by timeout, a lost response retried with and without an idempotency key, and the RLS configuration invariants; `tests/test_tenant_binding.py` shows a tenant check that is present but not bound to the principal, and the membership binding that closes it. It needs the PostgreSQL client and server binaries on `PATH` (Homebrew `postgresql@16`, Debian `postgresql-16`) and `uv`.
 
 ```bash
 cd plugins/fastapi-architect/examples/tenant-ledger

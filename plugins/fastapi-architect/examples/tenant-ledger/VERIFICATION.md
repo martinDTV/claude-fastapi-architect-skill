@@ -25,6 +25,19 @@ $ uv run pytest -q
 ..............................
 30 passed in 7.90s            (22 in the initial record; 5 adversarial tests added for v1.6; 2 tenant-binding tests for v1.7; 1 commit-inside-begin test for v1.8)
 
+$ uv run pytest -q -m remediation tests/test_remediation_targets.py            (v1.9 target, deselected by default)
+1 failed in 1.85s             (fails on the anti-pattern on purpose: InvalidRequestError after the inner commit)
+
+$ python3 ../../../../scripts/audit_remediate.py . --select TX_COMMIT_INSIDE_BEGIN_BLOCK \
+    --authorize-execution --test-command "uv run --frozen --extra dev pytest -q -m remediation tests/test_remediation_targets.py" \
+    --env-passthrough UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR --patch-dir patches --output run.json
+project untouched: yes        (digest of src/ and tests/ identical before and after; the copy lived in a temporary directory)
+tests before: failed (exit 1)  1 failed     -> the defect is observable on PostgreSQL
+tests after:  passed           1 passed     -> after removing the two inner commits in the copy
+cases: 2 verified              antipatterns.py:176 and :190, recipe remove_commit_inside_begin; no new finding in the copy
+(a first attempt without `--extra dev` ended `rejected 2`: pytest was not in the copy's environment and the
+ suite failed before and after; the tool reported it as such instead of claiming anything)
+
 $ uv run ruff check src tests alembic
 All checks passed!
 $ uv run ruff format --check src tests alembic
@@ -46,7 +59,7 @@ $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.
 exit 0 (no findings)
 ```
 
-## What each test proves (30 tests, all against PostgreSQL)
+## What each test proves (30 tests plus one deselected remediation target, all against PostgreSQL)
 
 | Requirement | Test | Evidence |
 |---|---|---|
@@ -70,6 +83,7 @@ exit 0 (no findings)
 | RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
 | Tenant check present but not bound (v1.7) | `test_tenant_binding.py::test_rls_context_from_the_requested_tenant_leaks_and_membership_binding_closes_it` | with the RLS context set from the URL tenant, a member of ACME reads Globex's accounts (`["globex-ops"]`) although RLS is correctly configured; binding membership first (the real `require_member`) yields 404 for Globex and the ACME rows for ACME |
 | commit() inside `with session.begin()` (v1.8) | `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement` | SQLAlchemy 2.0.55 on PostgreSQL: the inner commit closes the block's transaction and the next statement raises `InvalidRequestError` ("Can't operate on closed transaction inside context manager"); the first delta is committed, the second never runs; the loop shape fails on its second iteration; without the inner commit both deltas are visible together after exit. This record corrected the rule's first draft, which claimed the later statements ran in an unmanaged transaction |
+| Remediation target (v1.9, marker `remediation`, deselected by default) | `test_remediation_targets.py::test_commit_inside_begin_is_remediated` | fails on the anti-pattern (the statement after the inner commit raises) and passes once `scripts/audit_remediate.py` has removed the inner commit in an isolated copy: both deltas are committed together. The tool ran it before and after on a throwaway cluster inside the copy |
 | Tenant id alone never authorizes (v1.7) | `test_tenant_binding.py::test_a_tenant_id_alone_never_authorizes_a_background_worker` | a worker handed only a tenant id writes into that tenant: the binding must happen where the principal is known, before the id is handed over |
 
 ## Defects found while verifying (and fixed before labelling)
