@@ -74,14 +74,16 @@ plugins/fastapi-architect/
     │   └── adr-template.md
     └── scripts/
         ├── audit_fastapi.py              # read-only static auditor entry point (stdlib only)
-        └── fastapi_audit/                # v1.4 auditor package: rules per category, facts, report, cli
+        ├── audit_diff.py                 # report comparison tool (v1.8)
+        └── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, cli
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
 plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
 scripts/audit_precision.py                # precision/recall/coverage/time/memory of the auditor, current vs. a previous commit
-tests/                                    # auditor suites per category, fixtures (incl. the truth16 ground-truth corpus), PostgreSQL integration tests
+scripts/audit_diff.py                     # compare two audit reports by fingerprint: new, no longer detected, persistent, confidence/severity changes (v1.8)
+tests/                                    # auditor suites per category, fixtures (incl. the truth16/17/18 ground-truth corpora), PostgreSQL integration tests
 ```
 
 ## Principles
@@ -204,3 +206,13 @@ The auditor now states, per route, what it can see about authentication and auth
 - **Independent corpus.** `tests/fixtures/truth17` has a `dev` partition used during implementation and an `acceptance` partition held out and scored once at release time; `scripts/audit_precision.py` reports precision, recall, F1, false-positive and false-negative rates, unknown-evidence rate and the verified/inferred/unknown split. Three partitions: `dev` (used during implementation, F1 0.684 → 1.0), `acceptance` (held out, scored at the first release candidate: F1 0.636 → 0.783 as first measured, 0.815 after one disclosed engine fix, 0.963 once the project declares its tenant parameter) and `holdout` (written before the last features, scored once with the final engine: F1 0.519 → 0.895). None of the held-out partitions was edited; their open items are analysed in the release notes.
 - **Reference implementation.** `tenant-ledger` (29 tests) reproduces on PostgreSQL a tenant check that is present but not bound: with the RLS context set from the URL tenant a member of ACME reads Globex's accounts through correctly configured policies; membership first returns 404.
 - Tests: 251 in the plugin plus 29 in the example. Evals: 47 cases (8 new), validated offline; no paid runs. Release details in `RELEASE-NOTES-v1.7.md`.
+
+## Extension v1.8 — Program Analysis Precision & Verified Remediation Foundations
+
+The auditor classifies more call sites without inventing project edges, reads the structure of a loop before calling a commit accidental, attaches a structured remediation proposal it never applies, and compares two reports without ever saying "resolved". Everything from v1.0 to v1.7 remains; every option, rule id, fingerprint and report field is unchanged (report schema 1.6 is additive over 1.5).
+
+- **Call classification.** Locals bound to library or builtin results (plain, awaited, unpacked, `with`), project functions returning builtin or library types, closures reading the enclosing function's typed names, ASGI `send`/`receive`/`app` callbacks, typed `Callable` parameters (v1.7 missed the generic form), lambdas that only forward to one target, bound-method references, `self.a.b.method()` through two typed links, same-module class annotations, mixins whose concrete subclasses agree on an attribute's kind, template-method hooks with one implementation, and unknown methods of classes with a third-party base. Loop targets and comprehension variables stay dynamic and say why: every dynamic site carries an origin (`uncertainty.dynamic_by_origin`), coverage is reported as three shares that sum to one, and `callback_params_unresolved` now counts parameters, not sites, and excludes framework callbacks. On the two calibration repositories dynamic sites fell by 18 % and 12 %, `not_found` by 37 % and 96 %, and every previously resolved edge kept its target.
+- **Transactional precision.** `TX_COMMIT_IN_LOOP` classifies the loop by structure (`per_item`, `batch`, `paginated`, `convergence`, `retry`): per-item commits are reported as before with `details.loop_kind` and the evidence; structurally deliberate kinds are counted in `facts.commit_loops` and not reported (v1.7 silenced only the modulo form; names such as `BATCH_SIZE` prove nothing). New `TX_COMMIT_INSIDE_BEGIN_BLOCK` (high): `commit()` inside `with session.begin()`. 59 rules.
+- **Remediation foundations.** Five rules carry a `remediation` object: problem, evidence, certainty (from the evidence state), proposed fix as steps, invariants, tests, regression risk. `status: proposed`, `applied: false`, `verified: false`, always; the auditor never edits code.
+- **Report comparison.** `scripts/audit_diff.py BEFORE.json AFTER.json` and the richer `--baseline` block: new, no longer detected, persistent, severity/confidence/evidence-state changes, suppression transitions, partial-analysis reliability. A finding that is not reported any more is "no longer detected", never "resolved".
+- **Measured.** `tests/fixtures/truth18` (`dev` scored in-process, `acceptance` scored once at release time): on `dev` the v1.7 engine scored F1 0.308, expected edges 1/6 and unresolved statuses 7/16; v1.8 scores 1.0, 6/6 and 16/16. Clivana (read-only) 55 → 52 findings: the three that disappeared are a convergence loop, a cursor-paginated job and a bounded batch deletion; AgentForge 11 → 16: four indirect-blocking findings in development scripts (async code calling a worktree manager that shells out to git, followed through a two-level attribute chain) and one resource question on a route whose store call v1.7 could not follow. Time +6 % on the largest repository, memory flat. The reference implementation gains a PostgreSQL test for the new rule (30 tests); it corrected the rule's first draft. Release details in `RELEASE-NOTES-v1.8.md`.
