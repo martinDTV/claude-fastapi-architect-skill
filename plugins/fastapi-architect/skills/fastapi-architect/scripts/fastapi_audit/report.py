@@ -485,6 +485,8 @@ def to_sarif(report: Dict[str, object]) -> str:
                 "symbol": f.get("symbol"),
                 "call_path": f.get("call_path"),
                 "recommended_test": f.get("recommended_test"),
+                **({"details": f["details"]} if f.get("details") else {}),  # schema 1.6
+                **({"remediation": f["remediation"]} if f.get("remediation") else {}),  # schema 1.6: a proposal, never applied
             },
         }
         if f.get("suppressed"):

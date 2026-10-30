@@ -85,6 +85,17 @@ class SarifInteroperabilityTests(ProjectCase):
         states = {r["baselineState"] for r in with_baseline["runs"][0]["results"]}
         self.assertEqual(states, {"new", "unchanged"})
 
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema not installed in this interpreter")
+    def test_v18_properties_details_and_remediation_validate(self) -> None:
+        proc = subprocess.run([sys.executable, "-I", str(REPO_ROOT / "scripts" / "audit_fastapi.py"), str(REPO_ROOT / "tests" / "fixtures" / "truth18" / "dev"), "--format", "sarif", "--exit-zero"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        document = json.loads(proc.stdout)
+        self.assertEqual(validator.schema_errors(document), [])
+        props = [r["properties"] for r in document["runs"][0]["results"] if r["ruleId"] == "TX_COMMIT_IN_LOOP"]
+        self.assertTrue(props and all(p["details"]["loop_kind"] == "per_item" for p in props))
+        self.assertTrue(all(p["remediation"]["status"] == "proposed" and p["remediation"]["applied"] is False for p in props))
+        self.assertIn("TX_COMMIT_INSIDE_BEGIN_BLOCK", {r["id"] for r in document["runs"][0]["tool"]["driver"]["rules"]})
+
     def test_cli_validator_script_and_determinism(self) -> None:
         self._project()
         self._documents()
