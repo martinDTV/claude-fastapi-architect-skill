@@ -24,8 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from .isolation import ExecutionPolicy, Workspace, run_command
+import time
+import uuid
+
+from .isolation import ExecutionPolicy, Workspace, command_allowed, parse_command, run_argv
 from .model import TestRun
+from .runners import Evidence, adapter_for, assess
 
 TRUST_FIXTURE = "fixture"
 TRUST_TRUSTED = "trusted"
@@ -113,7 +117,28 @@ class LocalProcessExecutor(Executor):
         )
 
     def run(self, command: str, workspace: Workspace, policy: ExecutionPolicy) -> TestRun:
-        result = run_command(policy, workspace, command)
+        """Instrument the command with its runner adapter, run it in the copy, read the report back and assess.
+        A command without an adapter still runs (when allowed) but its outcome is ``unverifiable``."""
+        argv = parse_command(command)
+        refused = command_allowed(argv, policy.allowed_commands)
+        if refused:
+            result = TestRun(ran=False, command=argv, refused=refused)
+            result.outcome, result.executor = assess(result, None), self.name
+            return result
+        adapter = adapter_for(argv)
+        evidence_dir = workspace.root / "evidence"
+        evidence_dir.mkdir(exist_ok=True)
+        nonce = uuid.uuid4().hex
+        instrumented, report = adapter.instrument(argv, evidence_dir, nonce) if adapter else (list(argv), None)
+        started = time.time()
+        result = run_argv(policy, workspace, instrumented)
+        result.command, result.instrumented_command = list(argv), list(instrumented)
+        evidence = adapter.collect(report, nonce, started) if adapter and report is not None else Evidence(adapter=None)
+        result.evidence = evidence.to_dict()
+        result.counts = {k: v for k, v in evidence.counts.items() if v is not None}
+        result.runner = adapter.name if adapter else "generic"
+        result.outcome = assess(result, evidence)
+        result.passed = result.outcome == "passed"
         result.executor = self.name
         return result
 

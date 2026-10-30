@@ -68,6 +68,11 @@ RC_NO_TESTS = "no_tests"
 RC_INFRASTRUCTURE_ERROR = "infrastructure_error"
 RC_TIMEOUT = "timeout"
 RC_COMMAND_REFUSED = "command_refused"
+RC_RUNNER_UNVERIFIABLE = "runner_unverifiable"  # no adapter for the runner: exit codes are not evidence
+RC_EVIDENCE_MISSING = "evidence_missing"  # the runner wrote no report
+RC_REPORT_CORRUPT = "report_corrupt"
+RC_REPORT_MISMATCH = "report_mismatch"  # a report that does not carry this run's nonce
+RC_REPRODUCER_NOT_SPECIFIC = "reproducer_not_specific"  # the linked tests do not change with this candidate
 RC_VERIFIED = "verified"
 
 # test outcomes (set by isolation.interpret_run)
@@ -79,6 +84,10 @@ OUTCOME_INFRASTRUCTURE_ERROR = "infrastructure_error"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_REFUSED = "refused"
 OUTCOME_NOT_RUN = "not_run"
+OUTCOME_UNVERIFIABLE = "unverifiable"  # runner without an adapter
+OUTCOME_NO_EVIDENCE = "no_evidence"  # adapter present, no report written
+OUTCOME_REPORT_CORRUPT = "report_corrupt"
+OUTCOME_REPORT_MISMATCH = "report_mismatch"
 
 
 class RemediationError(RuntimeError):
@@ -138,14 +147,26 @@ class TestRun:
     stdout_tail: str = ""
     stderr_tail: str = ""
     outcome: str = OUTCOME_NOT_RUN
-    runner: str = "generic"  # pytest | unittest | generic
-    counts: Dict[str, int] = field(default_factory=dict)  # passed/failed/errors/skipped/ran when parseable
+    runner: str = "generic"  # adapter name (pytest-junit | unittest-json) or generic
+    counts: Dict[str, int] = field(default_factory=dict)  # structured counts from the adapter's report
+    text_counts: Dict[str, int] = field(default_factory=dict)  # supplementary: numbers read from the summary line, never used for verdicts
     executor: Optional[str] = None
+    instrumented_command: Optional[List[str]] = None
+    evidence: Dict[str, object] = field(default_factory=dict)  # runners.Evidence.to_dict()
+
+    @property
+    def verifiable(self) -> bool:
+        return bool(self.evidence.get("verifiable"))
+
+    def test_ids(self, key: str) -> List[str]:
+        tests = self.evidence.get("tests") or {}
+        return list(tests.get(key, [])) if isinstance(tests, dict) else []
 
     def to_dict(self) -> Dict[str, object]:
         return {
             "ran": self.ran,
             "command": list(self.command) if self.command else None,
+            "instrumented_command": list(self.instrumented_command) if self.instrumented_command else None,
             "executor": self.executor,
             "returncode": self.returncode,
             "passed": self.passed,
@@ -154,6 +175,8 @@ class TestRun:
             "outcome": self.outcome,
             "runner": self.runner,
             "counts": dict(self.counts),
+            "text_counts": dict(self.text_counts),
+            "evidence": dict(self.evidence),
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
         }
@@ -201,8 +224,12 @@ class RemediationCase:
     reason_code: Optional[str] = None
     patch: Optional[PatchProposal] = None
     reproducer: Optional[str] = None  # the linked command, as given
+    reproducer_scope: Optional[str] = None  # case (fingerprint or file:line link) | rule (shared by every case of the rule)
+    shared_with: List[str] = field(default_factory=list)  # fingerprints of the other cases that use the same reproducer
     linked_before: TestRun = field(default_factory=TestRun)
     linked_after: TestRun = field(default_factory=TestRun)
+    flipped_tests: List[str] = field(default_factory=list)  # failed (or errored) before, passed after: the demonstrable link candidate -> reproducer
+    regressed_tests: List[str] = field(default_factory=list)  # passed before, failed after
     before_audit: AuditCheck = field(default_factory=AuditCheck)
     after_audit: AuditCheck = field(default_factory=AuditCheck)
     invariants: List[Invariant] = field(default_factory=list)
@@ -240,10 +267,18 @@ class RemediationCase:
             missing.append("test files were modified or not checked")
         if not self.reproducer:
             missing.append("no linked reproducer")
+        if not self.linked_before.verifiable:
+            missing.append("the before run has no verifiable evidence (adapter report)")
         if self.defect_reproduced is not True:
             missing.append("the reproducer did not fail before the patch")
+        if not self.linked_after.verifiable:
+            missing.append("the after run has no verifiable evidence (adapter report)")
         if not (self.linked_after.ran and self.linked_after.outcome == OUTCOME_PASSED):
             missing.append("the reproducer did not pass after the patch")
+        if not self.flipped_tests:
+            missing.append("no test failed before and passed after: the reproducer is not shown to observe this candidate")
+        if self.regressed_tests:
+            missing.append("tests that passed before fail after the patch")
         if not self.executor:
             missing.append("no executor recorded")
         return missing
@@ -281,7 +316,11 @@ class RemediationCase:
             "applied_to_project": False,
             "patch": self.patch.to_dict() if self.patch else None,
             "reproducer": self.reproducer,
+            "reproducer_scope": self.reproducer_scope,
+            "shared_with": list(self.shared_with),
             "defect_reproduced": self.defect_reproduced,
+            "flipped_tests": list(self.flipped_tests),
+            "regressed_tests": list(self.regressed_tests),
             "linked_tests": {"before": self.linked_before.to_dict(), "after": self.linked_after.to_dict()},
             "verification": {"before_audit": self.before_audit.to_dict(), "after_audit": self.after_audit.to_dict()},
             "invariants": [i.to_dict() for i in self.invariants],

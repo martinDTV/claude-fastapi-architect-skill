@@ -149,17 +149,24 @@ def sanitised_env(policy: ExecutionPolicy, workspace: Workspace) -> Dict[str, st
 
 
 def run_command(policy: ExecutionPolicy, workspace: Workspace, command: Optional[str] = None) -> TestRun:
-    """Execute ``command`` (default: the policy's suite command) inside the copy. Only executors call this, and
-    only after ``executors.select_executor`` accepted the authorization; the ``authorized`` flag is re-checked."""
+    """Execute ``command`` (default: the policy's suite command) inside the copy, without a runner adapter. Only
+    executors call this (``LocalProcessExecutor.run`` instruments the command first); the ``authorized`` flag is
+    re-checked here."""
     if not policy.authorized:
         return interpret_run(TestRun(ran=False, refused="execution not authorized"))
     command = command or policy.command
     if not command:
         return interpret_run(TestRun(ran=False, refused="no test command given"))
-    argv = parse_command(command)
+    return run_argv(policy, workspace, parse_command(command))
+
+
+def run_argv(policy: ExecutionPolicy, workspace: Workspace, argv: List[str]) -> TestRun:
+    """Execute an argv (possibly instrumented by a runner adapter) inside the copy."""
+    if not policy.authorized:
+        return interpret_run(TestRun(ran=False, command=list(argv), refused="execution not authorized"))
     refused = command_allowed(argv, policy.allowed_commands)
     if refused:
-        return interpret_run(TestRun(ran=False, command=argv, refused=refused))
+        return interpret_run(TestRun(ran=False, command=list(argv), refused=refused))
     try:
         proc = subprocess.run(
             argv,
@@ -195,9 +202,9 @@ def runner_kind(argv: Optional[List[str]]) -> str:
 
 
 def interpret_run(run: TestRun) -> TestRun:
-    """Derive ``outcome`` and ``counts`` from the runner's conventions. A passing exit code with no test
-    executed (none collected, all skipped) is **not** a pass; runner-internal and usage errors are
-    infrastructure, never a verdict on the patch."""
+    """Supplementary reading of the runner's summary line into ``text_counts`` and a provisional ``outcome``.
+    Executors overwrite the outcome with ``runners.assess`` (structured report, nonce-bound); the text is kept
+    only to annotate the run, never to verify it."""
     from .model import (
         OUTCOME_FAILED,
         OUTCOME_INFRASTRUCTURE_ERROR,
@@ -226,7 +233,7 @@ def interpret_run(run: TestRun) -> TestRun:
         for number, label in PYTEST_COUNT_RE.findall(text):
             key = "errors" if label.startswith("error") else label
             counts[key] = counts.get(key, 0) + int(number)
-        run.counts = counts
+        run.text_counts = counts
         code = run.returncode
         if code == 0:
             if counts.get("passed", 0) == 0 and (counts.get("skipped", 0) > 0 or "no tests ran" in text.lower()):
@@ -253,7 +260,7 @@ def interpret_run(run: TestRun) -> TestRun:
             counts["ran"] = int(ran.group(1))
         if skipped:
             counts["skipped"] = int(skipped.group(1))
-        run.counts = counts
+        run.text_counts = counts
         code = run.returncode
         if code == 0:
             if ran and counts["ran"] == 0:
