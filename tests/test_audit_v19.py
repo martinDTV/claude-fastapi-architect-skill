@@ -22,13 +22,18 @@ from fastapi_audit.remediate import RECIPE_META, RECIPES, Authorization, Remedia
 from fastapi_audit.remediate import pipeline as pl  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, LocalProcessExecutor, select_executor  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, ExecutionPolicy, Workspace, command_allowed, digest_tree, interpret_run, run_command  # noqa: E402
+from fastapi_audit.remediate.runners import ADAPTERS, Evidence, PytestJUnitAdapter, UnittestJsonAdapter, adapter_for, assess  # noqa: E402
 from fastapi_audit.remediate.model import (  # noqa: E402
     OUTCOME_FAILED,
     OUTCOME_INFRASTRUCTURE_ERROR,
+    OUTCOME_NO_EVIDENCE,
     OUTCOME_NO_TESTS,
     OUTCOME_PASSED,
+    OUTCOME_REPORT_CORRUPT,
+    OUTCOME_REPORT_MISMATCH,
     OUTCOME_SKIPPED_ONLY,
     OUTCOME_TIMEOUT,
+    OUTCOME_UNVERIFIABLE,
     STATE_AUDIT_CLEAN,
     STATE_BLOCKED,
     STATE_INCONCLUSIVE,
@@ -111,7 +116,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(run["summary"]["by_state"], {STATE_AUDIT_CLEAN: 3})
         self.assertEqual(run["summary"]["by_reason_code"], {"executor_unavailable": 3})
         self.assertTrue(all(not c["linked_tests"]["before"]["ran"] and c["executor"] is None for c in run["cases"]))
-        self.assertEqual(run["combined"]["suite_after"]["ran"], False)
+        self.assertEqual(run["combined"]["suite"]["after"]["ran"], False)
+        self.assertEqual(run["combined"]["state"], "inconclusive")  # audited only: never inferred from individual verdicts
 
     def test_fixture_trust_with_linked_reproducers_verifies_each_case(self) -> None:
         run = self.verified
@@ -119,13 +125,27 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(run["execution"]["executor"]["isolation_level"], "process_hygiene")
         self.assertIn("network isolation", run["execution"]["executor"]["not_provided"])
         self.assertEqual(run["summary"]["by_state"], {STATE_VERIFIED: 3})
-        self.assertTrue(run["summary"]["composable"])
-        self.assertEqual(run["combined"]["suite_before"]["outcome"], OUTCOME_FAILED)
-        self.assertEqual(run["combined"]["suite_after"]["outcome"], OUTCOME_PASSED)
-        self.assertTrue(run["combined"]["audit"]["ok"])
+        self.assertEqual(run["summary"]["composition"], "verified")
+        combined = run["combined"]
+        self.assertEqual(combined["suite"]["before"]["outcome"], OUTCOME_FAILED)
+        self.assertEqual(combined["suite"]["after"]["outcome"], OUTCOME_PASSED)
+        self.assertTrue(combined["suite"]["after"]["evidence"]["verifiable"])
+        self.assertTrue(combined["audit"]["ok"])
+        self.assertEqual(len(combined["applied"]), 3)
+        self.assertEqual({a["candidate_id"] for a in combined["applied"]}, {c["candidate_id"] for c in run["cases"]})
+        self.assertTrue(all(v["outcome"] == OUTCOME_PASSED for v in combined["reproducers"].values()))
         for case in run["cases"]:
             self.assertEqual(case["reproducer"], LINKS[case["rule"]])
+            self.assertEqual(case["reproducer_scope"], "rule")
+            self.assertEqual(case["shared_with"], [])  # one case per rule in the fixture: nothing shared
             self.assertTrue(case["defect_reproduced"])
+            self.assertTrue(case["flipped_tests"])
+            self.assertEqual(case["regressed_tests"], [])
+            for run_key in ("before", "after"):
+                ev = case["linked_tests"][run_key]["evidence"]
+                self.assertEqual(ev["adapter"], "unittest-json")
+                self.assertTrue(ev["verifiable"])
+                self.assertGreaterEqual(ev["counts"]["executed"], 1)
             self.assertEqual((case["linked_tests"]["before"]["outcome"], case["linked_tests"]["after"]["outcome"]), (OUTCOME_FAILED, OUTCOME_PASSED))
             self.assertEqual(case["linked_tests"]["after"]["executor"], "local")
             self.assertEqual((case["executor"], case["isolation_level"]), ("local", "process_hygiene"))
@@ -141,6 +161,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(run["summary"]["by_state"], {STATE_INCONCLUSIVE: 3})
         self.assertEqual(run["summary"]["by_reason_code"], {"no_linked_tests": 3})
         self.assertEqual(run["combined"]["state"], "not_run")  # inconclusive candidates are not composed
+        self.assertEqual(run["summary"]["composition"], "not_run")
 
     def test_patches_apply_cleanly_to_the_original_and_reproduce_the_verified_copy(self) -> None:
         source = (FIXTURE / "shop" / "service.py").read_text(encoding="utf-8")
@@ -179,8 +200,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_renderers_selection_and_recipe_metadata(self) -> None:
         text = render_text(self.verified)
-        self.assertIn("cases: 3  verified 3  composable: yes", text)
-        self.assertIn("reproducer:", text)
+        self.assertIn("cases: 3  verified 3  composition: verified", text)
+        self.assertIn("reproducer (rule):", text)
+        self.assertIn("flipped:", text)
         md = render_markdown(self.verified)
         self.assertIn("```diff", md)
         self.assertIn("(`verified`)", md)
@@ -283,7 +305,7 @@ class AdversarialTests(ProjectCase):
         self.assertFalse(case["linked_tests"]["after"]["ran"])
         self.assertFalse(case["verification"]["after_audit"]["target_present"])  # a clean audit is still not verified
 
-    def test_a_reproducer_that_fails_after_the_patch_rejects(self) -> None:
+    def test_a_reproducer_that_fails_before_and_after_does_not_observe_the_candidate(self) -> None:
         self.write("tests/test_always_fails.py", '''
             import unittest
 
@@ -291,10 +313,40 @@ class AdversarialTests(ProjectCase):
                 def test_x(self):
                     self.fail("independent failure")
         ''')
-        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -m unittest tests.test_always_fails"})
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -m unittest tests.test_always_fails"}, suite=False)
+        case = run["cases"][0]
+        self.assertEqual((case["state"], case["reason_code"]), (STATE_INCONCLUSIVE, "reproducer_not_specific"))
+        self.assertTrue(case["defect_reproduced"])  # it failed before, but the same test fails after: no demonstrable link
+        self.assertEqual((case["flipped_tests"], case["regressed_tests"]), ([], []))
+
+    def test_a_test_that_passed_before_and_fails_after_rejects_the_candidate(self) -> None:
+        self.write("tests/test_old_expectation.py", '''
+            import asyncio
+            import unittest
+            import warnings
+
+            from tests.fakes import FakeAsyncSession, stub_sqlalchemy_if_missing
+
+            stub_sqlalchemy_if_missing()
+
+            from shop import service  # noqa: E402
+
+
+            class OldExpectation(unittest.TestCase):
+                def test_import_commits_three_times(self):  # encodes the defective behaviour: one commit per item
+                    session = FakeAsyncSession()
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        asyncio.run(service.import_items(session, ["a", "b", "c"]))
+                    self.assertEqual(session.commits, 3)
+        ''')
+        reproducer = f"{PY} -m unittest tests.test_defects.DefectTests.test_import_is_atomic_when_an_item_fails tests.test_old_expectation.OldExpectation.test_import_commits_three_times"
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": reproducer}, suite=False)
         case = run["cases"][0]
         self.assertEqual((case["state"], case["reason_code"]), (STATE_REJECTED, "tests_failed_after"))
-        self.assertTrue(case["defect_reproduced"])
+        self.assertEqual(case["flipped_tests"], ["tests.test_defects.DefectTests.test_import_is_atomic_when_an_item_fails"])
+        self.assertEqual(case["regressed_tests"], ["tests.test_old_expectation.OldExpectation.test_import_commits_three_times"])
+        self.assertIn("tests that passed before now fail", case["reason"])
 
     def test_an_after_run_that_does_not_execute_is_inconclusive(self) -> None:
         calls = {"n": 0}
@@ -324,21 +376,141 @@ class AdversarialTests(ProjectCase):
         run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -m unittest tests.test_skipped"}, suite=False)
         self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "tests_skipped"))
         run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -m unittest tests.test_defects.DefectTests.test_does_not_exist"}, suite=False)
-        self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "infrastructure_error"))
-        self.write("tests/pytest_like_empty.py", "import sys\nprint('no tests ran in 0.01s')\nsys.exit(5)\n")
-        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} tests/pytest_like_empty.py"}, suite=False)
-        self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "no_tests"))
+        case = run["cases"][0]
+        self.assertEqual((case["state"], case["reason_code"]), (STATE_INCONCLUSIVE, "infrastructure_error"))
+        self.assertEqual(case["linked_tests"]["before"]["evidence"]["counts"]["collection_errors"], 1)  # the selector did not resolve
 
-    def test_infrastructure_failures_are_not_verdicts(self) -> None:
-        self.write("tests/pytest_like_db_down.py", "import sys\nprint('ERROR tests/test_x.py::test_y - OperationalError: could not connect to server')\nprint('1 error in 0.30s')\nsys.exit(1)\n")
-        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} tests/pytest_like_db_down.py"}, suite=False)
-        self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "infrastructure_error"))
-        self.write("tests/pytest_like_internal.py", "import sys\nprint('INTERNALERROR> boom')\nsys.exit(3)\n")
-        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} tests/pytest_like_internal.py"}, suite=False)
-        self.assertEqual(run["cases"][0]["reason_code"], "infrastructure_error")
+    def test_runners_without_an_adapter_never_verify_whatever_their_exit_code(self) -> None:
+        self.write("tests/green_script.py", "import sys\nprint('3 passed in 0.01s')\nsys.exit(0)\n")  # a script that imitates a pytest summary
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} tests/green_script.py"}, suite=False)
+        self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "runner_unverifiable"))
+        self.assertEqual(run["cases"][0]["linked_tests"]["before"]["outcome"], OUTCOME_UNVERIFIABLE)
+        self.assertFalse(run["cases"][0]["linked_tests"]["before"]["evidence"]["verifiable"])
+        self.write("tests/red_script.py", "import sys\nprint('1 error in 0.30s')\nsys.exit(1)\n")
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} tests/red_script.py"}, suite=False)
+        self.assertEqual(run["cases"][0]["reason_code"], "runner_unverifiable")
         run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -c \"import time; time.sleep(30)\""}, suite=False, timeout_s=1.0)
         self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "timeout"))
         self.assertEqual(run["cases"][0]["linked_tests"]["before"]["outcome"], OUTCOME_TIMEOUT)
+
+    def test_exit_code_zero_without_executed_tests_is_not_evidence(self) -> None:
+        self.write("tests/test_nothing.py", "import unittest\n\nclass T(unittest.TestCase):\n    pass\n")
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": f"{PY} -m unittest tests.test_nothing"}, suite=False)
+        case = run["cases"][0]
+        self.assertEqual((case["state"], case["reason_code"]), (STATE_INCONCLUSIVE, "no_tests"))
+        self.assertEqual(case["linked_tests"]["before"]["evidence"]["counts"]["executed"], 0)
+        self.assertEqual(case["linked_tests"]["before"]["evidence"]["counts"]["discovered"], 0)
+
+    def test_corrupt_or_foreign_reports_are_inconclusive(self) -> None:
+        real_collect = UnittestJsonAdapter.collect
+
+        def corrupt(self_adapter, report, nonce, started_at):
+            Path(report).write_text("{not json", encoding="utf-8")
+            return real_collect(self_adapter, report, nonce, started_at)
+
+        self.patch_attr(UnittestJsonAdapter, "collect", corrupt)
+        run = self.run_rule("TX_COMMIT_IN_LOOP", suite=False)
+        case = run["cases"][0]
+        self.assertEqual((case["state"], case["reason_code"]), (STATE_INCONCLUSIVE, "report_corrupt"))
+        self.assertEqual(case["linked_tests"]["before"]["outcome"], OUTCOME_REPORT_CORRUPT)
+        self._restore_all()
+        self._restore = []
+
+        def foreign(self_adapter, report, nonce, started_at):
+            data = json.loads(Path(report).read_text(encoding="utf-8"))
+            data["nonce"] = "another-run"
+            Path(report).write_text(json.dumps(data), encoding="utf-8")
+            return real_collect(self_adapter, report, nonce, started_at)
+
+        self.patch_attr(UnittestJsonAdapter, "collect", foreign)
+        run = self.run_rule("TX_COMMIT_IN_LOOP", suite=False)
+        case = run["cases"][0]
+        self.assertEqual((case["state"], case["reason_code"]), (STATE_INCONCLUSIVE, "report_mismatch"))
+        self._restore_all()
+        self._restore = []
+
+        def missing(self_adapter, report, nonce, started_at):
+            Path(report).unlink(missing_ok=True)
+            return real_collect(self_adapter, report, nonce, started_at)
+
+        self.patch_attr(UnittestJsonAdapter, "collect", missing)
+        run = self.run_rule("TX_COMMIT_IN_LOOP", suite=False)
+        self.assertEqual((run["cases"][0]["state"], run["cases"][0]["reason_code"]), (STATE_INCONCLUSIVE, "evidence_missing"))
+
+    def test_two_findings_of_one_rule_with_a_reproducer_that_covers_one(self) -> None:
+        """Rule-level links are shared: the uncovered finding must not inherit the covered one's verdict."""
+        service = self.root / "shop" / "service.py"
+        service.write_text(service.read_text(encoding="utf-8") + '''
+
+async def import_items_b(session: AsyncSession, items: list) -> None:
+    """A second per-item loop, not observed by any test."""
+    for item in items:
+        session.add(item)
+        await session.commit()
+''', encoding="utf-8")
+        run = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": LINKS["TX_COMMIT_IN_LOOP"]})
+        by_function = {c["function"]: c for c in run["cases"]}
+        self.assertEqual(set(by_function), {"import_items", "import_items_b"})
+        covered, uncovered = by_function["import_items"], by_function["import_items_b"]
+        self.assertEqual(covered["state"], STATE_VERIFIED)
+        self.assertTrue(covered["flipped_tests"])
+        self.assertEqual((uncovered["state"], uncovered["reason_code"]), (STATE_INCONCLUSIVE, "reproducer_not_specific"))
+        self.assertEqual(uncovered["flipped_tests"], [])
+        self.assertEqual(sorted(covered["shared_with"]), [uncovered["fingerprint"]])
+        self.assertEqual(sorted(uncovered["shared_with"]), [covered["fingerprint"]])
+        self.assertTrue(any("shared with" in l for l in uncovered["limitations"]))
+        self.assertEqual(run["combined"]["cases"], [covered["fingerprint"]])  # composed from the verified candidate only
+        # the fixture's other defects are still present (only this rule was selected), so the regression suite of
+        # the corrected code does not pass: the composition is inconclusive and says which tests failed
+        self.assertEqual(run["combined"]["state"], "inconclusive")
+        self.assertIn("regression suite did not pass", run["combined"]["cause"])
+        self.assertIn("test_reprice_commits_both_writes_without_error", run["combined"]["cause"])
+        alone = self.run_rule("TX_COMMIT_IN_LOOP", links={"TX_COMMIT_IN_LOOP": LINKS["TX_COMMIT_IN_LOOP"]}, suite=False)
+        self.assertEqual((alone["combined"]["state"], "no regression suite declared" in alone["combined"]["cause"]), ("inconclusive", True))
+
+    def test_composition_is_not_inferred_from_individual_verdicts(self) -> None:
+        real_run = LocalProcessExecutor.run
+
+        def fail_in_combined(self_exec, command, workspace, policy):
+            result = real_run(self_exec, command, workspace, policy)
+            if workspace.root.name.endswith("combined") or "combined" in str(workspace.root):
+                return result
+            return result
+
+        # make the suite command fail only in the composed copy by linking a suite that passes individually but
+        # whose composed run is replaced by a failing one
+        calls = {"suite": 0}
+
+        def composed_suite_fails(self_exec, command, workspace, policy):
+            result = real_run(self_exec, command, workspace, policy)
+            if command == SUITE:
+                calls["suite"] += 1
+                if calls["suite"] == 2:  # the after run in the composed copy
+                    result.outcome, result.passed = OUTCOME_FAILED, False
+                    result.evidence = dict(result.evidence, tests={"failed": ["tests.test_defects.DefectTests.test_summary_control_is_untouched"], "passed": [], "errors": [], "skipped": [], "collection_errors": []})
+            return result
+
+        self.patch_attr(LocalProcessExecutor, "run", composed_suite_fails)
+        run = run_remediation(str(self.root), self.options())
+        self.assertEqual(run["summary"]["by_state"], {STATE_VERIFIED: 3})  # individual verdicts stand
+        self.assertEqual(run["combined"]["state"], "inconclusive")
+        self.assertIn("regression suite did not pass", run["combined"]["cause"])
+        self.assertIn("test_summary_control_is_untouched", run["combined"]["cause"])
+        self.assertTrue(all(any("composition inconclusive" in l for l in c["limitations"]) for c in run["cases"]))
+        self._restore_all()
+        self._restore = []
+
+        def reproducer_fails_in_combination(self_exec, command, workspace, policy):
+            result = real_run(self_exec, command, workspace, policy)
+            if command == LINKS["SA_ASYNC_SESSION_NOT_AWAITED"] and (workspace.root / "project" / "shop" / "service.py").read_text(encoding="utf-8").count("await session.commit()") == 2:
+                # the composed copy (all three candidates applied) is the only one where both other commits are also fixed
+                result.outcome, result.passed = OUTCOME_FAILED, False
+            return result
+
+        self.patch_attr(LocalProcessExecutor, "run", reproducer_fails_in_combination)
+        run = run_remediation(str(self.root), self.options())
+        self.assertEqual(run["combined"]["state"], "incompatible")
+        self.assertIn("do not pass in the composed copy", run["combined"]["cause"])
 
     def test_a_stale_baseline_invalidates_the_candidate(self) -> None:
         recorded = Workspace.create
@@ -438,8 +610,10 @@ def _full_case() -> RemediationCase:
     case = RemediationCase(fingerprint="f", rule="TX_COMMIT_IN_LOOP", file="m.py", line=1, function="f", recipe="move_commit_after_loop", base_sha256="b")
     case.patch = PatchProposal(recipe="move_commit_after_loop", file="m.py", summary="s", edits=[], diff="--- a/m.py\n+++ b/m.py\n", original_sha256="b", patched_sha256="c")
     case.reproducer = "pytest -q tests/test_x.py"
-    case.linked_before = TestRun(ran=True, outcome=OUTCOME_FAILED, passed=False, returncode=1)
-    case.linked_after = TestRun(ran=True, outcome=OUTCOME_PASSED, passed=True, returncode=0)
+    verifiable = {"verifiable": True, "adapter": "pytest-junit", "tests": {}}
+    case.linked_before = TestRun(ran=True, outcome=OUTCOME_FAILED, passed=False, returncode=1, evidence=dict(verifiable))
+    case.linked_after = TestRun(ran=True, outcome=OUTCOME_PASSED, passed=True, returncode=0, evidence=dict(verifiable))
+    case.flipped_tests = ["tests/test_x.py::test_commit_once"]
     case.after_audit = AuditCheck(target_present=False, target_suppressed=False, findings_total=0)
     case.tests_untouched = True
     case.executor = "local"
@@ -485,6 +659,10 @@ class ModelTests(unittest.TestCase):
             "after infrastructure": lambda c: setattr(c, "linked_after", TestRun(ran=True, outcome=OUTCOME_INFRASTRUCTURE_ERROR, passed=False, returncode=3)),
             "no executor": lambda c: setattr(c, "executor", None),
             "no patch": lambda c: setattr(c, "patch", None),
+            "no flipped test": lambda c: setattr(c, "flipped_tests", []),
+            "regressed test": lambda c: setattr(c, "regressed_tests", ["tests/test_y.py::test_other"]),
+            "before without verifiable evidence": lambda c: setattr(c, "linked_before", TestRun(ran=True, outcome=OUTCOME_FAILED, passed=False, returncode=1)),
+            "after without verifiable evidence": lambda c: setattr(c, "linked_after", TestRun(ran=True, outcome=OUTCOME_PASSED, passed=True, returncode=0)),
         }
         for name, mutate in scenarios.items():
             case = _full_case()
@@ -498,41 +676,128 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(_full_case().to_dict()["applied_to_project"])
 
 
-class InterpretationTests(unittest.TestCase):
-    def pytest(self, code: int, out: str) -> TestRun:
-        return interpret_run(TestRun(ran=True, command=["pytest", "-q"], returncode=code, passed=code == 0, stdout_tail=out))
+class EvidenceTests(unittest.TestCase):
+    """The verdict comes from the runner's own report bound to the run, never from the exit code or stdout."""
 
-    def unittest_(self, code: int, out: str) -> TestRun:
-        return interpret_run(TestRun(ran=True, command=["python3", "-m", "unittest"], returncode=code, passed=code == 0, stderr_tail=out))
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
 
-    def test_pytest_conventions(self) -> None:
-        self.assertEqual(self.pytest(0, "3 passed in 0.1s").outcome, OUTCOME_PASSED)
-        self.assertEqual(self.pytest(1, "1 failed, 2 passed in 0.1s").outcome, OUTCOME_FAILED)
-        self.assertEqual(self.pytest(1, "1 error in 0.1s").outcome, OUTCOME_INFRASTRUCTURE_ERROR)
-        self.assertEqual(self.pytest(1, "1 failed, 1 error in 0.1s").outcome, OUTCOME_FAILED)
-        self.assertEqual(self.pytest(0, "2 skipped in 0.1s").outcome, OUTCOME_SKIPPED_ONLY)
-        self.assertEqual(self.pytest(0, "1 passed, 2 skipped in 0.1s").outcome, OUTCOME_PASSED)
-        self.assertEqual(self.pytest(5, "no tests ran in 0.01s").outcome, OUTCOME_NO_TESTS)
-        for code in (2, 3, 4):
-            self.assertEqual(self.pytest(code, "").outcome, OUTCOME_INFRASTRUCTURE_ERROR)
-        run = self.pytest(1, "2 failed, 3 passed, 1 skipped in 0.5s")
-        self.assertEqual(run.counts, {"failed": 2, "passed": 3, "skipped": 1})
-        self.assertEqual(run.runner, "pytest")
+    def run_for(self, code: int, argv) -> TestRun:
+        return TestRun(ran=True, command=list(argv), returncode=code, passed=code == 0)
 
-    def test_unittest_conventions_and_generic_runs(self) -> None:
-        self.assertEqual(self.unittest_(0, "Ran 3 tests in 0.1s\n\nOK").outcome, OUTCOME_PASSED)
-        self.assertEqual(self.unittest_(1, "Ran 3 tests in 0.1s\n\nFAILED (failures=1)").outcome, OUTCOME_FAILED)
-        self.assertEqual(self.unittest_(0, "Ran 0 tests in 0.0s\n\nNO TESTS RAN").outcome, OUTCOME_NO_TESTS)
-        self.assertEqual(self.unittest_(0, "Ran 2 tests in 0.0s\n\nOK (skipped=2)").outcome, OUTCOME_SKIPPED_ONLY)
-        self.assertEqual(self.unittest_(0, "Ran 2 tests in 0.0s\n\nOK (skipped=1)").outcome, OUTCOME_PASSED)
-        self.assertEqual(self.unittest_(1, "ERROR: test_x (unittest.loader._FailedTest.test_x)\nRan 1 test\n\nFAILED (errors=1)").outcome, OUTCOME_INFRASTRUCTURE_ERROR)
-        self.assertEqual(self.unittest_(2, "usage: python -m unittest").outcome, OUTCOME_INFRASTRUCTURE_ERROR)
-        self.assertEqual(self.unittest_(0, "").outcome, OUTCOME_INFRASTRUCTURE_ERROR)
-        generic = interpret_run(TestRun(ran=True, command=["python3", "check.py"], returncode=0, passed=True))
-        self.assertEqual((generic.runner, generic.outcome), ("generic", OUTCOME_PASSED))
-        self.assertEqual(interpret_run(TestRun(ran=True, command=["pytest"], timed_out=True, returncode=None)).outcome, OUTCOME_TIMEOUT)
-        self.assertEqual(interpret_run(TestRun(ran=False, refused="x")).outcome, "refused")
-        self.assertEqual(interpret_run(TestRun()).outcome, "not_run")
+    def junit(self, body: str, name: str = "N1") -> Path:
+        path = self.tmp / "r.xml"
+        path.write_text(f'<?xml version="1.0"?><testsuites><testsuite name="{name}" tests="{body.count("<testcase")}" errors="0" failures="0" skipped="0">{body}</testsuite></testsuites>')
+        return path
+
+    def test_adapter_selection(self) -> None:
+        self.assertIsInstance(adapter_for(["pytest", "-q"]), PytestJUnitAdapter)
+        self.assertIsInstance(adapter_for(["uv", "run", "pytest", "-q", "tests/x.py"]), PytestJUnitAdapter)
+        self.assertIsInstance(adapter_for([PY, "-m", "pytest"]), PytestJUnitAdapter)
+        self.assertIsInstance(adapter_for([PY, "-m", "unittest", "tests.x"]), UnittestJsonAdapter)
+        self.assertIsNone(adapter_for([PY, "tests/pytest_like.py"]))  # a file named after pytest is not pytest
+        self.assertIsNone(adapter_for([PY, "-c", "pass"]))
+        self.assertEqual([a.name for a in ADAPTERS], ["pytest-junit", "unittest-json"])
+        argv, report = PytestJUnitAdapter().instrument(["pytest", "-q", "tests/x.py"], self.tmp, "abc")
+        self.assertEqual(argv[:3], ["pytest", "-q", "tests/x.py"])
+        self.assertIn(f"--junit-xml={report}", argv)
+        self.assertIn("junit_suite_name=abc", argv)
+        argv, report = UnittestJsonAdapter().instrument([PY, "-m", "unittest", "discover", "-s", "tests"], self.tmp, "abc")
+        self.assertEqual(argv[0], PY)
+        self.assertTrue(argv[1].endswith("fa_unittest_runner.py"))
+        self.assertEqual(argv[2:6], ["--output", str(report), "--nonce", "abc"])
+        self.assertEqual(argv[6:], ["discover", "-s", "tests"])
+
+    def test_junit_report_is_read_strictly(self) -> None:
+        adapter = PytestJUnitAdapter()
+        ok = adapter.collect(self.junit('<testcase classname="t" name="a"/><testcase classname="t" name="b"><skipped/></testcase>'), "N1", 0.0)
+        self.assertTrue(ok.verifiable)
+        self.assertEqual((ok.counts["executed"], ok.counts["passed"], ok.counts["skipped"], ok.counts["discovered"]), (2, 1, 1, None))
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), ok), OUTCOME_PASSED)
+        self.assertEqual(assess(self.run_for(1, ["pytest"]), ok), OUTCOME_INFRASTRUCTURE_ERROR)  # all listed tests passed but the runner failed
+        failed = adapter.collect(self.junit('<testcase classname="t" name="a"><failure message="x"/></testcase>'), "N1", 0.0)
+        self.assertEqual(assess(self.run_for(1, ["pytest"]), failed), OUTCOME_FAILED)
+        errors = adapter.collect(self.junit('<testcase classname="t" name="a"><error message="fixture setup failed"/></testcase>'), "N1", 0.0)
+        self.assertEqual(assess(self.run_for(1, ["pytest"]), errors), OUTCOME_INFRASTRUCTURE_ERROR)
+        collection = adapter.collect(self.junit('<testcase classname="tests.test_x" name="tests/test_x.py"><error message="collection failure"/></testcase>'), "N1", 0.0)
+        self.assertEqual(collection.counts["collection_errors"], 1)
+        self.assertEqual(assess(self.run_for(2, ["pytest"]), collection), OUTCOME_INFRASTRUCTURE_ERROR)
+        skipped_only = adapter.collect(self.junit('<testcase classname="t" name="a"><skipped/></testcase>'), "N1", 0.0)
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), skipped_only), OUTCOME_SKIPPED_ONLY)
+        empty = adapter.collect(self.junit(""), "N1", 0.0)
+        self.assertEqual(assess(self.run_for(5, ["pytest"]), empty), OUTCOME_NO_TESTS)
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), empty), OUTCOME_NO_TESTS)  # exit 0 with nothing executed
+        foreign = adapter.collect(self.junit('<testcase classname="t" name="a"/>', name="OTHER"), "N1", 0.0)
+        self.assertFalse(foreign.matched)
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), foreign), OUTCOME_REPORT_MISMATCH)
+        corrupt = self.tmp / "c.xml"
+        corrupt.write_text("<testsuites><testsuite name='N1'")
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), adapter.collect(corrupt, "N1", 0.0)), OUTCOME_REPORT_CORRUPT)
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), adapter.collect(self.tmp / "absent.xml", "N1", 0.0)), OUTCOME_NO_EVIDENCE)
+        stale = self.junit('<testcase classname="t" name="a"/>')
+        os.utime(stale, (1_000_000, 1_000_000))
+        self.assertEqual(assess(self.run_for(0, ["pytest"]), adapter.collect(stale, "N1", 2_000_000.0)), OUTCOME_REPORT_MISMATCH)
+        self.assertEqual(assess(self.run_for(0, [PY, "x.py"]), Evidence(adapter=None)), OUTCOME_UNVERIFIABLE)
+        self.assertEqual(assess(TestRun(ran=True, command=["pytest"], timed_out=True), None), OUTCOME_TIMEOUT)
+        self.assertEqual(assess(TestRun(ran=False, refused="x"), None), "refused")
+
+    def test_unittest_adapter_runs_real_tests_and_reports_them(self) -> None:
+        project = self.tmp / "p"
+        shutil.copytree(FIXTURE, project)
+        (project / "tests" / "test_mixed.py").write_text(textwrap.dedent('''
+            import unittest
+
+            class T(unittest.TestCase):
+                def test_ok(self): pass
+                def test_fail(self): self.fail("no")
+                def test_raise(self): raise RuntimeError("boom")
+                @unittest.skip("later")
+                def test_skip(self): pass
+        '''), encoding="utf-8")
+        (project / "tests" / "test_broken.py").write_text("import module_that_does_not_exist\n", encoding="utf-8")
+        adapter = UnittestJsonAdapter()
+        argv, report = adapter.instrument([PY, "-m", "unittest", "discover", "-s", "tests", "-t", "."], self.tmp, "N2")
+        proc = subprocess.run(argv, cwd=str(project), capture_output=True, text=True, timeout=120)
+        evidence = adapter.collect(report, "N2", 0.0)
+        self.assertTrue(evidence.verifiable)
+        c = evidence.counts
+        self.assertEqual((c["collection_errors"], c["skipped"]), (1, 1))
+        self.assertIn("tests.test_mixed.T.test_fail", evidence.tests["failed"])
+        self.assertIn("tests.test_mixed.T.test_raise", evidence.tests["failed"])  # an exception is a failed test under unittest semantics
+        self.assertEqual(evidence.tests["errors"], [])
+        self.assertEqual(c["discovered"], c["selected"] + c["collection_errors"])
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=proc.returncode, passed=proc.returncode == 0), evidence), OUTCOME_INFRASTRUCTURE_ERROR)  # a collection error voids the run
+        argv, report = adapter.instrument([PY, "-m", "unittest", "tests.test_mixed.T.test_ok", "tests.test_mixed.T.test_skip"], self.tmp, "N3")
+        proc = subprocess.run(argv, cwd=str(project), capture_output=True, text=True, timeout=120)
+        evidence = adapter.collect(report, "N3", 0.0)
+        self.assertEqual((proc.returncode, evidence.counts["passed"], evidence.counts["skipped"]), (0, 1, 1))
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=0, passed=True), evidence), OUTCOME_PASSED)
+        argv, report = adapter.instrument([PY, "-m", "unittest", "tests.test_mixed.T.test_skip"], self.tmp, "N4")
+        subprocess.run(argv, cwd=str(project), capture_output=True, text=True, timeout=120)
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=0, passed=True), adapter.collect(report, "N4", 0.0)), OUTCOME_SKIPPED_ONLY)
+
+    @unittest.skipUnless(__import__("importlib").util.find_spec("pytest") is not None, "pytest not installed in this interpreter")
+    def test_pytest_adapter_runs_real_tests_and_binds_the_report_to_the_run(self) -> None:
+        project = self.tmp / "p"
+        project.mkdir()
+        (project / "test_a.py").write_text("import pytest\n\ndef test_ok():\n    pass\n\ndef test_bad():\n    assert 0\n\n@pytest.mark.skip\ndef test_skip():\n    pass\n", encoding="utf-8")
+        adapter = PytestJUnitAdapter()
+        argv, report = adapter.instrument([PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_a.py"], self.tmp, "N5")
+        proc = subprocess.run(argv, cwd=str(project), capture_output=True, text=True, timeout=120)
+        evidence = adapter.collect(report, "N5", 0.0)
+        self.assertTrue(evidence.verifiable)
+        self.assertEqual((evidence.counts["executed"], evidence.counts["passed"], evidence.counts["failed"], evidence.counts["skipped"]), (3, 1, 1, 1))
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=proc.returncode, passed=False), evidence), OUTCOME_FAILED)
+        argv, report = adapter.instrument([PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_a.py", "-k", "test_ok"], self.tmp, "N6")
+        proc = subprocess.run(argv, cwd=str(project), capture_output=True, text=True, timeout=120)
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=proc.returncode, passed=proc.returncode == 0), adapter.collect(report, "N6", 0.0)), OUTCOME_PASSED)
+        self.assertEqual(assess(TestRun(ran=True, command=argv, returncode=0, passed=True), adapter.collect(report, "N7", 0.0)), OUTCOME_REPORT_MISMATCH)  # another run's nonce
+
+    def test_text_summaries_are_supplementary_only(self) -> None:
+        run = interpret_run(TestRun(ran=True, command=["pytest", "-q"], returncode=0, passed=True, stdout_tail="3 passed in 0.1s"))
+        self.assertEqual(run.text_counts, {"passed": 3})
+        self.assertEqual(run.counts, {})  # structured counts come only from an adapter report
 
 
 class ExecutorTests(unittest.TestCase):
@@ -672,11 +937,13 @@ class PostgresRemediationTests(unittest.TestCase):
             "TX_COMMIT_IN_LOOP": base + "deposit_each",
         }
         run = run_remediation(str(example), RunOptions(
-            policy=ExecutionPolicy(authorized=True, timeout_s=900.0, env_passthrough=("PATH", "LANG", "LC_ALL", "TMPDIR", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")),
+            policy=ExecutionPolicy(authorized=True, command="uv run --frozen --extra dev pytest -q -m 'remediation or not antipattern_demo'", timeout_s=900.0, env_passthrough=("PATH", "LANG", "LC_ALL", "TMPDIR", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")),
             authorization=Authorization(execution=True, trust="fixture", scope=str(example), declared_by="test"), links=links))
         self.assertTrue(run["original_untouched"])
         self.assertEqual(run["summary"]["by_state"], {STATE_VERIFIED: 4}, json.dumps(run["summary"]))
-        self.assertTrue(all(c["defect_reproduced"] for c in run["cases"]))
+        self.assertTrue(all(c["defect_reproduced"] and c["flipped_tests"] for c in run["cases"]))
+        self.assertTrue(all(c["linked_tests"]["after"]["evidence"]["adapter"] == "pytest-junit" for c in run["cases"]))
+        self.assertEqual(run["combined"]["state"], "verified", run["combined"]["cause"])
 
 
 class CliTests(ProjectCase):
@@ -685,7 +952,7 @@ class CliTests(ProjectCase):
         proc = self.cli(".", "--format", "json", "--output", "run.json", "--patch-dir", "patches", script=REMEDIATE_SHIM)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         run = json.loads(proc.stdout)
-        self.assertEqual(run["schema"], "remediation_run/1.1")
+        self.assertEqual(run["schema"], "remediation_run/1.2")
         self.assertEqual(run["summary"]["by_state"], {"audit_clean": 3})
         self.assertEqual(json.loads((self.root / "run.json").read_text()), run)
         self.assertEqual(len(list((self.root / "patches").glob("*.diff"))), 3)
