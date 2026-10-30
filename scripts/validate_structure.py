@@ -80,6 +80,9 @@ for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lo
     assert (example/f).is_file(), f'Missing reference implementation file: {f}'
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 major_minor='.'.join(version.split('.')[:2])
-assert (root/f'RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing RELEASE-NOTES-v{major_minor}.md'
+assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
+assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'
+assert not list(root.glob('RELEASE-NOTES-*.md')) and not (root/'MERGE-NOTES.md').exists(), 'Release notes belong in docs/releases/, not in the repository root'
+assert f'releases/RELEASE-NOTES-v{major_minor}.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the current release notes'
 assert f'v{major_minor}' in (root/'README.md').read_text(encoding='utf-8'), f'README does not mention v{major_minor}'
 print(f'OK: {len(refs)} references, all linked, manifest version {version}, eval JSON valid, auditor + entry point + tests + release notes present, {len(cases)} plugin eval cases, reference implementation present')

@@ -132,7 +132,7 @@ class ClassificationTests(ProjectCase):
         self.assertEqual([(f["line"], f["evidence"], f["confidence"]) for f in items], [(4, "verified", "high")])
 
     def test_closures_inside_methods_and_asgi_handlers(self) -> None:
-        """Found by the acceptance corpus at its first scoring (then fixed and re-scored, see RELEASE-NOTES-v1.8.md):
+        """Found by the acceptance corpus at its first scoring (then fixed and re-scored, see docs/releases/RELEASE-NOTES-v1.8.md):
         a closure inside a method reads the method's `self`, and a closure inside an ASGI handler awaits the outer `send`."""
         self.write("app/m.py", '''
             from sqlalchemy import text
