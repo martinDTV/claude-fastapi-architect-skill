@@ -1,0 +1,38 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "inventory-service",
+  "package": "inventory_service",
+  "description": "Stock catalogue for a small warehouse: products and their on-hand quantities.",
+  "scope": {"size": "small", "team_size": 2, "expected_rps": 20, "data_volume": "small"},
+  "functional": {
+    "modules": [
+      {
+        "name": "catalog",
+        "description": "Products that can be stocked and their current quantity.",
+        "entities": [
+          {
+            "name": "Product",
+            "fields": [
+              {"name": "sku", "type": "str", "max_length": 32, "description": "Stock keeping unit, unique per warehouse"},
+              {"name": "name", "type": "str", "max_length": 120},
+              {"name": "quantity", "type": "int", "min_value": 0},
+              {"name": "unit_price", "type": "decimal", "min_value": 0},
+              {"name": "notes", "type": "str", "required": false, "max_length": 500}
+            ],
+            "operations": ["create", "get", "list", "update", "delete"]
+          }
+        ]
+      }
+    ]
+  },
+  "nonfunctional": {"availability": "99.5%", "latency_p95_ms": 200, "consistency": "strong"},
+  "persistence": {"kind": "memory"},
+  "security": {"authentication": "api_key"},
+  "infrastructure": {"deployment": "container"},
+  "testing": {"levels": ["unit", "integration"], "coverage_target": 80},
+  "decisions": [
+    {"id": "ADR-1", "title": "In-memory persistence for the first slice", "status": "accepted", "rationale": "The first increment validates the API contract; PostgreSQL follows once the catalogue shape is agreed."}
+  ],
+  "assumptions": ["One warehouse per deployment; multi-warehouse is out of scope."],
+  "open_questions": ["Should SKU uniqueness be enforced by the API or by the upstream ERP?"]
+}

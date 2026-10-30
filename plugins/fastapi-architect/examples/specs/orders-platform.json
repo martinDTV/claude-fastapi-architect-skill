@@ -1,0 +1,76 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "orders-platform",
+  "package": "orders_platform",
+  "description": "Order intake for a multi-tenant B2B marketplace: customers, orders and payment notifications.",
+  "scope": {"size": "medium", "team_size": 5, "expected_rps": 300, "data_volume": "medium"},
+  "functional": {
+    "modules": [
+      {
+        "name": "customers",
+        "description": "Customer accounts of each tenant.",
+        "entities": [
+          {
+            "name": "Customer",
+            "fields": [
+              {"name": "email", "type": "str", "max_length": 254},
+              {"name": "display_name", "type": "str", "max_length": 120},
+              {"name": "active", "type": "bool", "required": false}
+            ]
+          }
+        ]
+      },
+      {
+        "name": "orders",
+        "description": "Orders placed by customers and their lifecycle.",
+        "depends_on": ["customers"],
+        "entities": [
+          {
+            "name": "Order",
+            "fields": [
+              {"name": "customer_id", "type": "uuid"},
+              {"name": "total_amount", "type": "decimal", "min_value": 0},
+              {"name": "currency", "type": "str", "max_length": 3},
+              {"name": "placed_at", "type": "datetime"}
+            ],
+            "operations": ["create", "get", "list"]
+          }
+        ]
+      },
+      {
+        "name": "billing",
+        "description": "Invoices emitted for completed orders.",
+        "depends_on": ["orders"],
+        "entities": [
+          {
+            "name": "Invoice",
+            "fields": [
+              {"name": "order_id", "type": "uuid"},
+              {"name": "amount", "type": "decimal", "min_value": 0},
+              {"name": "issued_on", "type": "date"}
+            ],
+            "operations": ["create", "get", "list"]
+          }
+        ]
+      }
+    ]
+  },
+  "nonfunctional": {"availability": "99.9%", "latency_p95_ms": 300, "consistency": "strong", "auditability": true, "compliance": ["GDPR"]},
+  "persistence": {"kind": "postgresql", "migrations": true},
+  "security": {
+    "authentication": "api_key",
+    "authorization": "resource",
+    "multi_tenant": {"enabled": true, "strategy": "shared_schema_rls", "tenant_param": "tenant_id"}
+  },
+  "integrations": [
+    {"name": "payments", "kind": "http", "direction": "outbound", "criticality": "high", "module": "orders"},
+    {"name": "notifications", "kind": "smtp", "direction": "outbound", "criticality": "low", "module": "billing"}
+  ],
+  "infrastructure": {"deployment": "container", "cache": false, "broker": false, "regions": 1},
+  "testing": {"levels": ["unit", "integration", "contract"], "coverage_target": 85},
+  "decisions": [
+    {"id": "ADR-1", "title": "Single PostgreSQL database with tenant_id on every table", "status": "accepted", "rationale": "Shared schema keeps operations simple for the first tenants; RLS is added when the tenant count justifies it."},
+    {"id": "ADR-2", "title": "Payment provider selection", "status": "pending", "rationale": "Two providers under evaluation; the port isolates the choice."}
+  ],
+  "open_questions": ["Do invoices need to be immutable once issued?"]
+}
