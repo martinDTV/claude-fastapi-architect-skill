@@ -878,10 +878,256 @@ class FactoryAliasTests(ProjectCase):
         self.assertTrue(cancel["authentication_evidence"][0].startswith("_: authenticated"), cancel["authentication_evidence"])
         self.assertEqual(cancel["bucket"], "authenticated_authorization_unknown")
         self.assertEqual((admin["authorization"], admin["bucket"]), (["role"], "authenticated_authorization_visible"))
+        self.assertEqual((cancel["principal_kind"], admin["principal_kind"]), ("none", "none"))
+        # `authenticated() -> None` validates a shared credential and hands the route no principal: nothing to bind, no question
+        self.assertEqual(lines_of(report, "SEC_RESOURCE_AUTHZ_UNVERIFIED"), [])
+        self.assertEqual(lines_of(report, "SEC_ROUTE_WITHOUT_AUTH_SIGNAL"), [])
+
+    def test_a_token_check_defined_inside_the_factory_is_also_no_principal(self) -> None:
+        self.write("app/service.py", '''
+            from typing import Annotated
+            from uuid import UUID
+            from fastapi import Depends, FastAPI, Request
+
+            class Store:
+                def cancel(self, execution_id: UUID) -> None:
+                    pass
+
+            def create_app(store: Store, token: str) -> FastAPI:
+                app = FastAPI()
+
+                def authenticated(request: Request) -> None:
+                    if request.headers.get("authorization") != token:
+                        raise PermissionError("unauthenticated")
+
+                Authenticated = Annotated[None, Depends(authenticated)]
+
+                @app.delete("/v1/executions/{execution_id}")
+                def cancel(execution_id: UUID, _: Authenticated) -> dict:
+                    store.cancel(execution_id)
+                    return {}
+
+                return app
+        ''')
+        report = self.run_audit()
+        route = next(r for r in report["contracts"]["routes"] if r["function"] == "create_app.cancel")
+        self.assertEqual((route["authentication"], route["principal_kind"]), ("present", "none"))
+        self.assertEqual(lines_of(report, "SEC_RESOURCE_AUTHZ_UNVERIFIED"), [])
+
+    def test_a_dependency_that_returns_or_stores_a_principal_keeps_the_question(self) -> None:
+        self.write("app/service.py", self.FACTORY.replace("def authenticated() -> None:\n            pass", "def authenticated(request) -> None:\n            request.state.user = decode(request)"))
+        report = self.run_audit()
+        routes = {r["function"]: r for r in report["contracts"]["routes"]}
+        self.assertEqual(routes["create_app.cancel"]["principal_kind"], "value")  # an ambient principal may exist: the question stays
         questions = [f for f in report["findings"] if f["rule"] == "SEC_RESOURCE_AUTHZ_UNVERIFIED"]
         self.assertEqual([f["function"] for f in questions], ["create_app.cancel"])
         self.assertIn("authenticated through '_: authenticated", questions[0]["message"])
-        self.assertEqual(lines_of(report, "SEC_ROUTE_WITHOUT_AUTH_SIGNAL"), [])
+        self.write("app/service.py", self.FACTORY.replace("def authenticated() -> None:\n            pass", "def authenticated() -> dict:\n            return {}"))
+        report = self.run_audit()
+        self.assertEqual({r["function"]: r["principal_kind"] for r in report["contracts"]["routes"]}["create_app.cancel"], "value")
+        self.assertEqual([f["function"] for f in report["findings"] if f["rule"] == "SEC_RESOURCE_AUTHZ_UNVERIFIED"], ["create_app.cancel"])
+
+
+# --------------------------------------------------------------------------- #
+# review: deliberate loops must not hide other transactional defects; opt-in policy
+# --------------------------------------------------------------------------- #
+
+PAGINATED_HEADER = '''
+            import asyncio
+            import httpx
+            from sqlalchemy import text
+            from sqlalchemy.ext.asyncio import AsyncSession
+'''
+
+
+class LoopAtomicityTests(ProjectCase):
+    def test_other_transactional_rules_still_fire_inside_deliberate_loops(self) -> None:
+        self.write("app/m.py", PAGINATED_HEADER + '''
+            async def paginated_with_http(session: AsyncSession, client: httpx.AsyncClient) -> None:
+                for page in range(1000):
+                    rows = (await session.execute(text("select id from t limit 100 offset :o"), {"o": page * 100})).scalars().all()
+                    if not rows:
+                        break
+                    async with session.begin_nested():
+                        await client.post("/notify", json={"ids": rows})
+                    await session.commit()
+
+            async def batch_with_lost_update(session: AsyncSession, items: list, Account) -> None:
+                for index, item in enumerate(items, start=1):
+                    account = await session.get(Account, item)
+                    account.balance += 1
+                    if index % 100 == 0:
+                        await session.commit()
+
+            async def convergence_sharing_the_session(session: AsyncSession, step, key: int) -> None:
+                for _ in range(3):
+                    before = await session.scalar(text("select v from t where k = :k"), {"k": key})
+                    await asyncio.gather(step(session, key), step(session, key))
+                    await session.commit()
+                    after = await session.scalar(text("select v from t where k = :k"), {"k": key})
+                    if before == after:
+                        break
+        ''')
+        report = self.run_audit()
+        self.assertEqual(lines_of(report, "TX_COMMIT_IN_LOOP"), [])  # the three loops are deliberate by structure
+        self.assertEqual(report["facts"]["commit_loops"], {"batch": 1, "convergence": 1, "paginated": 1})
+        self.assertEqual(lines_of(report, "TX_EXTERNAL_CALL_IN_TRANSACTION"), [12])
+        self.assertEqual(lines_of(report, "TX_READ_MODIFY_WRITE"), [18])
+        self.assertEqual(lines_of(report, "SA_SESSION_SHARED_CONCURRENTLY"), [25])
+
+    def test_per_item_commits_next_to_deliberate_ones_are_still_reported(self) -> None:
+        self.write("app/m.py", PAGINATED_HEADER + '''
+            async def inner_per_item(session: AsyncSession) -> None:
+                for page in range(1000):
+                    rows = (await session.execute(text("select id from t limit 100 offset :o"), {"o": page * 100})).scalars().all()
+                    if not rows:
+                        break
+                    for row in rows:
+                        await session.execute(text("update t set done = true where id = :id"), {"id": row})
+                        await session.commit()
+
+            async def guarded_and_unguarded(session: AsyncSession, items: list) -> None:
+                for index, item in enumerate(items, start=1):
+                    session.add(item)
+                    if index % 100 == 0:
+                        await session.commit()
+                    await session.commit()
+
+            async def modulo_elsewhere(session: AsyncSession, items: list) -> None:
+                for index, item in enumerate(items, start=1):
+                    if index % 100 == 0:
+                        print(index)
+                    session.add(item)
+                    await session.commit()
+        ''')
+        report = self.run_audit()
+        items = {f["line"]: f["details"]["loop_kind"] for f in report["findings"] if f["rule"] == "TX_COMMIT_IN_LOOP"}
+        self.assertEqual(items, {13: "per_item", 20: "per_item", 27: "per_item"})
+        self.assertEqual(report["facts"]["commit_loops"], {"batch": 1, "paginated": 1, "per_item": 3})
+
+    def test_retry_loops_do_not_hide_non_idempotent_writes(self) -> None:
+        self.write("app/m.py", PAGINATED_HEADER + '''
+            async def retry_post(session: AsyncSession, client: httpx.AsyncClient, item) -> None:
+                for attempt in range(3):
+                    try:
+                        await client.post("/charge", json={"item": item})
+                        session.add(item)
+                        await session.commit()
+                        return
+                    except Exception:
+                        await session.rollback()
+                        await asyncio.sleep(0)
+        ''')
+        report = self.run_audit()
+        self.assertEqual(lines_of(report, "TX_COMMIT_IN_LOOP"), [])
+        self.assertEqual(lines_of(report, "RETRY_NON_IDEMPOTENT_WRITE"), [6])
+        self.assertEqual(report["facts"]["commit_loops"], {"retry": 1})
+
+
+class SingleTransactionPolicyTests(ProjectCase):
+    LOOPS = PAGINATED_HEADER + '''
+            async def per_item(session: AsyncSession, items: list) -> None:
+                for item in items:
+                    session.add(item)
+                    await session.commit()
+
+            async def batched(session: AsyncSession, items: list) -> None:
+                for index, item in enumerate(items, start=1):
+                    session.add(item)
+                    if index % 100 == 0:
+                        await session.commit()
+
+            async def pages(session: AsyncSession) -> None:
+                while True:
+                    rows = (await session.execute(text("select id from t"))).scalars().all()
+                    if not rows:
+                        break
+                    await session.commit()
+
+            async def retry(session: AsyncSession, item) -> None:
+                for attempt in range(3):
+                    try:
+                        session.add(item)
+                        await session.commit()
+                        return
+                    except Exception:
+                        await session.rollback()
+    '''
+
+    def test_default_is_unchanged_and_the_policy_reports_deliberate_loops(self) -> None:
+        self.write("app/m.py", self.LOOPS)
+        default = self.run_audit()
+        self.assertEqual({f["line"]: f["details"]["loop_kind"] for f in default["findings"] if f["rule"] == "TX_COMMIT_IN_LOOP"}, {9: "per_item"})
+        per_item_fp = next(f["fingerprint"] for f in default["findings"] if f["rule"] == "TX_COMMIT_IN_LOOP")
+        self.write(".audit-fastapi.json", json.dumps({"transactions": {"single_transaction_per_use_case": True, "x-why": "ledger: one commit per use case"}}))
+        policy = self.run_audit()
+        items = {f["line"]: f for f in policy["findings"] if f["rule"] == "TX_COMMIT_IN_LOOP"}
+        self.assertEqual({line: f["details"]["loop_kind"] for line, f in items.items()}, {9: "per_item", 15: "batch", 22: "paginated"})
+        self.assertEqual(items[9]["fingerprint"], per_item_fp)  # the per-item finding is untouched
+        self.assertNotIn("policy", items[9]["details"])
+        for line in (15, 22):
+            self.assertEqual(items[line]["details"]["policy"], "single_transaction_per_use_case")
+            self.assertEqual(items[line]["confidence"], "medium")  # one step below the per-item finding
+            self.assertIn("single_transaction_per_use_case", items[line]["message"])
+        self.assertEqual(policy["facts"]["commit_loops"], {"batch": 1, "paginated": 1, "per_item": 1, "retry": 1})  # census unchanged
+        self.assertEqual(lines_of(policy, "TX_COMMIT_IN_LOOP", "app/m.py").count(29), 0)  # a retry commits once: never a policy finding
+
+    def test_policy_is_validated_fail_closed(self) -> None:
+        self.write("app/m.py", self.LOOPS)
+        self.write(".audit-fastapi.json", json.dumps({"transactions": {"single_transaction_per_use_case": "yes", "report_loops": True}}))
+        proc = self.cli(".", "--format", "json")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("transactions.single_transaction_per_use_case: expected true or false", proc.stderr)
+        self.assertIn("transactions.report_loops: unknown property", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+        self.write(".audit-fastapi.json", json.dumps({"transactions": []}))
+        self.assertEqual(self.cli(".", "--format", "json").returncode, 2)
+        self.write(".audit-fastapi.json", json.dumps({"transactions": {"single_transaction_per_use_case": False}}))
+        self.assertEqual(self.cli(".", "--format", "json", "--exit-zero").returncode, 0)
+
+
+class ComparisonHistoryTests(ProjectCase):
+    def test_a_pre_15_baseline_without_fingerprints_or_evidence_states_still_compares(self) -> None:
+        self.write("app/m.py", BEFORE_SRC)
+        current = self.run_audit()
+        old = {
+            "schema_version": "1.3",
+            "tool": {"name": "audit_fastapi", "version": "1.5.0", "python": "3.12"},
+            "summary": {"partial_analysis": False},
+            "findings": [
+                {k: v for k, v in f.items() if k not in {"fingerprint", "evidence_state", "details", "remediation", "call_path"}}
+                for f in current["findings"]
+            ],
+        }
+        comparison = compare_reports(current, old, "old.json")
+        self.assertEqual(comparison["counts"], {"new": 0, "fixed": 0, "unchanged": len(current["findings"])})  # recomputed fingerprints match
+        self.assertEqual(comparison["evidence_changes"], [])  # the baseline had no evidence_state: no change is invented
+        self.assertTrue(comparison["partial"]["comparison_reliable"])
+        self.assertTrue(comparison["tool_changed"])
+        no_tool = dict(old)
+        no_tool.pop("tool")
+        self.assertFalse(compare_reports(current, no_tool, "old.json")["partial"]["comparison_reliable"])
+
+
+class RemediationWordingTests(unittest.TestCase):
+    FORBIDDEN = ("resolves the", "fixes the defect", "guarantees", "is now verified", "has been fixed", "will fix")
+
+    def test_proposals_never_promise_a_resolution_and_always_name_tests(self) -> None:
+        report = audit_fixture("truth18/dev")
+        checked = 0
+        for finding in report["findings"]:
+            block = finding["remediation"]
+            if not block:
+                continue
+            checked += 1
+            text = json.dumps(block).lower()
+            for phrase in self.FORBIDDEN:
+                self.assertNotIn(phrase, text, (finding["rule"], phrase))
+            self.assertGreaterEqual(len(block["tests"]), 1)
+            self.assertGreaterEqual(len(block["invariants"]), 1)
+            self.assertTrue(block["regression_risk"]["why"])
+            self.assertEqual((block["status"], block["applied"], block["verified"]), ("proposed", False, False))
+        self.assertGreaterEqual(checked, 5)
 
 
 if __name__ == "__main__":
