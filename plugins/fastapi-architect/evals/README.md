@@ -67,6 +67,8 @@ plugins/fastapi-architect/evals/
 | `coroutine-never-awaited-silent-failure` | positive, diagnosis (v1.7) | Dropped coroutine through `self.record`: warning not exception, how the graph knows, `-W error` and linters |
 | `shared-client-and-per-call-lock` | positive, diagnosis (v1.7) | Per-call httpx client and per-call lock: both real; lifespan client, shared lock, database guarantee for the transfer |
 | `negative-rails-pundit-authorization` | negative (v1.7) | Rails + Pundit authorization coverage: the skill must not fire |
+| `ci-sarif-gate-evidence-states` | positive, decision (v1.7) | CI gate on SARIF: fail on new `static_confirmed` high findings, review `insufficient` questions, never fail on them; baselines and suppressions |
+| `declarative-architecture-contracts` | positive, decision (v1.7) | Opt-in `contracts`: which rules to declare first, why JSON and not executed config, how to roll out without blocking |
 
 Graders per positive case: `quality` (LLM rubric, weight 2, concrete PASS/FAIL conditions that penalise unsupported claims), `keyword` (regex, weight 1, one technical term the answer must contain) and `skill-fired` (`tool_used: Skill`, `arm: with-only`). In a with/without run the `skill-fired` grader is reported as a plugin-fired indicator and does not count towards the score; with `--ablation none` it is scored. Negative cases carry a single free grader, `skill-not-fired` (`tool_used: Skill` with `min: 0`, `max: 0`).
 
@@ -162,4 +164,4 @@ Eight cases cover the v1.6 capabilities: an indirect dependency through an insta
 
 ## v1.7 additions (2026-10-29)
 
-Six cases cover the contracts and the new questions: declaring public routes without weakening the audit, a resource-authorization question answered with an explicit relation or a negative test, an RLS context that is present but not bound to the principal, a dropped coroutine found through the call graph, a per-call client and a per-call lock, and a Rails/Pundit negative. Structural validation covers all forty-five cases offline; no paid runs were made for v1.7 (see `RELEASE-NOTES-v1.7.md`).
+Eight cases cover the contracts and the new questions (two added with the second review: a CI gate on SARIF and evidence states, and declaring architectural contracts): declaring public routes without weakening the audit, a resource-authorization question answered with an explicit relation or a negative test, an RLS context that is present but not bound to the principal, a dropped coroutine found through the call graph, a per-call client and a per-call lock, and a Rails/Pundit negative. Structural validation covers all forty-seven cases offline; no paid runs were made for v1.7 (see `RELEASE-NOTES-v1.7.md`).
