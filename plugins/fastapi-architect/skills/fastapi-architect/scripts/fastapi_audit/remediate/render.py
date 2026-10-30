@@ -13,7 +13,9 @@ def to_json(run: Dict[str, Any]) -> str:
 def _run_line(label: str, tests: Dict[str, Any]) -> str:
     if not tests.get("ran"):
         return f"{label}: not executed" + (f" ({tests['refused']})" if tests.get("refused") else "")
-    return f"{label}: {tests.get('outcome')} (exit {tests.get('returncode')}, {tests.get('runner')}{', ' + ', '.join(f'{k} {v}' for k, v in tests.get('counts', {}).items()) if tests.get('counts') else ''})"
+    counts = tests.get("counts") or {}
+    shown = ", ".join(f"{k} {counts[k]}" for k in ("executed", "passed", "failed", "errors", "skipped", "collection_errors") if counts.get(k) is not None)
+    return f"{label}: {tests.get('outcome')} (exit {tests.get('returncode')}, {tests.get('runner')}{'; ' + shown if shown else '; no verifiable evidence'})"
 
 
 def render_text(run: Dict[str, Any]) -> str:
@@ -27,18 +29,21 @@ def render_text(run: Dict[str, Any]) -> str:
             f"execution: granted to executor '{ex['executor']['name']}' ({ex['executor']['isolation_level']}); not provided: {'; '.join(ex['executor']['not_provided'])}"
             if ex["granted"] else f"execution: {ex['denied_reason'] or 'not authorized'} [{ex.get('denied_code') or '-'}]"
         ),
-        f"cases: {s['cases']}  " + ", ".join(f"{k} {v}" for k, v in s["by_state"].items()) + (f"  composable: {'yes' if s['composable'] else 'no'}" if s.get("composable") is not None else ""),
+        f"cases: {s['cases']}  " + ", ".join(f"{k} {v}" for k, v in s["by_state"].items()) + (f"  composition: {s['composition']}" if s.get("composition") not in (None, "not_run") else ""),
     ]
     for case in run["cases"]:
         lines.append(f"- {case['state']:<12} {case['rule']} {case['file']}:{case['line']} [{case.get('recipe') or 'manual'}; {case.get('reason_code') or '-'}] {case.get('reason') or ''}")
         if case.get("reproducer"):
-            lines.append(f"    reproducer: {case['reproducer']}")
+            lines.append(f"    reproducer ({case.get('reproducer_scope')}): {case['reproducer']}")
             lines.append(f"    {_run_line('before', case['linked_tests']['before'])}; {_run_line('after', case['linked_tests']['after'])}")
+            if case.get("flipped_tests"):
+                lines.append(f"    flipped: {', '.join(case['flipped_tests'][:5])}")
         if case.get("patch"):
             lines.append(f"    candidate {case['candidate_id']}: {case['patch']['summary']}")
     combined = run.get("combined") or {}
     if combined.get("state") != "not_run":
-        lines.append(f"combined copy ({len(combined.get('cases', []))} candidates): {combined.get('state')}; {_run_line('suite before', combined.get('suite_before', {}))}; {_run_line('suite after', combined.get('suite_after', {}))}")
+        suite = combined.get("suite") or {}
+        lines.append(f"composition ({len(combined.get('cases', []))} candidates on one copy): {combined.get('state')}" + (f" - {combined.get('cause')}" if combined.get("cause") else "") + f"; {_run_line('suite before', suite.get('before', {}))}; {_run_line('suite after', suite.get('after', {}))}")
     lines.append(f"note: {run['note']}")
     return "\n".join(lines) + "\n"
 
@@ -60,7 +65,7 @@ def render_markdown(run: Dict[str, Any]) -> str:
         out.append(f"Recipe `{case.get('recipe') or 'manual'}`, candidate `{case.get('candidate_id') or '-'}`, base `{(case.get('base_sha256') or '')[:12]}`. {case.get('reason') or ''}")
         if case.get("reproducer"):
             out.append("")
-            out.append(f"Reproducer `{case['reproducer']}`: {_run_line('before', case['linked_tests']['before'])}; {_run_line('after', case['linked_tests']['after'])}.")
+            out.append(f"Reproducer (`{case.get('reproducer_scope')}`) `{case['reproducer']}`: {_run_line('before', case['linked_tests']['before'])}; {_run_line('after', case['linked_tests']['after'])}." + (f" Flipped: `{'`, `'.join(case['flipped_tests'][:5])}`." if case.get("flipped_tests") else ""))
         if case.get("invariants"):
             out.append("")
             for inv in case["invariants"]:

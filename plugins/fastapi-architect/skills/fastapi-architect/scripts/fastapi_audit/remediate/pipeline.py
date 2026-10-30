@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..discovery import classify_environment
 from ..engine import AuditOptions, audit_project
@@ -39,14 +39,19 @@ from .isolation import ExecutionPolicy, Workspace, digest_tree
 from .model import (
     OUTCOME_FAILED,
     OUTCOME_INFRASTRUCTURE_ERROR,
+    OUTCOME_NO_EVIDENCE,
     OUTCOME_NO_TESTS,
     OUTCOME_PASSED,
     OUTCOME_REFUSED,
+    OUTCOME_REPORT_CORRUPT,
+    OUTCOME_REPORT_MISMATCH,
     OUTCOME_SKIPPED_ONLY,
     OUTCOME_TIMEOUT,
+    OUTCOME_UNVERIFIABLE,
     RC_CANDIDATE_MISMATCH,
     RC_COMMAND_REFUSED,
     RC_DEFECT_NOT_REPRODUCED,
+    RC_EVIDENCE_MISSING,
     RC_FINDING_PERSISTS,
     RC_INFRASTRUCTURE_ERROR,
     RC_NO_LINKED_TESTS,
@@ -55,6 +60,10 @@ from .model import (
     RC_PATCH_FAILED,
     RC_PRECONDITION_FAILED,
     RC_REGRESSION_INTRODUCED,
+    RC_REPORT_CORRUPT,
+    RC_REPORT_MISMATCH,
+    RC_REPRODUCER_NOT_SPECIFIC,
+    RC_RUNNER_UNVERIFIABLE,
     RC_STALE_BASELINE,
     RC_TESTS_FAILED_AFTER,
     RC_TESTS_MODIFIED,
@@ -74,13 +83,17 @@ from .model import (
 )
 from .patches import RECIPE_META, Blocked, apply_edits, propose, recipe_for
 
-RUN_SCHEMA = "remediation_run/1.1"
+RUN_SCHEMA = "remediation_run/1.2"
 OUTCOME_TO_INCONCLUSIVE = {
     OUTCOME_SKIPPED_ONLY: (RC_TESTS_SKIPPED, "the linked tests were skipped"),
-    OUTCOME_NO_TESTS: (RC_NO_TESTS, "no linked test was collected"),
-    OUTCOME_INFRASTRUCTURE_ERROR: (RC_INFRASTRUCTURE_ERROR, "the test runner failed before reaching a verdict (interrupted, internal or usage error)"),
+    OUTCOME_NO_TESTS: (RC_NO_TESTS, "no linked test was executed (empty collection)"),
+    OUTCOME_INFRASTRUCTURE_ERROR: (RC_INFRASTRUCTURE_ERROR, "the test runner failed before reaching a verdict (collection error, fixture error, interrupted, internal or usage error)"),
     OUTCOME_TIMEOUT: (RC_TIMEOUT, "the linked tests timed out"),
     OUTCOME_REFUSED: (RC_COMMAND_REFUSED, "the linked command was refused by the executor"),
+    OUTCOME_UNVERIFIABLE: (RC_RUNNER_UNVERIFIABLE, "the runner has no adapter that produces verifiable evidence (use pytest or python -m unittest)"),
+    OUTCOME_NO_EVIDENCE: (RC_EVIDENCE_MISSING, "the runner wrote no report; the exit code alone is not evidence"),
+    OUTCOME_REPORT_CORRUPT: (RC_REPORT_CORRUPT, "the runner's report does not parse"),
+    OUTCOME_REPORT_MISMATCH: (RC_REPORT_MISMATCH, "the report does not belong to this run (nonce or timestamp mismatch)"),
 }
 
 
@@ -126,11 +139,19 @@ def _select(report: Dict[str, object], options: RunOptions) -> List[Dict[str, ob
     return chosen[: options.max_cases]
 
 
-def _link_for(case: RemediationCase, links: Dict[str, str]) -> Optional[str]:
-    for key in (case.fingerprint, f"{case.file}:{case.line}", case.rule):
+def _link_for(case: RemediationCase, links: Dict[str, str], cases: List[RemediationCase]) -> None:
+    """Attach the reproducer and its declared scope. Fingerprint and file:line links are specific to the case;
+    a rule link is shared by every case of the rule without a more specific link, and says so."""
+    for key, scope in ((case.fingerprint, "case"), (f"{case.file}:{case.line}", "case")):
         if key in links:
-            return links[key]
-    return None
+            case.reproducer, case.reproducer_scope = links[key], scope
+            return
+    if case.rule in links:
+        case.reproducer, case.reproducer_scope = links[case.rule], "rule"
+        case.shared_with = sorted(
+            other.fingerprint for other in cases
+            if other is not case and other.rule == case.rule and other.fingerprint not in links and f"{other.file}:{other.line}" not in links
+        )
 
 
 def _presence(report: Dict[str, object], fingerprint: str) -> AuditCheck:
@@ -165,7 +186,17 @@ def _invariants(case: RemediationCase) -> List[Invariant]:
     return out
 
 
-def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, options: RunOptions, audit_options: AuditOptions, executor: Optional[Executor], denial: Optional[str], denial_code: str) -> None:
+def _flips(before: TestRun, after: TestRun) -> Tuple[List[str], List[str]]:
+    """(flipped, regressed): test ids that failed/errored before and passed after, and ids that passed before and fail after."""
+    failed_before = set(before.test_ids("failed")) | set(before.test_ids("errors"))
+    passed_before = set(before.test_ids("passed"))
+    failed_after = set(after.test_ids("failed")) | set(after.test_ids("errors"))
+    passed_after = set(after.test_ids("passed"))
+    return sorted(failed_before & passed_after), sorted(passed_before & failed_after)
+
+
+def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, options: RunOptions, audit_options: AuditOptions, executor: Optional[Executor], denial: Optional[str], denial_code: str, all_cases: Optional[List[RemediationCase]] = None) -> None:
+    all_cases = all_cases or [case]
     workspace = Workspace.create(root, None if not options.workspace_dir else str(Path(options.workspace_dir) / case.fingerprint))
     try:
         if options.keep_workspace:
@@ -197,7 +228,9 @@ def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, opti
             return
         digest_copy = digest_tree(str(workspace.project))
         tests_before = _test_files(digest_copy)
-        case.reproducer = _link_for(case, options.links)
+        _link_for(case, options.links, all_cases)
+        if case.shared_with:
+            case.limitations.append("reproducer declared at rule level and shared with " + ", ".join(case.shared_with) + "; the verdict still requires tests that change state in this case's own copy")
         if executor is not None and case.reproducer:
             case.linked_before = executor.run(case.reproducer, workspace, options.policy)
         try:
@@ -247,11 +280,18 @@ def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, opti
             case.transition(STATE_INCONCLUSIVE, "the linked reproducer already passed before the patch: it does not observe the defect", RC_DEFECT_NOT_REPRODUCED)
             return
         case.linked_after = executor.run(case.reproducer, workspace, options.policy)
+        case.flipped_tests, case.regressed_tests = _flips(case.linked_before, case.linked_after)
         case.invariants = _invariants(case)
         if case.linked_after.outcome == OUTCOME_PASSED:
-            case.transition(STATE_VERIFIED, "finding no longer detected, no new finding, the linked reproducer failed before and passed after the patch")
+            if case.flipped_tests and not case.regressed_tests:
+                case.transition(STATE_VERIFIED, f"finding no longer detected, no new finding; {len(case.flipped_tests)} linked test(s) failed before and passed after the patch: " + ", ".join(case.flipped_tests[:5]))
+            else:
+                case.transition(STATE_INCONCLUSIVE, "the reproducer passed after the patch but no test failed before and passed after: it does not observe this candidate", RC_REPRODUCER_NOT_SPECIFIC)
         elif case.linked_after.outcome == OUTCOME_FAILED:
-            case.transition(STATE_REJECTED, "the linked reproducer still fails after the patch", RC_TESTS_FAILED_AFTER)
+            if case.regressed_tests or case.flipped_tests:
+                case.transition(STATE_REJECTED, "the linked reproducer still fails after the patch" + (f"; tests that passed before now fail: {', '.join(case.regressed_tests[:5])}" if case.regressed_tests else "; only part of the reproducer flipped"), RC_TESTS_FAILED_AFTER)
+            else:
+                case.transition(STATE_INCONCLUSIVE, "the linked reproducer fails before and after with the same tests: it does not observe this candidate (link a test that covers this finding)", RC_REPRODUCER_NOT_SPECIFIC)
         else:
             code, text = OUTCOME_TO_INCONCLUSIVE.get(case.linked_after.outcome, (RC_INFRASTRUCTURE_ERROR, "the after-run produced no verdict"))
             case.transition(STATE_INCONCLUSIVE, f"after the patch: {text}", code)
@@ -261,32 +301,80 @@ def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, opti
 
 
 def _combined(cases: List[RemediationCase], root: str, options: RunOptions, audit_options: AuditOptions, executor: Optional[Executor]) -> Dict[str, object]:
-    candidates = [c for c in cases if c.patch is not None and c.state in (STATE_VERIFIED, STATE_AUDIT_CLEAN)]
-    result: Dict[str, object] = {"cases": [c.fingerprint for c in candidates], "state": "not_run", "audit": None, "suite_before": TestRun().to_dict(), "suite_after": TestRun().to_dict()}
+    """Apply every individually verified (and audit-clean) candidate to one copy and check the composition:
+    identities and digests of what was applied, the audit of the composed copy, each verified case's reproducer
+    run again there, and the declared regression suite before and after. ``verified`` requires: only individually
+    verified candidates, audit clean, every reproducer passing in the composed copy, and the regression suite
+    passing with verifiable evidence. Otherwise ``incompatible`` (a reproducer or the audit shows the candidates
+    do not work together) or ``inconclusive`` with its cause. Nothing is inferred from the individual verdicts."""
+    verified = [c for c in cases if c.state == STATE_VERIFIED and c.patch is not None]
+    audited_only = [c for c in cases if c.state == STATE_AUDIT_CLEAN and c.patch is not None]
+    candidates = verified + audited_only
+    result: Dict[str, object] = {
+        "cases": [c.fingerprint for c in candidates],
+        "verified_cases": [c.fingerprint for c in verified],
+        "state": "not_run",
+        "cause": None,
+        "applied": [],
+        "audit": None,
+        "reproducers": {},
+        "suite": {"command": options.policy.command, "before": TestRun().to_dict(), "after": TestRun().to_dict()},
+    }
     if not candidates:
         return result
     workspace = Workspace.create(root, None if not options.workspace_dir else str(Path(options.workspace_dir) / "combined"))
     try:
         baseline = audit_project(str(workspace.project), options=audit_options)
         if executor is not None and options.policy.command:
-            result["suite_before"] = executor.run(options.policy.command, workspace, options.policy).to_dict()
+            result["suite"]["before"] = executor.run(options.policy.command, workspace, options.policy).to_dict()  # type: ignore[index]
+        applied: List[Dict[str, object]] = []
+        touched: Dict[str, str] = {}
         for case in sorted(candidates, key=lambda c: (c.file, -c.line)):
             path = workspace.project / case.file
-            path.write_text(apply_edits(path.read_text(encoding="utf-8"), case.patch.edits), encoding="utf-8")  # type: ignore[union-attr]
+            before_text = path.read_text(encoding="utf-8")
+            stacked = case.file in touched
+            if not stacked and _sha(before_text) != case.patch.original_sha256:  # type: ignore[union-attr]
+                result["state"], result["cause"] = "inconclusive", f"{case.file} in the composed copy does not match the base of candidate {case.patch.candidate_id}"  # type: ignore[union-attr]
+                return result
+            after_text = apply_edits(before_text, case.patch.edits)  # type: ignore[union-attr]
+            path.write_text(after_text, encoding="utf-8")
+            touched[case.file] = _sha(after_text)
+            applied.append({"fingerprint": case.fingerprint, "candidate_id": case.patch.candidate_id, "file": case.file, "sha256_before": _sha(before_text), "sha256_after": _sha(after_text), "stacked_on_previous_candidate": stacked})  # type: ignore[union-attr]
+        result["applied"] = applied
         after = audit_project(str(workspace.project), options=audit_options)
         comparison = compare_reports(after, baseline, "combined-before")
         remaining = [c.fingerprint for c in candidates if _presence(after, c.fingerprint).target_present or _presence(after, c.fingerprint).target_suppressed]
         audit_ok = not remaining and not comparison["new"]
         result["audit"] = {"targets_remaining": remaining, "new_findings": list(comparison["new"]), "ok": audit_ok}
-        suite_ok: Optional[bool] = None
-        if executor is not None and options.policy.command:
-            run = executor.run(options.policy.command, workspace, options.policy)
-            result["suite_after"] = run.to_dict()
-            suite_ok = run.outcome == OUTCOME_PASSED
-        result["state"] = "ok" if audit_ok and suite_ok is not False else "failed"
-        if result["state"] == "failed":
+        reproducer_failures: List[str] = []
+        if executor is not None:
+            for case in verified:
+                run = executor.run(case.reproducer or "", workspace, options.policy)
+                result["reproducers"][case.fingerprint] = run.to_dict()  # type: ignore[index]
+                if run.outcome != OUTCOME_PASSED:
+                    reproducer_failures.append(f"{case.fingerprint} ({run.outcome})")
+            if options.policy.command:
+                result["suite"]["after"] = executor.run(options.policy.command, workspace, options.policy).to_dict()  # type: ignore[index]
+        suite_after = result["suite"]["after"]  # type: ignore[index]
+        if not audit_ok:
+            result["state"], result["cause"] = "incompatible", "the composed copy still shows findings or new ones: " + ", ".join(remaining + [f"{i['rule']} {i['file']}:{i['line']}" for i in comparison["new"]])
+        elif reproducer_failures:
+            result["state"], result["cause"] = "incompatible", "reproducers that passed alone do not pass in the composed copy: " + ", ".join(reproducer_failures)
+        elif executor is None:
+            result["state"], result["cause"] = "inconclusive", "execution not granted: the composition was audited only"
+        elif audited_only:
+            result["state"], result["cause"] = "inconclusive", "the composition includes candidates without individual verification: " + ", ".join(c.fingerprint for c in audited_only)
+        elif not options.policy.command:
+            result["state"], result["cause"] = "inconclusive", "no regression suite declared for the corrected code (--test-command)"
+        elif suite_after.get("outcome") != OUTCOME_PASSED:
+            failing = (suite_after.get("evidence") or {}).get("tests", {})
+            ids = list(failing.get("failed", []))[:5] + list(failing.get("errors", []))[:5] if isinstance(failing, dict) else []
+            result["state"], result["cause"] = "inconclusive", f"the regression suite did not pass in the composed copy ({suite_after.get('outcome')})" + (": " + ", ".join(ids) if ids else "")
+        else:
+            result["state"], result["cause"] = "verified", None
+        if result["state"] != "verified":
             for case in candidates:
-                case.limitations.append("the combined copy (all candidates together) " + ("still shows findings or new ones" if not audit_ok else "fails the suite command"))
+                case.limitations.append(f"composition {result['state']}: {result['cause']}")
         if options.keep_workspace:
             result["workspace"] = str(workspace.root)
     finally:
@@ -315,7 +403,7 @@ def run_remediation(project_root: str, options: Optional[RunOptions] = None) -> 
     combined: Dict[str, object] = {"cases": [], "state": "not_run"}
     try:
         for case, finding in zip(cases, selected):
-            _run_case(case, finding, root, options, audit_options, executor, denial, denial_code or "execution_unauthorized")
+            _run_case(case, finding, root, options, audit_options, executor, denial, denial_code or "execution_unauthorized", cases)
         combined = _combined(cases, root, options, audit_options, executor)
         if options.patch_dir:
             _write_patches(cases, options.patch_dir)
@@ -350,13 +438,15 @@ def run_remediation(project_root: str, options: Optional[RunOptions] = None) -> 
             "by_state": dict(sorted(by_state.items())),
             "by_reason_code": dict(sorted({k: v for k, v in _count(c.reason_code for c in cases).items()}.items())),
             "selected_rules": sorted({c.rule for c in cases}),
-            "composable": combined.get("state") == "ok" if combined.get("state") != "not_run" else None,
+            "composition": combined.get("state"),  # verified | incompatible | inconclusive | not_run
         },
         "note": (
             "States are claims about isolated copies, one per finding. 'verified' means: finding gone (not suppressed), no new "
-            "finding, test files untouched, the linked reproducer failed before and passed after, run by the named executor. "
+            "finding, test files untouched, and at least one linked test that failed before and passed after the patch, read "
+            "from the runner's own report bound to the run (exit codes are not evidence), run by the named executor. "
             "'audit_clean' means no test executed. 'inconclusive' means the evidence does not support a verdict; it is never a "
-            "defect of the patch. Applying a diff to the project is a human decision."
+            "defect of the patch. 'composition' is checked separately on one copy with every candidate applied and is never "
+            "inferred from the individual verdicts. Applying a diff to the project is a human decision."
         ),
     }
 
