@@ -43,7 +43,7 @@ class DevCorpusTests(unittest.TestCase):
 
     def test_questions_carry_unknown_evidence_and_the_rest_is_verified(self) -> None:
         counts = self.score["evidence_counts"]
-        self.assertEqual(counts["unknown"], 3)  # resource authorization, privilege change, tenant binding: questions
+        self.assertEqual(counts["unknown"], 4)  # resource authorization, privilege change, tenant binding, consumer: questions
         self.assertGreaterEqual(counts["verified"], 15)
         self.assertLessEqual(self.score["unknown_rate"], 0.2)
 
@@ -192,9 +192,11 @@ class NewRuleTests(ProjectCase):
 
 class CompatibilityTests(ProjectCase):
     def test_rule_count_and_schema_versions(self) -> None:
-        for rule in ("SEC_RESOURCE_AUTHZ_UNVERIFIED", "SEC_RLS_CONTEXT_FROM_REQUEST", "ASYNC_COROUTINE_NOT_AWAITED", "ASYNC_LOCK_PER_CALL", "REL_HTTP_CLIENT_PER_CALL"):
+        for rule in ("SEC_RESOURCE_AUTHZ_UNVERIFIED", "SEC_RLS_CONTEXT_FROM_REQUEST", "ASYNC_COROUTINE_NOT_AWAITED", "ASYNC_LOCK_PER_CALL", "REL_HTTP_CLIENT_PER_CALL",
+                     "CONTRACT_ROUTE_AUTH_REQUIRED", "CONTRACT_MUTATION_AUTHZ_REQUIRED", "CONTRACT_IMPORT_FORBIDDEN", "CONTRACT_COMMIT_OUTSIDE_LAYER", "REL_CONSUMER_WITHOUT_INBOX"):
             self.assertIn(rule, audit.RULES)
-        self.assertEqual(len(audit.RULES), 53)
+        self.assertEqual(len(audit.RULES), 58)
+        self.assertIn("contracts", audit.CATEGORIES)
         self.assertEqual(audit.SCHEMA_VERSION, "1.5")
         self.assertEqual(audit.TOOL_VERSION, "1.7.0")
 
@@ -214,3 +216,196 @@ class CompatibilityTests(ProjectCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class EvidenceStateTests(ProjectCase):
+    def test_every_finding_carries_one_of_the_six_states_and_the_summary_counts_them(self) -> None:
+        self.write("app/a.py", '''
+            import time
+            import requests
+
+            async def h():
+                time.sleep(1)  # noqa: ASYNC210
+                requests.get("https://x.invalid")
+        ''')
+        self.write("app/broken.py", "def (:\n")
+        report = self.run_audit()
+        states = {f["rule"]: f["evidence_state"] for f in report["findings"]}
+        self.assertEqual(states["PY_SYNTAX"], "partial")
+        self.assertEqual(states["REL_HTTP_CALL_WITHOUT_TIMEOUT"], "static_confirmed")
+        blocking = [f for f in report["findings"] if f["rule"] == "ASYNC_BLOCKING_CALL"]
+        self.assertEqual(sorted(f["evidence_state"] for f in blocking), ["static_confirmed", "suppressed"])
+        by_state = report["summary"]["by_evidence_state"]
+        self.assertEqual(set(by_state), {"reproduced", "static_confirmed", "inferred", "insufficient", "partial", "suppressed"})
+        self.assertEqual(by_state["reproduced"], 0)  # static analysis never claims it
+        self.assertEqual(sum(by_state.values()), len(report["findings"]))
+
+    def test_questions_are_insufficient_and_propagated_kinds_are_inferred(self) -> None:
+        report = audit_fixture("truth17/dev")
+        states = {(f["rule"], f["evidence_state"]) for f in report["findings"]}
+        self.assertIn(("SEC_RESOURCE_AUTHZ_UNVERIFIED", "insufficient"), states)
+        self.assertIn(("SEC_RLS_CONTEXT_FROM_REQUEST", "static_confirmed"), states)
+        inter = audit_fixture("interproc")
+        self.assertIn(("SA_ASYNC_SESSION_NOT_AWAITED", "inferred"), {(f["rule"], f["evidence_state"]) for f in inter["findings"]})
+
+
+class ContractPartitionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = audit_fixture("truth17/dev")
+        cls.by_function = {(c["file"], c["function"]): c for c in cls.report["contracts"]["routes"]}
+
+    def test_partition_is_disjoint_and_complete(self) -> None:
+        partition = self.report["contracts"]["partition"]
+        self.assertEqual(sum(partition.values()), self.report["contracts"]["summary"]["routes"])
+        self.assertEqual(set(partition), {"public_declared", "unauthenticated_not_public", "optional_authentication", "authenticated_authorization_visible", "authenticated_only", "authenticated_authorization_unknown"})
+        self.assertEqual(partition["public_declared"], 3)
+        self.assertEqual(partition["unauthenticated_not_public"], 1)
+
+    def test_inherited_router_dependencies_and_resource_kinds(self) -> None:
+        queues = self.by_function[("app/routes/contracts.py", "queues")]
+        self.assertEqual(queues["authentication"], "present")
+        self.assertIn("router_dependencies", queues["authorization"])
+        self.assertEqual(queues["bucket"], "authenticated_authorization_visible")
+        self.assertEqual(self.by_function[("app/routes/contracts.py", "close_account")]["bucket"], "authenticated_authorization_unknown")
+        self.assertEqual(self.by_function[("app/routes/contracts.py", "me")]["bucket"], "authenticated_only")
+        self.assertEqual(self.by_function[("app/routes/contracts.py", "freeze_account")]["bucket"], "authenticated_authorization_visible")
+
+
+class OptionalAuthenticationTests(ProjectCase):
+    def test_optional_dependency_is_its_own_category_and_not_an_unauthenticated_route(self) -> None:
+        self.write("app/r.py", '''
+            from fastapi import APIRouter, Depends, Header
+
+            router = APIRouter()
+
+            async def bearer(authorization: str = Header(default="")) -> str:
+                return authorization
+
+            async def optional_user(token: str = Depends(bearer)) -> dict | None:
+                return None if not token else {"id": 1}
+
+            @router.get("/preview/{item_id}")
+            async def preview(item_id: int, user: dict | None = Depends(optional_user)) -> dict:
+                return {"item": item_id, "anonymous": user is None}
+        ''')
+        report = self.run_audit()
+        contract = report["contracts"]["routes"][0]
+        self.assertEqual(contract["authentication"], "optional")
+        self.assertEqual(contract["bucket"], "optional_authentication")
+        self.assertEqual(lines_of(report, "SEC_ROUTE_WITHOUT_AUTH_SIGNAL"), [])
+        self.assertEqual(lines_of(report, "SEC_RESOURCE_AUTHZ_UNVERIFIED"), [])  # anonymous access is the design; nothing to relate
+
+
+class DeclaredContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = audit_fixture("contracts_declared")
+        cls.grouped = by_rule(cls.report)
+
+    def test_declared_contracts_fire_only_where_declared(self) -> None:
+        self.assertEqual(lines_of(self.report, "CONTRACT_ROUTE_AUTH_REQUIRED"), [30])  # /api/orders without authentication
+        self.assertEqual(lines_of(self.report, "CONTRACT_MUTATION_AUTHZ_REQUIRED"), [35])  # POST /api/orders authenticated only
+        self.assertEqual(lines_of(self.report, "CONTRACT_IMPORT_FORBIDDEN"), [6])  # shop.api -> shop.infra
+        self.assertEqual(lines_of(self.report, "CONTRACT_COMMIT_OUTSIDE_LAYER", "shop/api/orders.py"), [43])  # commit in a router file
+        self.assertEqual(lines_of(self.report, "CONTRACT_COMMIT_OUTSIDE_LAYER", "shop/services/orders.py"), [])
+        for f in self.grouped["CONTRACT_IMPORT_FORBIDDEN"]:
+            self.assertIn("contracts.forbidden_imports", f["message"])
+            self.assertEqual(f["category"], "contracts")
+            self.assertEqual(f["evidence_state"], "static_confirmed")
+
+    def test_without_a_declaration_nothing_fires(self) -> None:
+        report = audit_fixture("truth16")
+        self.assertFalse(any(f["rule"].startswith("CONTRACT_") for f in report["findings"]))
+
+
+class ConfigIsDataTests(ProjectCase):
+    def test_project_python_is_never_imported_or_executed(self) -> None:
+        marker = self.root / "EXECUTED"
+        self.write("conftest.py", f"open({str(marker)!r}, 'w').write('x')\n")
+        self.write("sitecustomize.py", f"open({str(marker)!r}, 'w').write('x')\n")
+        self.write("app/__init__.py", f"open({str(marker)!r}, 'w').write('x')\n")
+        self.write(".audit-fastapi.json", '{"contracts": {"commit_layers": ["service"]}, "public_routes": ["/x"]}')
+        self.run_audit()
+        self.cli(".", "--format", "sarif")
+        self.assertFalse(marker.exists(), "the auditor executed project Python")
+
+    def test_malformed_contract_declarations_are_ignored_not_executed(self) -> None:
+        self.write(".audit-fastapi.json", '{"contracts": {"forbidden_imports": ["__import__(\'os\')"], "route_auth_required": 42, "commit_layers": [1]}}')
+        self.write("app/a.py", "import time\nasync def h():\n    time.sleep(1)\n")
+        report = self.run_audit()
+        self.assertFalse(any(f["rule"].startswith("CONTRACT_") for f in report["findings"]))
+        self.assertEqual(lines_of(report, "ASYNC_BLOCKING_CALL"), [3])
+
+
+class SarifTests(ProjectCase):
+    def _report_and_sarif(self):
+        self.write("app/a.py", '''
+            import time
+            import requests
+
+            async def h():
+                time.sleep(1)  # audit-fastapi: ignore[ASYNC_BLOCKING_CALL]
+                requests.get("https://x.invalid")
+        ''')
+        proc = self.cli(".", "--format", "sarif")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_document_has_the_required_sarif_2_1_0_structure(self) -> None:
+        doc = self._report_and_sarif()
+        self.assertEqual(doc["version"], "2.1.0")
+        self.assertIn("sarif-schema-2.1.0.json", doc["$schema"])
+        run = doc["runs"][0]
+        driver = run["tool"]["driver"]
+        self.assertEqual(driver["name"], "audit_fastapi")
+        self.assertEqual(driver["version"], audit.TOOL_VERSION)
+        for rule in driver["rules"]:
+            self.assertTrue(set(rule) >= {"id", "shortDescription", "fullDescription", "defaultConfiguration", "helpUri"})
+            self.assertIn(rule["defaultConfiguration"]["level"], {"error", "warning", "note"})
+        self.assertEqual(run["originalUriBaseIds"]["%SRCROOT%"]["uri"], "file://" + str(self.root) + "/")
+        for result in run["results"]:
+            self.assertIn(result["ruleId"], {r["id"] for r in driver["rules"]})
+            self.assertEqual(driver["rules"][result["ruleIndex"]]["id"], result["ruleId"])
+            self.assertIn(result["level"], {"error", "warning", "note"})
+            loc = result["locations"][0]["physicalLocation"]
+            self.assertEqual(loc["artifactLocation"]["uriBaseId"], "%SRCROOT%")
+            self.assertGreaterEqual(loc["region"]["startLine"], 1)
+            self.assertGreaterEqual(loc["region"]["startColumn"], 1)
+            self.assertIn("fastapiArchitect/fingerprint/v1", result["partialFingerprints"])
+            self.assertIn(result["properties"]["evidence_state"], {"static_confirmed", "inferred", "insufficient", "partial", "suppressed"})
+        self.assertTrue(run["invocations"][0]["executionSuccessful"])
+
+    def test_suppressions_fingerprints_and_levels_match_the_json_report(self) -> None:
+        doc = self._report_and_sarif()
+        report = json.loads(self.cli(".", "--format", "json").stdout)
+        by_fp = {f["fingerprint"]: f for f in report["findings"]}
+        results = doc["runs"][0]["results"]
+        self.assertEqual(len(results), len(report["findings"]))
+        for result in results:
+            f = by_fp[result["partialFingerprints"]["fastapiArchitect/fingerprint/v1"]]
+            self.assertEqual(result["level"], {"high": "error", "medium": "warning"}.get(f["severity"], "note"))
+            if f["suppressed"]:
+                self.assertEqual(result["suppressions"][0]["kind"], "inSource")
+                self.assertIn("ASYNC_BLOCKING_CALL", result["suppressions"][0]["justification"])
+            else:
+                self.assertNotIn("suppressions", result)
+
+    def test_sarif_file_option_keeps_the_other_formats_and_is_deterministic(self) -> None:
+        self._report_and_sarif()
+        out = self.root / "audit.sarif"
+        proc = self.cli(".", "--sarif", str(out), "--format", "markdown")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(proc.stdout.startswith("# FastAPI static audit"))
+        first = out.read_text()
+        self.cli(".", "--sarif", str(out), "--format", "json")
+        self.assertEqual(first, out.read_text())
+        self.assertEqual(json.loads(first)["version"], "2.1.0")
+
+
+class ConsumerInboxTests(ProjectCase):
+    def test_consumer_question_and_its_negatives(self) -> None:
+        report = audit_fixture("truth17/dev")
+        items = by_rule(report)["REL_CONSUMER_WITHOUT_INBOX"]
+        self.assertEqual([(f["file"], f["line"], f["evidence"], f["evidence_state"]) for f in items], [("app/services/consumers.py", 7, "unknown", "insufficient")])
+        self.assertEqual(lines_of(report, "REL_CONSUMER_WITHOUT_INBOX", "app/services/reliability.py"), [])  # consume() has an inbox

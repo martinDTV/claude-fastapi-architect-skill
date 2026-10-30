@@ -1,0 +1,9 @@
+{
+  "public_routes": ["/public/*"],
+  "contracts": {
+    "route_auth_required": ["/api/*"],
+    "mutation_authorization_required": ["/api/*"],
+    "forbidden_imports": [{"from": "shop.api", "to": "shop.infra"}],
+    "commit_layers": ["service"]
+  }
+}

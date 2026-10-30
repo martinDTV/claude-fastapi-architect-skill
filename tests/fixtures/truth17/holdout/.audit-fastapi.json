@@ -1,0 +1,10 @@
+{
+  "public_routes": ["/public/*"],
+  "tenant_params": ["depot_id"],
+  "contracts": {
+    "route_auth_required": ["/api/*"],
+    "mutation_authorization_required": ["/api/*"],
+    "forbidden_imports": [{"from": "logistics.api", "to": "logistics.infra"}],
+    "commit_layers": ["service"]
+  }
+}
