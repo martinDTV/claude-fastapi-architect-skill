@@ -129,6 +129,49 @@ Cost: +4 to +8 % wall clock on the two real repositories (the new work is in the
 - The four new AgentForge findings sit in development scripts; the rule is right about the event loop, the scripts may not care.
 - `--no-interprocedural` keeps the loop classification and the new rule (tested) but loses the attribute, callback and hook resolution, as in v1.7.
 
+## Review before publication (second delivery, 2026-10-30)
+
+Scope requested: loop commits and atomicity, evaluation hygiene, the AgentForge discrepancy, the remediation engine, the comparison tool, final verifications. The nine commits of the first delivery are kept; the review adds thematic commits on top.
+
+### Loops and atomicity
+
+Positive and negative tests (`LoopAtomicityTests`) show that classifying a loop as deliberate silences only the loop-commit finding, never the other transactional rules: an HTTP call inside the transaction of a paginated loop (`TX_EXTERNAL_CALL_IN_TRANSACTION`), a read-modify-write inside a modulo batch (`TX_READ_MODIFY_WRITE`), a session shared by `gather` inside a convergence loop (`SA_SESSION_SHARED_CONCURRENTLY`) and a non-idempotent HTTP write inside a retry loop (`RETRY_NON_IDEMPOTENT_WRITE`) are all reported; a per-item inner loop inside a paginated outer loop, a per-item commit next to a modulo-guarded one, and a modulo test that does not guard the commit are reported as `per_item`. `facts.commit_loops` counts every kind in every mode.
+
+Opt-in policy: `"transactions": {"single_transaction_per_use_case": true}` in `.audit-fastapi.json` reports the `batch`, `paginated` and `convergence` loops as `TX_COMMIT_IN_LOOP` with a distinct message, confidence one step below the per-item finding and `details.policy`; per-item findings keep message and fingerprint; retry loops are never policy findings; the section fails closed like `contracts` (non-boolean value or unknown property: exit 2 with the JSON path, `x-` keys allowed). Default off; the default report is byte-identical to the first delivery.
+
+### Evaluation (all historical results kept)
+
+| Corpus | v1.7.0 | v1.8.0 | Status |
+|---|---|---|---|
+| `truth18/dev` | P 0.333 / R 0.286 / F1 0.308; edges 1/6; unresolved 7/16 | 1.0 / 1.0 / 1.0; 6/6; 16/16 | used during implementation; scored in-process by the suite |
+| `truth18/acceptance`, first scoring | 0.25 / 0.2 / 0.222; 1/4; 5/9 | 1.0 / 0.8 / 0.889; 4/4; 8/9 | author-written, displayed once, edited once before scoring |
+| `truth18/acceptance`, second scoring | same | 1.0 / 1.0 / 1.0; 4/4; 9/9 | after two closure fixes prompted by the first scoring; not a blind test |
+| `truth18/holdout` (new, 5 files, 33 markers) | 0.375 / 0.333 / 0.353; 1/4; 6/12 | 0.8 / 0.889 / 0.842; 4/4; 12/12 | written before the review changes, scored once with the final engine, **not edited**, results not used to change any rule |
+
+Holdout open items, analysed and left as they are: the two "false positives" (`ASYNC_BLOCKING_CALL_INDIRECT` at `wms/layers.py:25` and `wms/picking.py:40`) are true findings the expectations omitted: `Handler.handle` and `Picker.describe` are `async def` and call, through a resolved edge, a method that sleeps; the markers only asked for the edge. The "false negative" at `wms/picking.py:48` (`route_like`, same blocking callee) follows from the rule's documented "one finding per blocking helper per file" deduplication: the helper was already reported at line 40. The remaining 17 markers for P1–P4 hold, including the `follows=True/False` grading of the begin-block rule, the inner per-item loop inside a paginated loop and the HTTP call inside a paginated transaction. `truth17/holdout` was not used.
+
+### AgentForge, reconciled
+
+The first delivery said "four" in one place and "five" in another because the four indirect-blocking findings were joined by one resource question. After the review the count is **four**:
+
+| Rule | Location | Severity | Evidence / state | Confidence | Code | Impact | Classification |
+|---|---|---|---|---|---|---|---|
+| `ASYNC_BLOCKING_CALL_INDIRECT` | `scripts/sandbox_smoke.py:222` (`run_smoke` → `deps.workspaces.ensure`) | medium | inferred (one link through the `GitRepositoryPort` interface with a single implementation) | low | operator script (`python -m scripts.sandbox_smoke`; "never part of the application") | the event loop blocks while git runs; the script awaits nothing else concurrently, so no observable effect today | supported signal, low impact |
+| `ASYNC_BLOCKING_CALL_INDIRECT` | `scripts/sandbox_smoke.py:313` (`run_smoke` → `deps.workspaces.remove`) | medium | inferred | low | operator script | same | supported signal, low impact |
+| `ASYNC_BLOCKING_CALL_INDIRECT` | `scripts/development_mvp.py:740` (`run_development` → `deps.workspaces.ensure`) | medium | inferred | low | operator script | same | supported signal, low impact |
+| `ASYNC_BLOCKING_CALL_INDIRECT` | `scripts/development_mvp.py:863` (`run_development` → `deps.workspaces.remove`) | medium | inferred | low | operator script | same | supported signal, low impact |
+| `SEC_RESOURCE_AUTHZ_UNVERIFIED` (first delivery only) | `runner/agentforge_runner/service.py:175` (`create_runner_app.cancel`) | medium | unknown / insufficient | low | production (runner service) | none: `authenticated(request) -> None` compares a shared bearer token and hands the route no principal; there is one caller identity and nothing a resource could be bound to | **false positive by design**, withdrawn |
+
+Correction with regression tests: route contracts carry `principal_kind` (`value` / `none` / `unknown`); when every authentication parameter is unused (`_: Authenticated`) and every resolvable dependency behind it is annotated `-> None` and never writes `request.state`, the kind is `none` and the resource question is not asked. Providers defined inside the same factory now resolve to their nested record, which is what made the AgentForge case visible. A `-> None` dependency that stores `request.state.user`, or one that returns a value, keeps the question (tested). On AgentForge 8 routes are `none`, 9 `value`, 2 `unknown`; on Clivana 149 `value`, 18 `unknown`, none withdrawn. Final counts: Clivana 55 → 52 (51 fingerprints preserved, nothing changed on them), AgentForge 11 → 15 (11 preserved), tenant-ledger 6 → 8 (6 preserved; the loop commit inside `begin()` is now reported by the new rule only). Per-site: 0 project edges retargeted, 0 lost, 0 classified sites became dynamic.
+
+### Remediation engine, comparison, SARIF
+
+`RemediationWordingTests` adds to the existing guarantees: every proposal names at least one test and one invariant, states a regression risk with its reason, and none of the texts promises a resolution ("resolves the", "fixes the defect", "guarantees", "is now verified", ... are rejected); `status`/`applied`/`verified` stay `proposed`/`false`/`false` and audited files are byte-identical after an audit. SARIF results now carry `details` and `remediation` in their property bag; the documents of the dev corpus and of Clivana validate against the official OASIS 2.1.0 schema (new test). The comparison tool is additionally tested against a pre-1.5 baseline without fingerprints or evidence states (fingerprints recomputed, no evidence change invented, reliability depends on the baseline naming its tool version).
+
+### Final verifications
+
+303 tests on Python 3.13.5 and 3.9.6 (5 skips on 3.9: `jsonschema`), `pytest` equivalent; tenant-ledger 30 tests on PostgreSQL unchanged since the first delivery (no example file changed in the review); architectural and declared contracts fixtures green; SARIF against the official schema; JSON byte-identical across runs; `claude plugin validate`, `scripts/validate_structure.py` (now requiring the holdout), `git diff --check` and the secrets scan pass. No paid evaluation was run. The review re-measurements of time were taken on a machine under heavy unrelated load (load average above 30), so the benchmark table of the first delivery remains the reference.
+
 ## Publication recommendation
 
-Ready to publish as v1.8.0 after review of this document and of the three Clivana loops and five AgentForge findings named above, with `git push origin main` (no `--force`), from the local commits listed by `git log --oneline e8224ce..HEAD`. No tag or release was created and nothing was pushed.
+Ready to publish as v1.8.0 after review of this document, of the three Clivana loops and the four AgentForge findings named above, with `git push origin main` (no `--force`), from the local commits listed by `git log --oneline e8224ce..HEAD`. No tag or release was created and nothing was pushed.
