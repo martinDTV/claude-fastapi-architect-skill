@@ -17,6 +17,28 @@ What the local executor guarantees (each enforced and tested): the copy excludes
 
 What it does **not** provide, and the report repeats on every case: network isolation; filesystem confinement beyond the fresh `HOME` (the tests can write anywhere the user can); memory limits; protection against a malicious test suite, which runs with the operator's privileges. Filtering command text is not a sandbox and is not presented as one: the program allow-list only narrows *what* is launched, not what the launched tests may do. A project whose tests you would not run on this machine must be remediated inside a container or not at all; `--trust trusted` does not change that.
 
+## What counts as a test run (runner adapters)
+
+An exit code is not evidence. The executor instruments every declared command with a **runner adapter** that makes the runner write a structured report bound to the run by a nonce, and reads it back: tests discovered (when the runner knows), selected, executed, passed, failed, errored, skipped, and collection errors, with the ids of each.
+
+| Runner | Adapter | Report | Bound by | Notes |
+|---|---|---|---|---|
+| pytest (`pytest`, `python -m pytest`, `uv run ... pytest`) | `pytest-junit` | `--junit-xml` (xunit2) | `junit_suite_name=<nonce>` | `errors` are fixture/collection problems (infrastructure); `discovered` is not reported by JUnit (deselected tests are invisible) |
+| unittest (`python -m unittest ...`) | `unittest-json` | the tool's own runner (`_unittest_runner.py`, standard library) writes JSON | `nonce` field | an exception raised by a test is a failed test (unittest semantics); loader failures are collection errors |
+| anything else | none | — | — | outcome `unverifiable`: the run may execute (when allowed) but can never verify |
+
+Outcome rules, in order: refused, not run, timeout; no adapter → `unverifiable`; report absent → `no_evidence`; report unparseable → `report_corrupt`; nonce or timestamp mismatch → `report_mismatch`; any collection error → `infrastructure_error`; nothing executed → `no_tests`; only skips → `skipped_only`; any failed test → `failed`; errors without failures → `infrastructure_error`; exit code non-zero with every listed test passed → `infrastructure_error`; otherwise `passed`. Summary lines printed by the runner are kept as `text_counts` for the reader and never used for a verdict. Negative controls in `tests/test_audit_v19.py`: a script that prints a pytest-looking summary and exits 0, an empty test class, a skipped-only selection, a truncated report, a report with another run's nonce, a report older than the run, a run whose report was deleted.
+
+## Linking a finding to its reproducer
+
+`--link FINGERPRINT=CMD` and `--link FILE:LINE=CMD` are specific to one case (`reproducer_scope: case`). `--link RULE=CMD` is **shared** by every case of that rule that has no more specific link (`reproducer_scope: rule`, `shared_with` lists the others, and a limitation says so). Sharing is allowed because the verdict never comes from the command's exit status but from **tests that change state in the case's own copy**: `flipped_tests` are the ids that failed (or errored) before the patch and passed after it; `regressed_tests` are the ids that passed before and fail after. `verified` requires at least one flipped test and no regressed test. A shared reproducer that covers only one of two findings of the same rule therefore verifies that one (its tests flip in its copy) and leaves the other `inconclusive: reproducer_not_specific` (its tests fail before and after in its copy, unchanged); a reproducer that encodes the old defective behaviour next to a flipping test rejects the candidate (`tests_failed_after` with the regressed ids). This is the demonstrable relation between a case, its candidate and its reproducer, and it is tested with two findings of one rule where only one is covered.
+
+## Composition of candidates
+
+Individually verified candidates are never assumed to work together. The composition stage applies them to **one more copy**, in file order from the highest line down, recording for each the candidate id and the file digest before and after (`combined.applied`, with `stacked_on_previous_candidate` when a file receives more than one), audits the composed copy (every target gone and not suppressed, nothing new), runs **each verified case's reproducer again** there, and runs the declared regression suite of the corrected code (`--test-command`) before and after. Result (`combined.state`, `summary.composition`): `verified` only when every composed candidate is individually verified, the audit is clean, every reproducer passes in the composed copy and the suite passes with verifiable evidence; `incompatible` when the audit or a reproducer shows the candidates do not work together; `inconclusive` otherwise, with its cause (no execution, no suite declared, candidates without individual verification, the suite failing with the ids that failed). A non-verified composition is attached as a limitation to every composed candidate; the individual verdicts stand.
+
+On `tenant-ledger` the first composition attempt failed one test: `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement`, a historical test that asserts the defective behaviour on purpose (it documents the raise). It was not deleted or silenced: it carries the `antipattern_demo` marker, keeps running in the default suite against the anti-pattern code, and the regression suite of the corrected code is declared as `pytest -q -m "remediation or not antipattern_demo"`. With that suite the composition of the four candidates is `verified` (34 of 34 after, 29 of 34 before, every reproducer passing in the composed copy).
+
 ## States and their evidence
 
 | State | Claim | Required evidence | `reason_code` values |
@@ -25,17 +47,15 @@ What it does **not** provide, and the report repeats on every case: network isol
 | `blocked` | no safe automatic patch | a failed precondition | `precondition_failed` |
 | `patched` | the candidate is applied in the case's copy | intermediate only | |
 | `audit_clean` | after the patch the finding is **no longer detected** (not even as suppressed) and **no new finding** appeared anywhere in the copy; **no test executed** | two audits of the copy compared by fingerprint | `execution_unauthorized`, `executor_unavailable`, `scope_mismatch` |
-| `verified` | `audit_clean` **and** the case's linked reproducer **failed before** and **passed after** the patch, run by a named executor, with test files untouched | the two runs with exit status, runner counts and output tail; the model refuses the transition when anything is missing | `verified` |
+| `verified` | `audit_clean` **and** the case's linked reproducer, read through a runner adapter, shows at least one test that **failed before and passed after** the patch and none that regressed, run by a named executor, with test files untouched | the two runs with their nonce-bound reports (counts and test ids), `flipped_tests`, `regressed_tests`; the model refuses the transition when anything is missing | `verified` |
 | `rejected` | the candidate is wrong or invalid | the check that failed | `not_reproduced`, `stale_baseline`, `candidate_mismatch`, `patch_failed`, `finding_persists` (active or suppressed), `tests_modified`, `regression_introduced`, `tests_failed_after` |
-| `inconclusive` | the evidence does not support a verdict; **never a defect of the patch** | the run that could not decide | `no_linked_tests`, `defect_not_reproduced`, `tests_skipped`, `no_tests`, `infrastructure_error`, `timeout`, `command_refused` |
+| `inconclusive` | the evidence does not support a verdict; **never a defect of the patch** | the run that could not decide | `no_linked_tests`, `defect_not_reproduced`, `reproducer_not_specific`, `tests_skipped`, `no_tests`, `infrastructure_error`, `timeout`, `command_refused`, `runner_unverifiable`, `evidence_missing`, `report_corrupt`, `report_mismatch` |
 
 Rules the pipeline enforces: `audit_clean` never equals `verified`; a test that did not run never counts as passed; a skipped test or an empty collection never satisfies an obligation; a baseline change (`base_sha256` of the audited file differs from the copy) invalidates the candidate; runner-internal, usage and fixture-setup errors (a database that did not start, a selector that does not resolve) are infrastructure, not verdicts; `verified` is refused by the model itself (`missing_evidence_for_verified`) when any piece is missing. The historical v1.8 `remediation` block of the audit report keeps its meaning (`status: proposed`, `applied: false`, `verified: false`) and only gains `recipe`, `automatable`, `tool`.
 
 ## Evidence per finding
 
-Each case carries: the finding (rule, file, line, function, fingerprint); `base_sha256` of the audited file; the candidate (`candidate_id`, recipe, edits, diff, original and patched digests); the reproducer (the linked command) with its run **before** and **after** (exit status, runner, counts, outcome, executor); the two audits of the copy (target present / suppressed, new findings); `regressions`; `invariants` with how each was checked (`audit`, `parse`, `linked_tests`, `not_checked`) and whether it held; `tests_untouched`; the executor and its isolation level; `limitations` (what the executor does not provide, whether the file is test code, whether the combined copy failed); the state, its reason code and the full history.
-
-Linking: `--link FINGERPRINT=CMD`, `--link FILE:LINE=CMD` or `--link RULE=CMD` (precedence in that order). A rule-level link is only right when every case of that rule is observed by the same tests; otherwise link by file and line. One finding, one copy, one reproducer: a suite that covers several findings cannot attribute a verdict to one of them, so a case without a link is `inconclusive` when execution was granted. `--test-command` is the suite-level command run in the **combined** copy (every `verified`/`audit_clean` candidate applied together) before and after; its result is reported as `combined` / `summary.composable` and, when it fails, as a limitation on each candidate; individual verdicts keep their own evidence.
+Each case carries: the finding (rule, file, line, function, fingerprint); `base_sha256` of the audited file; the candidate (`candidate_id`, recipe, edits, diff, original and patched digests); the reproducer (command, `reproducer_scope`, `shared_with`) with its run **before** and **after** (instrumented command, exit status, adapter, nonce-bound report with counts and test ids, outcome, executor); `flipped_tests` and `regressed_tests`; the two audits of the copy (target present / suppressed, new findings); `regressions`; `invariants` with how each was checked (`audit`, `parse`, `linked_tests`, `not_checked`) and whether it held; `tests_untouched`; the executor and its isolation level; `limitations` (what the executor does not provide, shared reproducers, test code, a non-verified composition); the state, its reason code and the full history. A case without a link is `inconclusive` (`no_linked_tests`) when execution was granted: a suite alone cannot attribute a verdict to one finding.
 
 ## Recipes
 
@@ -88,11 +108,11 @@ Each recipe states preconditions (checked on the AST; a failure blocks the case)
 python3 scripts/audit_remediate.py PROJECT --select TX_COMMIT_INSIDE_BEGIN_BLOCK                       # static: audit_clean at best, nothing executed
 python3 scripts/audit_remediate.py PROJECT --authorize-execution --trust trusted --trust-scope PROJECT \
     --link "src/app/x.py:42=pytest -q tests/test_x.py::test_commit_once" \
-    --test-command "pytest -q" --patch-dir patches --output run.json --strict
+    --test-command "pytest -q -m 'not antipattern_demo'" --patch-dir patches --output run.json --strict          # the regression suite of the corrected code
 git apply patches/TX_COMMIT_IN_LOOP-<fingerprint>-<candidate>.diff                                   # the human step
 ```
 
-`--format json` prints the run report (`remediation_run/1.1`), `--keep-workspace` leaves the copies for inspection, `--fail-on-rejected` and `--strict` gate CI (`--strict` fails unless every case is `verified`). The audit report's `remediation` block names the recipe (`recipe`, `automatable`, `tool`).
+`--format json` prints the run report (`remediation_run/1.2`), `--keep-workspace` leaves the copies for inspection, `--fail-on-rejected` and `--strict` gate CI (`--strict` fails unless every case is `verified`). The audit report's `remediation` block names the recipe (`recipe`, `automatable`, `tool`).
 
 ## Towards v2.0
 
