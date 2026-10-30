@@ -108,9 +108,22 @@ def _chain_is_auth(ctx: FileContext, dotted: Optional[str], raw_parts: Optional[
     return False
 
 
-def _enclosing_alias(func: FunctionInfo, name: str) -> Optional[Tuple[Optional[str], Optional[List[str]], str]]:
+def _nested_provider(func: FunctionInfo, name: str, module: str) -> Optional[str]:
+    """Dotted key of a function named ``name`` defined in an enclosing function of ``func`` (``create_app.authenticated``)."""
+    parent = func.parent
+    depth = 0
+    while parent is not None and depth < 4:
+        for stmt in parent.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == name:
+                return f"{module}.{parent.qualname}.{name}" if module else f"{parent.qualname}.{name}"
+        parent, depth = parent.parent, depth + 1
+    return None
+
+
+def _enclosing_alias(func: FunctionInfo, name: str, module: str = "") -> Optional[Tuple[Optional[str], Optional[List[str]], str]]:
     """v1.8: ``Name = Annotated[T, Depends(f)]`` assigned in an enclosing function (routes defined inside an app
-    factory). Returns (dotted provider, raw parts, label) like a module-level alias; None when not found."""
+    factory). Returns (dotted provider, raw parts, label) like a module-level alias; None when not found. A
+    provider defined in the same factory resolves to its nested key so its record (``-> None``) is visible."""
     parent = func.parent
     depth = 0
     while parent is not None and depth < 4:
@@ -128,7 +141,10 @@ def _enclosing_alias(func: FunctionInfo, name: str) -> Optional[Tuple[Optional[s
                     if parts and parts[-1] in {"Depends", "Security"} and sub.args:
                         inner = dotted_name(sub.args[0])
                         label = inner[-1] if inner else (ast.unparse(sub.args[0]) if hasattr(ast, "unparse") else "")
-                        return (parent.resolve(inner) if inner else None, inner, label)
+                        dotted = parent.resolve(inner) if inner else None
+                        if dotted is None and inner and len(inner) == 1:
+                            dotted = _nested_provider(func, inner[0], module)
+                        return (dotted, inner, label)
             return None
         parent, depth = parent.parent, depth + 1
     return None
@@ -163,7 +179,7 @@ def _param_signal(ctx: FileContext, func: FunctionInfo) -> bool:
                 if _alias_target_is_auth(ctx, imported) or _alias_target_is_auth(ctx, local):
                     return True
                 if len(raw_parts) == 1 and imported is None:
-                    enclosing = _enclosing_alias(func, raw_parts[0])
+                    enclosing = _enclosing_alias(func, raw_parts[0], module)
                     if enclosing is not None and (AUTH_RE.search(enclosing[2]) or (enclosing[1] and _chain_is_auth(ctx, enclosing[0], enclosing[1]))):
                         return True
             text = ast.unparse(arg.annotation) if hasattr(ast, "unparse") else ""
@@ -246,7 +262,7 @@ def _providers(ctx: FileContext, func: FunctionInfo) -> List[Tuple[str, Optional
                         found = (target if "." in target else None, [target.rsplit(".", 1)[-1]], label)
                         break
                 if found is None and len(raw) == 1 and func.resolve(raw) is None:
-                    found = _enclosing_alias(func, raw[0])  # v1.8: alias assigned in the enclosing app factory
+                    found = _enclosing_alias(func, raw[0], module)  # v1.8: alias assigned in the enclosing app factory
         if found:
             out.append((arg.arg, found[0], found[1], found[2]))
     return out
@@ -587,6 +603,8 @@ def _resource_authorization(ctx: FileContext, contract: RouteContract, func: Fun
         return  # role, scopes, decorator, membership, a resource dependency, a policy call or the principal flowing with the id
     if not contract.resource_calls_without_principal:
         return  # the id never reaches a project call without the principal: nothing to relate statically
+    if contract.principal_kind == "none":
+        return  # v1.8 review: the authentication identifies no caller (shared credential, `-> None`, unused parameter); there is no principal to bind
     route = func.route
     where = f"'{func.qualname}' ({route.method} {route.path or ''})".replace(" )", ")")
     out.append(

@@ -159,6 +159,8 @@ class FunctionRecord:
     callback_kinds: Dict[str, str] = field(default_factory=dict)  # param -> "asgi" | "callable" | "untyped"
     asgi_signature: bool = False  # (scope, receive, send) handler shape
     owner_class: Optional[str] = None  # class whose `self` the function reads: the method's class, also for closures inside it
+    returns_none: bool = False  # annotated `-> None`: a dependency that yields no value (a token check, a side effect)
+    writes_request_state: bool = False  # assigns request.state.<x> / scope["state"]: an ambient principal may exist
 
     def kind_of(self, name: str) -> Tuple[Optional[str], Optional[str]]:
         """(kind, evidence) for a parameter/local name: declared > dependency > inferred."""
@@ -752,6 +754,15 @@ def build_summaries(
         if returns is not None:
             rec.returns_dotted = facts.canonical(rdotted) or rdotted
             rec.returns_builtin = _builtin_annotation(returns, func.resolve) is not None
+            rec.returns_none = isinstance(returns, ast.Constant) and returns.value is None
+        for node in func.scope_nodes():  # request.state.user = ... / scope["state"]["user"] = ...
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign)) else []
+            for target in targets:
+                chain = dotted_name(target.value) if isinstance(target, ast.Attribute) else None
+                if chain and len(chain) >= 2 and chain[1] == "state":
+                    rec.writes_request_state = True
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Subscript) and isinstance(target.value.slice, ast.Constant) and target.value.slice.value == "state":
+                    rec.writes_request_state = True
         if rec.returns_class is None:
             for node in func.scope_nodes():
                 if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):

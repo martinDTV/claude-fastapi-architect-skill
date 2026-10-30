@@ -87,6 +87,7 @@ class RouteContract:
     resource_calls_without_principal: List[str] = field(default_factory=list)  # "callee(line)" receiving a resource id but no principal
     evidence: str = "verified"
     full_path: str = ""  # router prefix (same file) + route path
+    principal_kind: str = "unknown"  # v1.8 review: value | none | unknown (see principal_kind_of)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -107,6 +108,7 @@ class RouteContract:
             "tenant_params": list(self.tenant_params),
             "resource_params": list(self.resource_params),
             "evidence": self.evidence,
+            "principal_kind": self.principal_kind,  # schema 1.6 (review)
         }
 
 
@@ -203,6 +205,31 @@ def decorator_authz(func: FunctionInfo) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 
 
+def principal_kind_of(func: FunctionInfo, providers, principal: Set[str], used: Set[str], dependency_record, ctx) -> str:
+    """What the route's authentication hands it (v1.8 review):
+
+    * ``value``: at least one authentication parameter is used in the body, or its dependency returns something;
+    * ``none``: every authentication parameter is unused (``_: Authenticated``) and every resolvable dependency
+      behind it is annotated ``-> None`` and never assigns ``request.state``: a token check that identifies no
+      caller (shared credential). Such a route has no principal a resource could be bound to;
+    * ``unknown``: no authentication parameter at all (router/application dependencies, middleware).
+    """
+    if not principal:
+        return "unknown"
+    verdict = "none"
+    for param, dotted, raw, _label in providers:
+        if param not in principal:
+            continue
+        if param in used and not param.startswith("_"):
+            return "value"
+        record = dependency_record(ctx, dotted, raw)
+        if record is None or not getattr(record, "returns_none", False) or getattr(record, "writes_request_state", False):
+            verdict = "value"
+    if any(p in used for p in principal if not p.startswith("_")):
+        return "value"
+    return verdict
+
+
 def build_contracts(ctx, providers_of, dependency_chain, dependency_record, param_signal, router_signal) -> List[RouteContract]:
     """One contract per route in the file. The helpers are injected from rules.security so the
     two modules share one notion of dependency chains and signals."""
@@ -254,6 +281,7 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             if AUTH_RE.search(arg.arg) and arg.arg not in tenant_names and arg.arg not in principal and arg.arg not in {"self", "cls"}:
                 principal.add(arg.arg)
         c.principal_params = sorted(principal)
+        c.principal_kind = principal_kind_of(func, providers, principal, used, dependency_record, ctx)
         dep_text = router_dependency_text(ctx, func)
         optional = False
         for param, dotted, raw, label in providers:
