@@ -273,10 +273,19 @@ def function_kinds_ex(
             for name, kind in record.inferred_kinds.items():
                 if name not in kinds:
                     kinds[name], evidence[name] = kind, "inferred"
+            for name, kind in record.inherited_kinds.items():  # v1.8: a closure reading the enclosing function's typed name
+                if name not in kinds:
+                    kinds[name], evidence[name] = kind, "verified"
         # v1.6: instance attributes typed in __init__ (self._session: AsyncSession) or through the
         # arguments constructors receive; keyed as "self.<attr>" to match receiver_name()
-        if func.class_name:
-            for attr, (kind, ev) in graph.attribute_kinds(relpath, func.class_name).items():
+        class_name = func.class_name
+        if class_name is None and func.parent is not None and "self" not in {a.arg for a in func.params()}:
+            parent = func.parent  # v1.8: a closure inside a method reads the method's `self`
+            while parent is not None and parent.class_name is None:
+                parent = parent.parent
+            class_name = parent.class_name if parent is not None else None
+        if class_name:
+            for attr, (kind, ev) in graph.attribute_kinds(relpath, class_name).items():
                 key = f"self.{attr}"
                 if key not in kinds:
                     kinds[key], evidence[key] = kind, ev

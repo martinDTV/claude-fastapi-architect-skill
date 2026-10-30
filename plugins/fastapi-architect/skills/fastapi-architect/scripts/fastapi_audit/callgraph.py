@@ -14,6 +14,16 @@ through declared bases. v1.6 adds, each still without executing anything:
   with ``inferred`` evidence; several implementations stay ``ambiguous``;
 * class attributes and static/class methods through re-exports and relative imports.
 
+v1.8 (precision): locals bound to external/builtin call results, unpacking and closures
+are classified instead of left dynamic; ASGI callbacks (``send``/``receive``) are external;
+typed ``Callable`` parameters, lambdas forwarding to one target and bound method references
+feed callback resolution; ``self.a.b.method()`` follows two typed attributes; a method a base
+class leaves to its subclasses resolves to the unique implementation (``inferred``) or stays
+``ambiguous``; unknown methods of classes with a third-party base are external; mixins borrow
+attribute kinds from their concrete subclasses when every subclass agrees. Every still-dynamic
+site carries an origin (loop target, comprehension, untyped parameter, ...) so the uncertainty
+is itemised rather than hidden.
+
 Every call site is classified (``project``, ``external``, ``builtin``, ``object``,
 ``constructors``, ``ambiguous``, ``not_found``, ``dynamic``) and the counts are
 reported, so the reader knows how much of the graph was resolved and how much
@@ -25,7 +35,7 @@ interface, and cycle protection through visited sets.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .kinds import SESSION_KINDS, TYPE_KINDS
@@ -44,6 +54,7 @@ EDGE_ATTRIBUTE = "attribute"
 EDGE_RETURN = "return"
 EDGE_CALLBACK = "callback"
 EDGE_INTERFACE = "interface"
+STRUCTURAL_BASES = frozenset({"object", "builtins.object", "typing.Protocol", "typing_extensions.Protocol", "typing.Generic", "abc.ABC", "abc.ABCMeta"})
 
 
 @dataclass
@@ -69,6 +80,13 @@ class CallGraphStats:
     edges_interface: int = 0
     callback_params_unresolved: int = 0
     interfaces: int = 0
+    # v1.8
+    framework_callbacks: int = 0  # ASGI send/receive/app calls classified external
+    callback_sites_unresolved: int = 0  # call sites through a callback parameter with no known provider
+    mixin_attribute_kinds: int = 0  # attribute kinds a mixin borrowed from its concrete subclasses
+    subclass_hooks: int = 0  # self.method() resolved to the unique subclass implementation
+    external_base_methods: int = 0  # self.method() attributed to a third-party base class
+    dynamic_by_origin: Dict[str, int] = field(default_factory=dict)
     dependency_params: int = 0
     inferred_params: int = 0
     attribute_kinds: int = 0
@@ -108,12 +126,19 @@ class CallGraphStats:
                 "resolvable_sites": resolvable,
                 "project_call_coverage": round(self.project_edges / resolvable, 4) if resolvable else None,
                 "classified_ratio": round(classified / self.call_sites, 4) if self.call_sites else None,
+                # schema 1.6: the three shares of every call site, so a high classified_ratio cannot hide a low project share
+                "project_site_ratio": round(self.project_edges / self.call_sites, 4) if self.call_sites else None,
+                "external_site_ratio": round((self.external + self.builtin + self.objects + self.constructors) / self.call_sites, 4) if self.call_sites else None,
+                "unresolved_site_ratio": round((self.dynamic + self.not_found + self.ambiguous) / self.call_sites, 4) if self.call_sites else None,
             },
             "uncertainty": {  # schema 1.4
                 "ambiguous_sites": self.ambiguous,
                 "dynamic_sites": self.dynamic,
-                "callback_params_unresolved": self.callback_params_unresolved,
+                "callback_params_unresolved": self.callback_params_unresolved,  # schema 1.6: distinct parameters (was call sites, and counted ASGI callbacks)
                 "interfaces": self.interfaces,
+                "callback_sites_unresolved": self.callback_sites_unresolved,  # schema 1.6
+                "framework_callbacks": self.framework_callbacks,  # schema 1.6
+                "dynamic_by_origin": dict(sorted(self.dynamic_by_origin.items())),  # schema 1.6
             },
             "limits": {  # schema 1.4
                 "max_depth": self.max_depth,
@@ -125,6 +150,9 @@ class CallGraphStats:
             "dependency_params": self.dependency_params,
             "inferred_params": self.inferred_params,
             "attribute_kinds": self.attribute_kinds,  # schema 1.4
+            "mixin_attribute_kinds": self.mixin_attribute_kinds,  # schema 1.6
+            "subclass_hooks": self.subclass_hooks,  # schema 1.6
+            "external_base_methods": self.external_base_methods,  # schema 1.6
             "propagation_rounds": self.propagation_rounds,
             "truncated": self.truncated,
             "truncated_reason": self.truncated_reason,
@@ -147,6 +175,8 @@ class CallGraph:
         self._blocking_memo: Dict[str, Optional[Tuple[List[str], str, str]]] = {}
         self._impl_memo: Dict[str, List[str]] = {}
         self._attr_kind_memo: Dict[str, Dict[str, Tuple[str, str]]] = {}
+        self._children: Optional[Dict[str, List[str]]] = None  # v1.8: class -> direct project subclasses
+        self._mixin_memo: Dict[str, Dict[str, str]] = {}
         self._project_roots = {name.split(".")[0] for name in facts.module_map}
         self._start = 0.0
 
@@ -197,6 +227,114 @@ class CallGraph:
                 return alias
         return None
 
+    # ------------------------------------------------------------------ v1.8 class hierarchy helpers
+    def _subclass_index(self) -> Dict[str, List[str]]:
+        if self._children is None:
+            children: Dict[str, List[str]] = {}
+            for key in sorted(self.facts.classes):
+                for base in self.facts.classes[key].bases:
+                    canon = self.canonical_class(base)
+                    if canon and canon != key:
+                        children.setdefault(canon, []).append(key)
+            self._children = children
+        return self._children
+
+    def subclasses(self, cls_key: str, depth: int = 0, seen: Optional[Set[str]] = None) -> List[str]:
+        """Project classes deriving from ``cls_key`` (transitively, bounded by MAX_BASE_WALK), sorted."""
+        seen = seen if seen is not None else set()
+        if depth > MAX_BASE_WALK:
+            return []
+        out: List[str] = []
+        for child in self._subclass_index().get(cls_key, []):
+            if child in seen:
+                continue
+            seen.add(child)
+            out.append(child)
+            out.extend(self.subclasses(child, depth + 1, seen))
+        return sorted(set(out))
+
+    def _subclass_methods(self, cls_key: str, method: str) -> List[str]:
+        """Implementations of ``method`` defined by subclasses of ``cls_key`` (a hook the base leaves open)."""
+        found: Set[str] = set()
+        for sub in self.subclasses(cls_key):
+            record = self.facts.classes.get(sub)
+            if record is not None and method in record.methods:
+                found.add(record.methods[method])
+        return sorted(found)
+
+    def _has_external_base(self, cls_key: str, depth: int = 0) -> bool:
+        """True when the class derives (within MAX_BASE_WALK) from a third-party class: unknown methods belong to it."""
+        record = self.facts.classes.get(cls_key)
+        if record is None or depth > MAX_BASE_WALK:
+            return False
+        for base in record.bases:
+            canon = self.canonical_class(base)
+            if canon:
+                if self._has_external_base(canon, depth + 1):
+                    return True
+                continue
+            dotted = self.facts.canonical(base) or base
+            root = dotted.split(".")[0]
+            if dotted in STRUCTURAL_BASES or dotted.rsplit(".", 1)[-1] in {"Protocol", "Generic", "ABC", "ABCMeta"}:
+                continue  # Protocol / Generic / ABC / object carry no methods of their own
+            if root in self._project_roots and self.facts.resolve_import(dotted):
+                continue  # a project class we failed to index: not external
+            return True  # third-party, stdlib (TypedDict, NamedTuple, Enum, UserDict) or builtin (dict, Exception) base: its methods live there
+        return False
+
+    def _own_attr_kinds(self, cls_key: str) -> Dict[str, Optional[str]]:
+        """``{attr: kind-or-None}`` for attributes a class sets itself (``__init__``/class annotations)."""
+        cls = self.facts.classes.get(cls_key)
+        out: Dict[str, Optional[str]] = {}
+        if cls is None:
+            return out
+        init = self.functions.get(f"{cls_key}.__init__")
+        for attr, info in cls.attrs.items():
+            kind: Optional[str] = info.kind
+            if kind is None and info.init_param and init is not None:
+                kind = init.kind_of(info.init_param)[0]
+            out[attr] = kind
+        return out
+
+    def mixin_attribute_kinds(self, cls_key: str) -> Dict[str, str]:
+        """Kinds of ``self.<attr>`` a class never sets itself but every concrete subclass sets to the same kind
+        (``SessionMixin`` reading ``self._session`` that ``ItemRepo.__init__`` typed as AsyncSession). Any subclass
+        that sets the attribute to an unknown or different kind cancels the inference: ambiguity never becomes a kind."""
+        if cls_key in self._mixin_memo:
+            return self._mixin_memo[cls_key]
+        cls = self.facts.classes.get(cls_key)
+        agreed: Dict[str, str] = {}
+        if cls is not None:
+            seen: Dict[str, Set[Optional[str]]] = {}
+            for sub in self.subclasses(cls_key):
+                for attr, kind in self._own_attr_kinds(sub).items():
+                    if attr in cls.attrs:
+                        continue  # the class sets it itself: its own evidence wins, even when untyped
+                    seen.setdefault(attr, set()).add(kind)
+            for attr, kinds in seen.items():
+                if len(kinds) == 1 and None not in kinds:
+                    agreed[attr] = next(iter(kinds))  # type: ignore[arg-type]
+        self._mixin_memo[cls_key] = agreed
+        return agreed
+
+    def _attr_site(self, cls_key: Optional[str], attr: str, method: str, verified: bool, edge_kind: str = EDGE_ATTRIBUTE) -> Tuple[str, Optional[str], str, str, List[str]]:
+        """Resolve ``<instance of cls_key>.<attr>.<method>()`` through the attribute's declared type."""
+        cls = self.facts.classes.get(cls_key) if cls_key else None
+        info = cls.attrs.get(attr) if cls is not None else None
+        if info is None:
+            if cls_key and attr in self.mixin_attribute_kinds(cls_key):
+                return "external", None, edge_kind, "inferred", []  # a session/client kind borrowed from the subclasses
+            return "dynamic", None, edge_kind, "unknown", []
+        if info.type and info.type.startswith("builtins."):
+            return "builtin", None, edge_kind, "verified", []
+        target_cls = self.canonical_class(info.type) if info.type else None
+        if target_cls:
+            status, key, k, ev, cands = self._class_site(target_cls, method, verified=verified and info.source != "init-other")
+            return status, key, edge_kind if k == EDGE_DIRECT else k, ev, cands
+        if info.kind or info.factory or (info.type and info.type.split(".")[0] not in self._project_roots and (self.facts.canonical(info.type) or info.type).split(".")[0] not in self._project_roots):
+            return "external", None, edge_kind, "verified", []
+        return "dynamic", None, edge_kind, "unknown", []
+
     def implementations(self, cls_key: str) -> List[str]:
         """Project classes implementing an interface: nominal subclasses, plus structural matches
         for Protocols (every protocol method defined). Bounded by DEFAULT_MAX_IMPLEMENTATIONS."""
@@ -240,6 +378,18 @@ class CallGraph:
             if attr.type and (attr.type.startswith("builtins.") or self.canonical_class(attr.type) is None and attr.type.split(".")[0] not in self._project_roots):
                 return "external", None, EDGE_DIRECT, "verified", []
             return "dynamic", None, EDGE_DIRECT, "unknown", []
+        if record is not None:
+            # v1.8: a hook the class leaves to its subclasses (Template Method): one implementation resolves
+            # with inferred evidence, several stay ambiguous; otherwise an unknown method of a class with a
+            # third-party base belongs to that base (pydantic BaseModel.model_dump_json, Exception.add_note).
+            hooks = self._subclass_methods(cls_key, method)
+            if len(hooks) == 1:
+                self.stats.subclass_hooks += 1
+                return "project", hooks[0], EDGE_INTERFACE, "inferred", hooks
+            if len(hooks) > 1:
+                return "ambiguous", None, EDGE_INTERFACE, "unknown", hooks
+            if self._has_external_base(cls_key):
+                return "external_base", None, EDGE_DIRECT, "verified", []
         return "not_found", None, EDGE_DIRECT, "unknown", []
 
     def resolve_site(self, site: CallSite, record: Optional[FunctionRecord] = None) -> Tuple[str, Optional[str]]:
@@ -255,20 +405,25 @@ class CallGraph:
             return "object", None, EDGE_DIRECT, "verified", []
         if site.status == "hint" and site.hint:
             kind = site.hint[0]
-            if kind == "attr" and record is not None and record.class_name:
-                cls = self.class_record_for(record.file, record.class_name)
+            owner = (getattr(record, "owner_class", None) or record.class_name) if record is not None else None
+            if kind == "attr" and owner:
+                cls = self.class_record_for(record.file, owner)
+                return self._attr_site(cls.key if cls is not None else None, site.hint[1], site.hint[2], verified=True)
+            if kind == "attr2" and owner and len(site.hint) == 4:  # self.a.b.method()
+                cls = self.class_record_for(record.file, owner)
                 info = cls.attrs.get(site.hint[1]) if cls is not None else None
-                if info is None:
+                if info is None or not info.type:
                     return "dynamic", None, EDGE_ATTRIBUTE, "unknown", []
-                if info.type and info.type.startswith("builtins."):
-                    return "builtin", None, EDGE_ATTRIBUTE, "verified", []
-                target_cls = self.canonical_class(info.type) if info.type else None
-                if target_cls:
-                    status, key, _k, ev, cands = self._class_site(target_cls, site.hint[2], verified=info.source != "init-other")
-                    return status, key, EDGE_ATTRIBUTE if _k == EDGE_DIRECT else _k, ev, cands
-                if info.kind or info.factory or (info.type and info.type.split(".")[0] not in self._project_roots and (self.facts.canonical(info.type) or info.type).split(".")[0] not in self._project_roots):
-                    return "external", None, EDGE_ATTRIBUTE, "verified", []
-                return "dynamic", None, EDGE_ATTRIBUTE, "unknown", []
+                mid_cls = self.canonical_class(info.type)
+                if mid_cls is None:
+                    if info.type.startswith("builtins."):
+                        return "builtin", None, EDGE_ATTRIBUTE, "verified", []
+                    if (self.facts.canonical(info.type) or info.type).split(".")[0] not in self._project_roots:
+                        return "external", None, EDGE_ATTRIBUTE, "verified", []
+                    return "dynamic", None, EDGE_ATTRIBUTE, "unknown", []
+                return self._attr_site(mid_cls, site.hint[2], site.hint[3], verified=info.source != "init-other")
+            if kind == "iattr" and len(site.hint) == 4:  # obj.attr.method() where obj is a typed project instance
+                return self._attr_site(self.canonical_class(site.hint[1]), site.hint[2], site.hint[3], verified=True)
             if kind == "ret":
                 callee = self.functions.get(self.canonical_function(site.hint[1]) or "")
                 if callee is None:
@@ -280,6 +435,12 @@ class CallGraph:
                         return status, key, EDGE_RETURN if _k == EDGE_DIRECT else _k, ev, cands
                 if callee.returns_kind:
                     return "external", None, EDGE_RETURN, "verified", []
+                if callee.returns_builtin:  # -> str / -> list[dict]: methods of a builtin value
+                    return "builtin", None, EDGE_RETURN, "verified", []
+                if callee.returns_dotted:
+                    root = callee.returns_dotted.split(".")[0]
+                    if root not in self._project_roots and root not in {"typing", "typing_extensions", "builtins", "object"} and callee.returns_dotted != "object":
+                        return "external", None, EDGE_RETURN, "verified", []  # -> httpx.Response: a library value
                 return "dynamic", None, EDGE_RETURN, "unknown", []
             if kind == "callback" and record is not None:
                 candidates = sorted(record.callable_params.get(site.hint[1], set()))
@@ -287,6 +448,8 @@ class CallGraph:
                     return "project", candidates[0], EDGE_CALLBACK, "inferred", candidates
                 if len(candidates) > 1:
                     return "ambiguous", None, EDGE_CALLBACK, "unknown", candidates
+                if len(site.hint) > 2 and site.hint[2] == "asgi":
+                    return "framework_callback", None, EDGE_CALLBACK, "verified", []  # receive()/send(): the ASGI server's callables
                 return "dynamic", None, EDGE_CALLBACK, "unknown", []
             return "dynamic", None, EDGE_DIRECT, "unknown", []
         if site.status != "candidate" or not site.target:
@@ -340,9 +503,33 @@ class CallGraph:
         counter = {EDGE_DIRECT: "edges_direct", EDGE_ATTRIBUTE: "edges_attribute", EDGE_RETURN: "edges_return", EDGE_CALLBACK: "edges_callback", EDGE_INTERFACE: "edges_interface"}[edge_kind]
         setattr(self.stats, counter, getattr(self.stats, counter) + 1)
 
-    def _count_status(self, status: str) -> None:
-        field = {"external": "external", "not_found": "not_found", "constructor": "constructors", "builtin": "builtin", "object": "objects", "ambiguous": "ambiguous"}.get(status, "dynamic")
-        setattr(self.stats, field, getattr(self.stats, field) + 1)
+    def _count_status(self, status: str, site: Optional[CallSite] = None) -> None:
+        if status == "framework_callback":
+            self.stats.framework_callbacks += 1
+            status = "external"
+        elif status == "external_base":
+            self.stats.external_base_methods += 1
+            status = "external"
+        field_name = {"external": "external", "not_found": "not_found", "constructor": "constructors", "builtin": "builtin", "object": "objects", "ambiguous": "ambiguous"}.get(status, "dynamic")
+        setattr(self.stats, field_name, getattr(self.stats, field_name) + 1)
+        if field_name == "dynamic" and site is not None:
+            origin = self._origin_of(site)
+            self.stats.dynamic_by_origin[origin] = self.stats.dynamic_by_origin.get(origin, 0) + 1
+
+    @staticmethod
+    def _origin_of(site: CallSite) -> str:
+        """Why a site stayed dynamic: what the summaries recorded, else the shape of the receiver."""
+        if site.origin:
+            return site.origin
+        if site.status == "hint" and site.hint:
+            return {"attr": "attribute_untyped", "attr2": "attribute_chain", "iattr": "attribute_chain", "ret": "return_untyped", "callback": "callback_unresolved"}.get(site.hint[0], "hint")
+        if site.status == "candidate":
+            return "unresolved_name"
+        return "expression"  # calls on call results, subscripts, operators: no name to type
+
+    @staticmethod
+    def _public_status(status: str) -> str:
+        return "external" if status in {"framework_callback", "external_base"} else status
 
     def build(self) -> "CallGraph":
         self._start = time.monotonic()
@@ -366,12 +553,13 @@ class CallGraph:
                 if status == "project" and callee:
                     self._record_edge(key, site, callee, edge_kind, evidence)
                 else:
-                    self.site_targets[loc] = (status, None)
+                    self.site_targets[loc] = (self._public_status(status), None)
                     if status == "ambiguous":
                         self.site_candidates[loc] = candidates
-                    self._count_status(status)
+                    self._count_status(status, site)
         self._propagate()
         # second pass: callbacks, once callers' arguments have flowed into callable_params
+        unresolved_params: Set[Tuple[str, str]] = set()
         for key, site in deferred:
             record = self.functions[key]
             status, callee, edge_kind, evidence, candidates = self._resolve(site, record)
@@ -379,16 +567,19 @@ class CallGraph:
             if status == "project" and callee:
                 self._record_edge(key, site, callee, edge_kind, evidence)
             else:
-                self.site_targets[loc] = (status, None)
+                self.site_targets[loc] = (self._public_status(status), None)
                 if status == "ambiguous":
                     self.site_candidates[loc] = candidates
-                else:
-                    self.stats.callback_params_unresolved += 1
-                self._count_status(status)
+                elif status == "dynamic":
+                    self.stats.callback_sites_unresolved += 1
+                    unresolved_params.add((key, site.hint[1] if site.hint else ""))
+                self._count_status(status, site)
+        self.stats.callback_params_unresolved = len(unresolved_params)
         if deferred and not self.stats.truncated:
             self._propagate_kinds(extra_round=True)  # a callback may receive a session
         self.stats.inferred_params = sum(len(r.inferred_kinds) for r in self.functions.values())
         self.stats.attribute_kinds = sum(1 for c in self.facts.classes.values() for a in c.attrs.values() if a.kind)
+        self.stats.mixin_attribute_kinds = sum(len(self.mixin_attribute_kinds(k)) for k in sorted(self.facts.classes))
         self.stats.elapsed_ms = int((time.monotonic() - self._start) * 1000)
         return self
 
@@ -498,6 +689,8 @@ class CallGraph:
                     kind, ev = init.kind_of(info.init_param)
                     if kind and ev:
                         out[attr] = (kind, ev)
+            for attr, kind in self.mixin_attribute_kinds(key).items():  # v1.8: borrowed from agreeing subclasses
+                out.setdefault(attr, (kind, "inferred"))
         self._attr_kind_memo[key] = out
         return out
 

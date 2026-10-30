@@ -63,7 +63,13 @@ ITERATOR_WRAPPERS = frozenset(
 PROTOCOL_BASES = frozenset({"typing.Protocol", "typing_extensions.Protocol"})
 ABSTRACT_BASES = frozenset({"abc.ABC"})
 ABSTRACT_DECORATORS = frozenset({"abc.abstractmethod"})
-CALLABLE_TYPES = frozenset({"typing.Callable", "collections.abc.Callable", "typing.Awaitable", "collections.abc.Awaitable", "typing.Coroutine"})
+CALLABLE_TYPES = frozenset({"typing.Callable", "collections.abc.Callable", "typing.Awaitable", "collections.abc.Awaitable", "typing.Coroutine", "collections.abc.Coroutine"})
+ASGI_CALLBACK_TYPES = frozenset({
+    "starlette.types.Send", "starlette.types.Receive", "starlette.types.ASGIApp", "starlette.types.Scope", "starlette.types.Message",
+    "asgiref.typing.ASGISendCallable", "asgiref.typing.ASGIReceiveCallable", "asgiref.typing.ASGI3Application", "asgiref.typing.ASGIApplication",
+})
+ASGI_TRIPLE = ("scope", "receive", "send")
+CALLABLE_NAME_HINTS = ("Callable", "Callback", "Handler", "Send", "Receive", "ASGIApp", "Awaitable")
 TENANT_CONTEXT_MARKERS = ("set local", "set_config(", "set role")
 IDEMPOTENCY_MARKERS = ("idempotency", "idempotent", "on conflict", "on_conflict", "dedup", "request_id", "requestid", "x-request-id")
 PRINCIPAL_PARAM_RE = ("user", "principal", "tenant", "actor", "identity", "member", "org", "auth", "staff", "caller", "subject")
@@ -94,6 +100,7 @@ class CallSite:
     hint: Optional[Tuple[str, ...]] = None  # ("attr", attr, method) | ("ret", callee_dotted, method) | ("callback", param)
     arg_callables: List[Tuple[Union[int, str], str]] = field(default_factory=list)  # (position|keyword, dotted function handed as argument)
     arg_roots: List[Tuple[Union[int, str], str]] = field(default_factory=list)  # (position|keyword, root Name of an attribute chain argument)
+    origin: Optional[str] = None  # v1.8: why an unresolved receiver is unknown (loop_target, comprehension, untyped_param, ...)
 
 
 @dataclass
@@ -145,6 +152,13 @@ class FunctionRecord:
     local_origin: Dict[str, Tuple[str, str]] = field(default_factory=dict)  # local -> ("ret", dotted callee) | ("external", "")
     tenant_params: List[str] = field(default_factory=list)  # parameters named like a tenant identifier
     network_calls: List[Tuple[int, str]] = field(default_factory=list)  # (line, symbol) HTTP calls and sleeps, any verb
+    # v1.8
+    returns_dotted: Optional[str] = None  # resolved return annotation (dotted), project or not
+    returns_builtin: bool = False  # return annotation is a builtin type (dict, list[str], int, ...)
+    inherited_kinds: Dict[str, str] = field(default_factory=dict)  # closure: kinds captured from the enclosing function (declared there)
+    callback_kinds: Dict[str, str] = field(default_factory=dict)  # param -> "asgi" | "callable" | "untyped"
+    asgi_signature: bool = False  # (scope, receive, send) handler shape
+    owner_class: Optional[str] = None  # class whose `self` the function reads: the method's class, also for closures inside it
 
     def kind_of(self, name: str) -> Tuple[Optional[str], Optional[str]]:
         """(kind, evidence) for a parameter/local name: declared > dependency > inferred."""
@@ -338,10 +352,29 @@ def _builtin_annotation(annotation: Optional[ast.AST], resolve) -> Optional[str]
     return None
 
 
-def _class_attrs(cls: ast.ClassDef, functions: List[FunctionInfo], facts: "ProjectFacts", classes: Dict[str, ClassRecord], local_factories: Dict[str, str]) -> Dict[str, AttrInfo]:
+def _class_attrs(cls: ast.ClassDef, functions: List[FunctionInfo], facts: "ProjectFacts", classes: Dict[str, ClassRecord], local_factories: Dict[str, str], module_defs: Optional[Dict[str, str]] = None) -> Dict[str, AttrInfo]:
     """Instance attributes with a visible type: ``self.x = <typed param>``, ``self.x = Cls()``,
-    ``self.x: T = ...`` in ``__init__`` (first assignment wins), and class-level ``x: T`` annotations."""
+    ``self.x: T = ...`` in ``__init__`` (first assignment wins), and class-level ``x: T`` annotations.
+    v1.8: an annotation naming a class of the same module (``uow: UnitOfWork``) resolves through ``module_defs``."""
     attrs: Dict[str, AttrInfo] = {}
+    module_defs = module_defs or {}
+
+    def _typed(ann: Optional[ast.AST], resolve) -> Optional[str]:
+        if ann is None:
+            return None
+        dotted = annotation_to_dotted(ann, resolve) or _builtin_annotation(ann, resolve)
+        if dotted:
+            return dotted
+        base = ann.value if isinstance(ann, ast.Subscript) else ann
+        if isinstance(base, ast.Constant) and isinstance(base.value, str):
+            try:
+                base = ast.parse(base.value, mode="eval").body
+            except SyntaxError:
+                return None
+        if isinstance(base, ast.Name) and base.id in module_defs and resolve([base.id]) is None:
+            return module_defs[base.id]
+        return None
+
     init = next((f for f in functions if f.class_name == cls.name and f.name == "__init__" and f.parent is None), None)
     if init is not None:
         params = {a.arg: a.annotation for a in init.params()}
@@ -360,12 +393,12 @@ def _class_attrs(cls: ast.ClassDef, functions: List[FunctionInfo], facts: "Proje
             if name in attrs:
                 continue
             if annotation is not None:
-                dotted = annotation_to_dotted(annotation, init.resolve) or _builtin_annotation(annotation, init.resolve)
+                dotted = _typed(annotation, init.resolve)
                 attrs[name] = AttrInfo(type=dotted, kind=kind_of_type(dotted, facts), source="init-annassign")
                 continue
             if isinstance(value, ast.Name) and value.id in params:
                 ann = params[value.id]
-                dotted = (annotation_to_dotted(ann, init.resolve) or _builtin_annotation(ann, init.resolve)) if ann is not None else None
+                dotted = _typed(ann, init.resolve)
                 kind = kinds.get(value.id) or kind_of_type(dotted, facts)
                 factory = None
                 if ann is not None:
@@ -383,7 +416,7 @@ def _class_attrs(cls: ast.ClassDef, functions: List[FunctionInfo], facts: "Proje
                 attrs[name] = AttrInfo(type=cdotted, kind=kind, source="init-call")
             elif isinstance(value, ast.BoolOp) and value.values and isinstance(value.values[0], ast.Name) and value.values[0].id in params:
                 ann = params[value.values[0].id]  # self.repo = repo or Default()
-                dotted = (annotation_to_dotted(ann, init.resolve) or _builtin_annotation(ann, init.resolve)) if ann is not None else None
+                dotted = _typed(ann, init.resolve)
                 attrs[name] = AttrInfo(type=dotted, kind=kinds.get(value.values[0].id) or kind_of_type(dotted, facts), source="init-param", init_param=value.values[0].id)
             elif isinstance(value, LITERAL_VALUES) and not (isinstance(value, ast.Constant) and value.value is None):
                 attrs[name] = AttrInfo(type="builtins.object", kind=None, source="init-literal")
@@ -396,9 +429,106 @@ def _class_attrs(cls: ast.ClassDef, functions: List[FunctionInfo], facts: "Proje
             if module_resolve is None:
                 module_resolve = next((f.scopes[0] for f in functions), None)
             resolve = (lambda parts, s=module_resolve: resolve_in_scopes([s], parts)) if module_resolve is not None else (lambda parts: None)
-            dotted = annotation_to_dotted(item.annotation, resolve) or _builtin_annotation(item.annotation, resolve)
+            dotted = _typed(item.annotation, resolve)
             attrs[item.target.id] = AttrInfo(type=dotted, kind=kind_of_type(dotted, facts), source="classattr")
     return attrs
+
+
+def _self_attr_is_external(cls_record: Optional[ClassRecord], attr: str, kinds: Dict[str, str]) -> bool:
+    """``self.<attr>`` holds a library/builtin value (a session, a dict literal, a client) according to the class."""
+    if f"self.{attr}" in kinds:
+        return True
+    info = cls_record.attrs.get(attr) if cls_record is not None else None
+    return info is not None and bool(info.kind or (info.type or "").startswith("builtins."))
+
+
+def _call_origin_class(inner: ast.AST, func: FunctionInfo, module_defs, facts, project_roots, kinds, param_external, param_builtin, rec: FunctionRecord, cls_record: Optional[ClassRecord] = None) -> Optional[str]:
+    """``external`` / ``builtin`` when the value of a call is known to come from outside the project
+    (library function, builtin, method on an external/builtin receiver, framework callback); None when unknown."""
+    if not isinstance(inner, ast.Call):
+        return None
+    cparts = dotted_name(inner.func)
+    if not cparts:
+        if isinstance(inner.func, ast.Attribute) and isinstance(inner.func.value, (ast.Await, ast.Call)):
+            return "external"  # (await x()).y(): a result of a result
+        return None
+    cdotted = func.resolve(cparts)
+    if cdotted:
+        if _is_project_dotted(cdotted, project_roots, facts):
+            return None
+        return "external"
+    root = cparts[0]
+    if len(cparts) == 1:
+        if root in BUILTIN_NAMES and not any(root in sc.bound or root in sc.imports for sc in func.scopes):
+            return "builtin"
+        if root in rec.callback_kinds and rec.callback_kinds[root] == "asgi":
+            return "external"  # message = await receive()
+        return None
+    origin = rec.local_origin.get(root, ("", ""))[0]
+    if root in param_builtin or origin == "builtin":
+        return "builtin"  # line.split(): methods of builtin values give builtin values
+    if root in param_external or kinds.get(root) or origin == "external":
+        return "external"
+    if root == "self" and _self_attr_is_external(cls_record, cparts[1], kinds):
+        return "external"  # item = self._queue.popleft()
+    return None
+
+
+def _bind_origin(rec: FunctionRecord, name: str, value: ast.AST, func: FunctionInfo, module_defs, classes, facts, project_roots, kinds, param_external, param_builtin, cls_record: Optional[ClassRecord] = None) -> None:
+    """Record where a local comes from: a project instance, a project call (resolved later), an external or
+    builtin value, or a framework callback result. Nothing here creates a project edge."""
+    inner = value.value if isinstance(value, ast.Await) else value
+    if isinstance(inner, LITERAL_VALUES) and name not in kinds and not (isinstance(inner, ast.Constant) and inner.value is None):
+        rec.local_origin[name] = ("builtin", "")
+        return
+    if isinstance(inner, (ast.Attribute, ast.Subscript)) and name not in kinds:
+        aparts = dotted_name(inner.value if isinstance(inner, ast.Subscript) else inner)
+        root = aparts[0] if aparts else None
+        if root and (root in param_external or root in param_builtin or rec.local_origin.get(root, ("", ""))[0] in {"external", "builtin"} or kinds.get(root)):
+            rec.local_origin[name] = ("external", "")
+        elif root == "self" and len(aparts) >= 2 and _self_attr_is_external(cls_record, aparts[1], kinds):
+            rec.local_origin[name] = ("external", "")  # current = self.runs[run_id] where self.runs is a dict literal
+        return
+    if not isinstance(inner, ast.Call):
+        return
+    cparts = dotted_name(inner.func)
+    cdotted = (func.resolve(cparts) or module_defs.get(cparts[0])) if cparts else None
+    canon = _canonical_class(cdotted, classes, facts, project_roots)
+    if canon:
+        rec.instance_of[name] = canon
+        return
+    if cdotted and _is_project_dotted(cdotted, project_roots, facts):
+        rec.local_origin[name] = ("ret", cdotted)
+        return
+    if cparts and len(cparts) == 1 and cparts[0] in module_defs:
+        rec.local_origin[name] = ("ret", module_defs[cparts[0]])
+        return
+    if cparts and len(cparts) == 1 and cparts[0] in rec.callback_kinds:
+        rec.local_origin[name] = ("external" if rec.callback_kinds[cparts[0]] == "asgi" else "callback_result", "")
+        return
+    origin = _call_origin_class(inner, func, module_defs, facts, project_roots, kinds, param_external, param_builtin, rec, cls_record)
+    if origin and name not in kinds:
+        rec.local_origin[name] = (origin, "")
+
+
+def _lambda_target(node: ast.Lambda, func: FunctionInfo, module_defs, facts, project_roots) -> Optional[str]:
+    """``lambda v: target(v)`` or ``lambda: target()``: the dotted project function the lambda forwards to."""
+    body = node.body
+    if isinstance(body, ast.Await):
+        body = body.value
+    if not isinstance(body, ast.Call):
+        return None
+    parts = dotted_name(body.func)
+    if not parts:
+        return None
+    lambda_params = {a.arg for a in node.args.args}
+    if any(not (isinstance(a, ast.Name) and a.id in lambda_params) for a in body.args):
+        if body.args:
+            return None  # the lambda does more than forward its parameters
+    dotted = func.resolve(parts) or (module_defs.get(parts[0]) if len(parts) == 1 else None)
+    if dotted and _is_project_dotted(dotted, project_roots, facts):
+        return dotted
+    return None
 
 
 def build_summaries(
@@ -471,15 +601,24 @@ def build_summaries(
                 key=key, file=rel, bases=bases, is_protocol=is_protocol, is_abstract=is_abstract or bool(abstract_methods),
                 abstract_methods=abstract_methods, lineno=stmt.lineno,
             )
-            classes[key].attrs = _class_attrs(stmt, functions, facts, classes, local_factories)
+            classes[key].attrs = _class_attrs(stmt, functions, facts, classes, local_factories, module_defs)
     records: List[FunctionRecord] = []
+    built: Dict[str, Tuple[FunctionRecord, Dict[str, str], Set[str], Set[str]]] = {}  # qualname -> (record, kinds, param_external, param_builtin) for closures
 
     for func in functions:
         key = f"{module}.{func.qualname}" if module else func.qualname
         params = [a.arg for a in func.params()]
         kinds = function_kinds(func, facts, local_factories)  # declared + local assignments/with
         declared = {p: kinds[p] for p in params if p in kinds}
-        cls_key = module_defs.get(func.class_name) if func.class_name else None
+        own_bound = set(params) | func.scopes[-1].bound
+        parent_state = built.get(func.parent.qualname) if func.parent is not None else None
+        owner_class = func.class_name  # v1.8: a closure inside a method still talks about the method's `self`
+        if owner_class is None and func.parent is not None and "self" not in params:
+            ancestor = func.parent
+            while ancestor is not None and ancestor.class_name is None:
+                ancestor = ancestor.parent
+            owner_class = ancestor.class_name if ancestor is not None else None
+        cls_key = module_defs.get(owner_class) if owner_class else None
         cls_record = classes.get(cls_key) if cls_key else None
         if cls_record is not None:  # self.<attr> kinds declared in __init__ are visible to every method
             for attr, info in cls_record.attrs.items():
@@ -490,18 +629,42 @@ def build_summaries(
             lineno=func.lineno, class_name=func.class_name, params=params, declared_kinds=declared,
             decorators=list(func.decorators), is_route=func.route is not None,
         )
+        rec.owner_class = owner_class
         if func.route:
             rec.route_label = f"{func.route.method} {func.route.path or ''}".strip()
         if func.class_name and func.parent is None and cls_record is not None:
             cls_record.methods[func.name] = key
+        # closures: names the nested function reads but never binds come from the enclosing function
+        inherited_external: Set[str] = set()
+        inherited_builtin: Set[str] = set()
+        if parent_state is not None:
+            p_rec, p_kinds, p_external, p_builtin = parent_state
+            free = {n.id for n in ast.walk(func.node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)} - own_bound - set(module_defs)
+            for name in free:
+                if name in p_kinds and name not in kinds:
+                    kinds[name] = p_kinds[name]
+                    rec.inherited_kinds[name] = p_kinds[name]
+                if name in p_rec.instance_of and name not in rec.instance_of:
+                    rec.instance_of[name] = p_rec.instance_of[name]
+                if name in p_rec.local_origin:
+                    rec.local_origin.setdefault(name, p_rec.local_origin[name])
+                if name in p_rec.callback_kinds:
+                    rec.callback_kinds.setdefault(name, p_rec.callback_kinds[name])  # send_wrapper awaiting the outer `send`
+                if name in p_external:
+                    inherited_external.add(name)
+                if name in p_builtin:
+                    inherited_builtin.add(name)
         rec.retry_decorated = any(d and d.startswith(RETRY_DECORATORS) for d in func.decorators)
         rec.retry_loop = _has_retry_loop(func)
 
         # parameters: Depends targets, principal-looking names, BackgroundTasks, project instances
         defaults = func.param_defaults()
-        param_external: Set[str] = set()  # parameters typed with a resolvable non-project type
-        param_builtin: Set[str] = set()  # parameters typed with a builtin (str, dict, Exception)
+        param_external: Set[str] = set(inherited_external)  # parameters typed with a resolvable non-project type
+        param_builtin: Set[str] = set(inherited_builtin)  # parameters typed with a builtin (str, dict, Exception)
         callable_like: Set[str] = set()  # untyped or Callable-typed parameters (potential callbacks)
+        plain_params = [p for p in params if p not in {"self", "cls"}]
+        if tuple(plain_params[:3]) == ASGI_TRIPLE:
+            rec.asgi_signature = True  # an ASGI application/middleware: receive and send come from the server
         for arg in func.params():
             dep = _depends_target(defaults.get(arg.arg), func.resolve) or _depends_target(arg.annotation, func.resolve)
             if dep:
@@ -510,6 +673,20 @@ def build_summaries(
                     dotted = module_defs[parts[0]] + ("." + ".".join(parts[1:]) if len(parts) > 1 else "")
                 rec.depends[arg.arg] = dotted
             ann = annotation_to_dotted(arg.annotation, func.resolve) or ""
+            if not ann and isinstance(arg.annotation, ast.Subscript):  # Callable[[int], int]: generics have no single dotted type
+                base_parts = dotted_name(arg.annotation.value)
+                base_ann = func.resolve(base_parts) if base_parts else None
+                if base_ann and (facts.canonical(base_ann) or base_ann) in CALLABLE_TYPES:
+                    ann = base_ann
+            if not ann and arg.annotation is not None:  # v1.8: `worker: Worker` naming a class of this module
+                same = arg.annotation
+                if isinstance(same, ast.Constant) and isinstance(same.value, str):
+                    try:
+                        same = ast.parse(same.value, mode="eval").body
+                    except SyntaxError:
+                        same = None
+                if isinstance(same, ast.Name) and same.id in module_defs and func.resolve([same.id]) is None:
+                    ann = module_defs[same.id]
             if ann and arg.arg not in rec.depends:  # `session: SessionDep` where SessionDep = Annotated[T, Depends(f)]
                 alias_target = facts.dependency_aliases.get(ann) or facts.dependency_aliases.get(facts.canonical(ann) or "")
                 if alias_target:
@@ -520,22 +697,34 @@ def build_summaries(
                 rec.principal_params.append(arg.arg)
             if arg.arg.endswith(("tenant_id", "org_id", "organization_id", "workspace_id", "company_id")) or arg.arg in {"tenant", "organization", "workspace"}:
                 rec.tenant_params.append(arg.arg)
+            canon_ann = facts.canonical(ann) or ann
             if arg.arg in kinds and arg.arg not in {"self", "cls"}:
                 param_external.add(arg.arg)  # a session/client: its methods are library calls
+            elif rec.asgi_signature and arg.arg in ASGI_TRIPLE[1:] and arg.arg not in rec.depends:
+                callable_like.add(arg.arg)
+                rec.callback_kinds[arg.arg] = "asgi"  # receive()/send() are supplied by the ASGI server
             elif ann:
                 canon = _canonical_class(ann, classes, facts, project_roots)
                 if canon is None and ann.rsplit(".", 1)[-1] in module_defs and module_defs[ann.rsplit(".", 1)[-1]] in classes:
                     canon = module_defs[ann.rsplit(".", 1)[-1]]
                 if canon:
                     rec.instance_of[arg.arg] = canon
-                elif (facts.canonical(ann) or ann) in CALLABLE_TYPES:
+                elif canon_ann in ASGI_CALLBACK_TYPES:
+                    if canon_ann.endswith(("Scope", "Message")):
+                        param_external.add(arg.arg)  # dict-like values handed by the server
+                    else:
+                        callable_like.add(arg.arg)
+                        rec.callback_kinds[arg.arg] = "asgi"
+                elif canon_ann in CALLABLE_TYPES or canon_ann.rsplit(".", 1)[-1].endswith(CALLABLE_NAME_HINTS):
                     callable_like.add(arg.arg)
+                    rec.callback_kinds[arg.arg] = "callable"
                 elif not _is_project_dotted(ann, project_roots, facts):
                     param_external.add(arg.arg)
             elif _builtin_annotation(arg.annotation, func.resolve):
                 param_builtin.add(arg.arg)
             elif arg.annotation is None and arg.arg not in {"self", "cls"} and arg.arg not in rec.depends:
                 callable_like.add(arg.arg)
+                rec.callback_kinds[arg.arg] = "untyped"
 
         # return / yield kind for dependency functions; return class for factories of project objects
         returns = getattr(func.node, "returns", None)
@@ -560,6 +749,9 @@ def build_summaries(
             if rclass is None and isinstance(returns, ast.Constant) and isinstance(returns.value, str) and returns.value in module_defs:
                 rclass = module_defs[returns.value] if module_defs[returns.value] in classes else None
             rec.returns_class = rclass
+        if returns is not None:
+            rec.returns_dotted = facts.canonical(rdotted) or rdotted
+            rec.returns_builtin = _builtin_annotation(returns, func.resolve) is not None
         if rec.returns_class is None:
             for node in func.scope_nodes():
                 if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
@@ -580,12 +772,37 @@ def build_summaries(
         rec.idempotency_signal = any(m in texts for m in IDEMPOTENCY_MARKERS) or any(
             any(m in a.arg.lower() for m in ("idempot", "dedup")) for a in func.params()
         )
+        loop_vars: Set[str] = set()
+        comp_vars: Set[str] = set()
+        nested_defs = {n.name for n in func.scope_nodes() if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(func.node):  # comprehension targets live in their own scope but read like locals
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                for gen in node.generators:
+                    comp_vars |= {n.id for n in ast.walk(gen.target) if isinstance(n, ast.Name)}
         for node in func.scope_nodes():
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                loop_vars |= {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}
             # locals bound to project instances, project call results, or external values
             binding_targets: List[str] = []
             value: Optional[ast.AST] = None
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                 binding_targets, value = [node.targets[0].id], node.value
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], (ast.Tuple, ast.List)):
+                targets = [e.id for e in node.targets[0].elts if isinstance(e, ast.Name)]
+                values = node.value.elts if isinstance(node.value, (ast.Tuple, ast.List)) and len(node.value.elts) == len(node.targets[0].elts) else None
+                if values is not None:  # a, b = f(), g(): pairwise
+                    for elt, val in zip(node.targets[0].elts, values):
+                        if isinstance(elt, ast.Name):
+                            _bind_origin(rec, elt.id, val, func, module_defs, classes, facts, project_roots, kinds, param_external, param_builtin, cls_record)
+                else:  # a, b = call(): every target shares the call's origin class (external/builtin), never a project class
+                    inner = node.value.value if isinstance(node.value, ast.Await) else node.value
+                    origin = _call_origin_class(inner, func, module_defs, facts, project_roots, kinds, param_external, param_builtin, rec, cls_record)
+                    for name in targets:
+                        if origin in {"external", "builtin"} and name not in kinds:
+                            rec.local_origin[name] = (origin, "")
+                        elif origin is None:
+                            rec.local_origin.setdefault(name, ("unpack", ""))
+                continue
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
                 binding_targets, value = [node.target.id], node.value
                 adotted = annotation_to_dotted(node.annotation, func.resolve)
@@ -611,38 +828,7 @@ def build_summaries(
                                 if root in param_external or rec.local_origin.get(root, ("", ""))[0] == "external" or kinds.get(root) or (root == "self" and f"self.{cparts[1]}" in kinds):
                                     rec.local_origin[item.optional_vars.id] = ("external", "")
             if binding_targets and value is not None:
-                inner = value.value if isinstance(value, ast.Await) else value
-                name0 = binding_targets[0]
-                if isinstance(inner, LITERAL_VALUES) and name0 not in kinds and not (isinstance(inner, ast.Constant) and inner.value is None):
-                    rec.local_origin[name0] = ("builtin", "")
-                elif isinstance(inner, (ast.Attribute, ast.Subscript)) and name0 not in kinds:
-                    aparts = dotted_name(inner.value if isinstance(inner, ast.Subscript) else inner)
-                    root = aparts[0] if aparts else None
-                    if root and (root in param_external or root in param_builtin or rec.local_origin.get(root, ("", ""))[0] in {"external", "builtin"} or kinds.get(root)):
-                        rec.local_origin[name0] = ("external", "")
-                    elif root == "self" and aparts and len(aparts) >= 2 and cls_record is not None and (cls_record.attrs.get(aparts[1]) is not None) and (cls_record.attrs[aparts[1]].kind or (cls_record.attrs[aparts[1]].type or "").startswith("builtins.")):
-                        rec.local_origin[name0] = ("external", "")
-                if isinstance(inner, ast.Call):
-                    cparts = dotted_name(inner.func)
-                    cdotted = (func.resolve(cparts) or module_defs.get(cparts[0])) if cparts else None
-                    canon = _canonical_class(cdotted, classes, facts, project_roots)
-                    name = binding_targets[0]
-                    if canon:
-                        rec.instance_of[name] = canon
-                    elif cdotted and _is_project_dotted(cdotted, project_roots, facts):
-                        rec.local_origin[name] = ("ret", cdotted)
-                    elif cparts and len(cparts) == 1 and cparts[0] in module_defs:
-                        rec.local_origin[name] = ("ret", module_defs[cparts[0]])
-                    elif cdotted and name not in kinds:
-                        rec.local_origin[name] = ("external", "")
-                    elif cparts and len(cparts) == 1 and cparts[0] in BUILTIN_NAMES and name not in kinds and not any(cparts[0] in sc.bound or cparts[0] in sc.imports for sc in func.scopes):
-                        rec.local_origin[name] = ("builtin", "")  # x = dict(...), s = str(...)
-                    elif cparts and len(cparts) >= 2 and name not in kinds:
-                        root = cparts[0]
-                        if root in param_external or root in param_builtin or rec.local_origin.get(root, ("", ""))[0] in {"external", "builtin"} or kinds.get(root) or (root == "self" and f"self.{cparts[1]}" in kinds):
-                            rec.local_origin[name] = ("external", "")
-                    elif isinstance(inner.func, ast.Attribute) and isinstance(inner.func.value, (ast.Await, ast.Call)) and name not in kinds:
-                        rec.local_origin[name] = ("external", "")  # (await session.execute(...)).scalars()
+                _bind_origin(rec, binding_targets[0], value, func, module_defs, classes, facts, project_roots, kinds, param_external, param_builtin, cls_record)
             if not isinstance(node, ast.Call):
                 continue
             call = node
@@ -678,33 +864,75 @@ def build_summaries(
                     cdotted = module_defs[name]
                 if cdotted and _is_project_dotted(cdotted, project_roots, facts):
                     site.arg_callables.append((position, cdotted))
+            for i, arg in enumerate(call.args):
+                if isinstance(arg, ast.Lambda):  # lambda v: target(v): a wrapper with one verifiable destination
+                    target = _lambda_target(arg, func, module_defs, facts, project_roots)
+                    if target:
+                        site.arg_callables.append((i, target))
+                elif isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name) and arg.value.id in rec.instance_of:
+                    site.arg_callables.append((i, f"{rec.instance_of[arg.value.id]}.{arg.attr}"))  # worker.run handed as a callback
+            for kw in call.keywords:
+                if isinstance(kw.value, ast.Lambda) and kw.arg:
+                    target = _lambda_target(kw.value, func, module_defs, facts, project_roots)
+                    if target:
+                        site.arg_callables.append((kw.arg, target))
             dotted = func.resolve(parts) if parts else None
             if dotted:
                 site.target, site.status = dotted, "candidate"
             elif parts:
                 root = parts[0]
                 root_is_local = root in params or any(root in sc.bound for sc in func.scopes[1:])  # parameter or local: shadows module names
-                if root in {"self", "cls"} and func.class_name and len(parts) == 2:
+                if root in {"self", "cls"} and owner_class and len(parts) == 2:
                     site.target = f"{module_defs.get(func.class_name, func.class_name)}.{parts[1]}"
                     site.status, site.has_receiver = "candidate", True
-                elif root in {"self", "cls"} and func.class_name and len(parts) == 3:
+                elif root in {"self", "cls"} and owner_class and len(parts) == 3:
                     rec.self_attr_receivers.add(parts[1])
                     if f"self.{parts[1]}" in kinds:
                         site.status, site.target = "external", f"{kinds[f'self.{parts[1]}']}.{parts[2]}"
                     else:
                         site.status, site.hint, site.has_receiver = "hint", ("attr", parts[1], parts[2]), True
+                elif root in {"self", "cls"} and owner_class and len(parts) == 4:
+                    site.status, site.hint, site.has_receiver = "hint", ("attr2", parts[1], parts[2], parts[3]), True
+                elif root in {"self", "cls"} and owner_class:
+                    site.origin = "attribute_chain"
                 elif root_is_local:
+                    origin_kind = rec.local_origin.get(root, ("", ""))[0]
                     if root in rec.instance_of and len(parts) == 2:
                         site.target = f"{rec.instance_of[root]}.{parts[1]}"
                         site.status, site.has_receiver = "candidate", True
+                    elif root in rec.instance_of and len(parts) == 3:
+                        site.status, site.hint, site.has_receiver = "hint", ("iattr", rec.instance_of[root], parts[1], parts[2]), True
                     elif len(parts) == 1 and root in callable_like and root in params:
-                        site.status, site.hint = "hint", ("callback", root)
-                    elif len(parts) == 2 and (root in param_builtin or rec.local_origin.get(root, ("", ""))[0] == "builtin"):
+                        site.status, site.hint = "hint", ("callback", root, rec.callback_kinds.get(root, "untyped"))
+                    elif len(parts) == 2 and (root in param_builtin or origin_kind == "builtin"):
                         site.status = "builtin"  # str/dict/list methods on a builtin-typed value
-                    elif len(parts) == 2 and (root in param_external or kinds.get(root) or rec.local_origin.get(root, ("", ""))[0] == "external"):
+                    elif len(parts) == 2 and (root in param_external or kinds.get(root) or origin_kind == "external"):
                         site.status, site.target = "external", f"{kinds.get(root) or 'external'}.{parts[1]}"
-                    elif len(parts) == 2 and rec.local_origin.get(root, ("", ""))[0] == "ret":
+                    elif len(parts) == 2 and origin_kind == "ret":
                         site.status, site.hint, site.has_receiver = "hint", ("ret", rec.local_origin[root][1], parts[1]), True
+                    elif len(parts) == 1 and root in rec.callback_kinds and (root in params or root not in own_bound):
+                        site.status, site.hint = "hint", ("callback", root, rec.callback_kinds[root])
+                    else:
+                        if len(parts) == 1 and root in nested_defs:
+                            site.origin = "nested_function"  # a def inside this function, called locally: not followed (documented limit)
+                        elif root in loop_vars:
+                            site.origin = "loop_target"
+                        elif root in comp_vars:
+                            site.origin = "comprehension"
+                        elif origin_kind == "unpack":
+                            site.origin = "unpack"
+                        elif origin_kind == "callback_result":
+                            site.origin = "callback_result"
+                        elif root in params:
+                            site.origin = "untyped_param"
+                        elif parent_state is not None and root not in own_bound:
+                            site.origin = "closure_unknown"
+                        else:
+                            site.origin = "call_result_unknown" if origin_kind == "ret" else "local_unknown"
+                elif root in comp_vars and len(parts) == 2:
+                    site.origin = "comprehension"
+                elif parent_state is not None and root not in own_bound and root not in module_scope.bound and root not in module_defs and root not in module_scope.imports and root not in BUILTIN_NAMES:
+                    site.origin = "closure_unknown"  # read from an enclosing scope the parent could not type either
                 elif root in module_defs and len(parts) <= 2:
                     site.target = module_defs[root] + ("." + parts[1] if len(parts) == 2 else "")
                     site.status = "candidate"
@@ -758,4 +986,5 @@ def build_summaries(
                 if info is not None and info.factory and not parts[2:3] == ["begin_nested"]:
                     rec.creates_session = True
         records.append(rec)
+        built[func.qualname] = (rec, kinds, param_external, param_builtin)
     return records, list(classes.values())
