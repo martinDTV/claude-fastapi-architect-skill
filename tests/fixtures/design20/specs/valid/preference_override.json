@@ -1,0 +1,7 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "tiny-hex",
+  "functional": {"modules": [{"name": "ledger", "entities": [{"name": "Entry", "fields": [{"name": "amount", "type": "decimal", "min_value": 0}]}]}]},
+  "architecture": {"style_preference": "hexagonal"},
+  "integrations": [{"name": "fx_rates", "kind": "http", "direction": "outbound", "criticality": "low", "module": "ledger"}]
+}

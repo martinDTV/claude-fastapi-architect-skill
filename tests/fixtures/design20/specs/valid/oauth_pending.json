@@ -1,0 +1,6 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "portal",
+  "functional": {"modules": [{"name": "profiles", "entities": [{"name": "Profile", "fields": [{"name": "handle", "type": "str", "max_length": 30}]}]}]},
+  "security": {"authentication": "oauth2_jwt", "authorization": "role"}
+}

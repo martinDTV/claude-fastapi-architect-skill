@@ -1,0 +1,16 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "marketplace",
+  "scope": {"size": "large", "team_size": 9},
+  "functional": {
+    "modules": [
+      {"name": "catalog", "entities": [{"name": "Listing", "fields": [{"name": "title", "type": "str"}]}]},
+      {"name": "carts", "depends_on": ["catalog"], "entities": [{"name": "Cart", "fields": [{"name": "owner", "type": "str"}]}]},
+      {"name": "checkout", "depends_on": ["carts"], "entities": [{"name": "Payment", "fields": [{"name": "amount", "type": "decimal"}]}]},
+      {"name": "shipping", "depends_on": ["checkout"], "entities": [{"name": "Shipment", "fields": [{"name": "carrier", "type": "str"}]}]}
+    ]
+  },
+  "security": {"authentication": "api_key"},
+  "architecture": {"independent_deployment": true},
+  "decisions": [{"id": "ADR-7", "title": "Deploy each bounded context independently", "status": "accepted", "rationale": "Teams release on different cadences and the checkout path has its own SLO."}]
+}

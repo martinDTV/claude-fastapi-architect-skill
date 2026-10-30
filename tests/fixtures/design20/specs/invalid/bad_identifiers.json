@@ -1,0 +1,1 @@
+{"schema": "fastapi-architect/spec/1.0", "name": "x", "package": "../evil", "functional": {"modules": [{"name": "Catalog-Items", "entities": [{"name": "item", "fields": [{"name": "Full Name", "type": "str"}]}]}]}, "x-expect": ["spec.package", "spec.functional.modules[0].name", "spec.functional.modules[0].entities[0].name", "spec.functional.modules[0].entities[0].fields[0].name"]}

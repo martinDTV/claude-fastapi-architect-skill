@@ -1,0 +1,9 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "notes",
+  "functional": {
+    "modules": [
+      {"name": "notes", "entities": [{"name": "Note", "fields": [{"name": "title", "type": "str", "max_length": 80}, {"name": "body", "type": "str", "required": false}]}]}
+    ]
+  }
+}

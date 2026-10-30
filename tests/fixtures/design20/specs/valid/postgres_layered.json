@@ -1,0 +1,9 @@
+{
+  "schema": "fastapi-architect/spec/1.0",
+  "name": "readings",
+  "functional": {"modules": [{"name": "sensors", "entities": [{"name": "Reading", "fields": [{"name": "sensor", "type": "str", "max_length": 40}, {"name": "value", "type": "float"}, {"name": "taken_on", "type": "date"}], "operations": ["create", "list", "get"]}]}]},
+  "persistence": {"kind": "postgresql", "migrations": true},
+  "security": {"authentication": "none"},
+  "nonfunctional": {"consistency": "eventual"},
+  "infrastructure": {"broker": true}
+}

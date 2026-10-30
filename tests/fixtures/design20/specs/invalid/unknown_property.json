@@ -1,0 +1,1 @@
+{"schema": "fastapi-architect/spec/1.0", "name": "x", "functional": {"modules": [{"name": "a", "entities": [{"name": "A", "fields": [{"name": "f", "type": "str"}]}]}]}, "persistance": {"kind": "memory"}, "x-expect": ["spec.persistance: unknown property"]}
