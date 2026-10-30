@@ -96,6 +96,7 @@ class ProjectFacts:
     dependency_alias_labels: Dict[str, str] = field(default_factory=dict)  # alias -> source text of the Depends() argument (require(p.X))
     route_contracts: List[Dict[str, Any]] = field(default_factory=list)  # v1.7: security contract per route (filled by rules.security)
     alias_types: Dict[str, str] = field(default_factory=dict)  # Annotated alias -> raw dotted type (resolved lazily through re-exports)
+    commit_loops: Dict[str, int] = field(default_factory=dict)  # v1.8: structural kinds of commit-in-loop sites seen by rules.transactions
 
     # ---- lookups ------------------------------------------------------------
     def canonical(self, dotted: Optional[str]) -> Optional[str]:
@@ -192,6 +193,7 @@ class ProjectFacts:
             "layers": {"source": self.layer_source, "counts": dict(sorted(layer_counts.items()))},
             "config_source": self.config_source,
             "parse_failures": len(self.parse_failures),
+            "commit_loops": dict(sorted(self.commit_loops.items())),  # schema 1.6: per_item | batch | paginated | convergence | retry
         }
 
 

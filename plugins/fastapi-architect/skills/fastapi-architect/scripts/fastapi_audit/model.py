@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 TOOL_NAME = "audit_fastapi"
-TOOL_VERSION = "1.7.0"
+TOOL_VERSION = "1.8.0"
 # 1.0: base report. 1.1: environment/suppression fields. 1.2: category, fingerprint,
 # verification, recommended_test, migration environment, facts/config/comparison blocks.
 # 1.3: evidence and call_path per finding, interprocedural block, reliability category.
@@ -18,7 +18,7 @@ TOOL_VERSION = "1.7.0"
 # 1.5: top-level `contracts` block (security contract per route); `evidence_state` per finding and
 #      `by_evidence_state` in the summary; `contracts` category for declared, opt-in contracts.
 # Every field of an earlier schema keeps its name, type and meaning.
-SCHEMA_VERSION = "1.5"
+SCHEMA_VERSION = "1.6"
 
 EVIDENCE_VERIFIED = "verified"  # pattern and symbols resolved directly from the AST
 EVIDENCE_INFERRED = "inferred"  # a type or flow was propagated from callers/dependencies or guessed from names
@@ -688,6 +688,24 @@ RULES.update(
     }
 )
 
+# ---- v1.8 transactional precision ------------------------------------------
+RULES.update(
+    {
+        "TX_COMMIT_INSIDE_BEGIN_BLOCK": {
+            "severity": "high",
+            "category": "transactions",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "commit() is called inside a 'with session.begin()' block. The context manager owns "
+                "that transaction and commits it on exit; the explicit commit closes it early, and any "
+                "statement after it in the block raises InvalidRequestError ('Can't operate on closed "
+                "transaction inside context manager'; SQLAlchemy 2.0, reproduced on PostgreSQL). When the "
+                "commit is the last statement it is redundant (medium). Remove it or drop the begin() block."
+            ),
+        },
+    }
+)
+
 RULE_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     category: tuple(sorted(r for r, meta in RULES.items() if meta["category"] == category))
     for category in CATEGORIES
@@ -716,6 +734,8 @@ class Finding:
     evidence: str = EVIDENCE_VERIFIED  # schema 1.3
     call_path: Optional[Tuple[str, ...]] = None  # schema 1.3: caller -> ... -> symbol
     evidence_state: str = ""  # schema 1.5: one of EVIDENCE_STATES (set by the engine after classification)
+    details: Optional[Dict[str, object]] = None  # schema 1.6: rule-specific structured facts (loop_kind, ...)
+    remediation: Optional[Dict[str, object]] = None  # schema 1.6: structured, non-applied remediation proposal
 
     @property
     def fingerprint(self) -> str:
@@ -752,6 +772,8 @@ class Finding:
             "evidence": self.evidence,
             "call_path": list(self.call_path) if self.call_path else None,
             "evidence_state": self.evidence_state or evidence_state_for(self),
+            "details": dict(self.details) if self.details else None,  # schema 1.6
+            "remediation": dict(self.remediation) if self.remediation else None,  # schema 1.6
         }
 
     def sort_key(self) -> Tuple[str, int, int, str, str, str]:
@@ -788,6 +810,7 @@ def new_finding(
     severity: Optional[str] = None,
     evidence: str = EVIDENCE_VERIFIED,
     call_path: Optional[Sequence[str]] = None,
+    details: Optional[Dict[str, object]] = None,
 ) -> Finding:
     """Build a Finding with severity, category and default verification from the catalogue."""
     meta = RULES[rule]
@@ -807,4 +830,5 @@ def new_finding(
         recommended_test=recommended_test,
         evidence=evidence,
         call_path=tuple(call_path) if call_path else None,
+        details=dict(details) if details else None,
     )

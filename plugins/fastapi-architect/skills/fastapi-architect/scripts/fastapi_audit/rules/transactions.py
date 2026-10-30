@@ -59,8 +59,120 @@ def _receiver_evidence(call: ast.Call, kinds: Dict[str, str], evidence: Optional
     return "inferred"
 
 
-def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None) -> None:
+CHUNK_FUNCS = frozenset({"chunked", "batched", "chunks", "ichunked", "sliced", "partition", "grouper", "islice", "take"})
+
+
+def _is_empty_test(test: ast.AST) -> bool:
+    """``not rows`` / ``len(rows) == 0`` / ``len(rows) < n`` / ``rows is None`` / ``rows == []``: the loop ran out of data."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) and isinstance(test.operand, (ast.Name, ast.Attribute, ast.Call, ast.Subscript)):
+        return True
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, op, right = test.left, test.ops[0], test.comparators[0]
+        if isinstance(op, (ast.Is, ast.Eq)) and isinstance(right, ast.Constant) and right.value is None:
+            return True
+        if isinstance(op, ast.Eq) and isinstance(right, (ast.List, ast.Tuple)) and not right.elts:
+            return True
+        if isinstance(left, ast.Call) and isinstance(left.func, ast.Name) and left.func.id == "len" and isinstance(op, (ast.Lt, ast.LtE, ast.Eq)):
+            return True
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        return any(_is_empty_test(v) for v in test.values)
+    return False
+
+
+def _counted_names(stmts: List[ast.stmt]) -> Set[str]:
+    """Names incremented in the loop body (``n += 1``): batch counters."""
+    return {n.target.id for n in iter_scope_nodes(stmts) if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) and isinstance(n.op, ast.Add)}
+
+
+def _is_size_test(test: ast.AST, counters: Set[str]) -> bool:
+    """``len(buffer) >= N`` / ``n >= N`` (``n`` incremented in the loop): a batch reached its size."""
+    for sub in ast.walk(test):
+        if isinstance(sub, ast.Compare) and len(sub.ops) == 1 and isinstance(sub.ops[0], (ast.GtE, ast.Gt, ast.Eq)):
+            left = sub.left
+            if isinstance(left, ast.Call) and isinstance(left.func, ast.Name) and left.func.id == "len":
+                return True
+            if isinstance(left, ast.Name) and left.id in counters:
+                return True
+    return False
+
+
+def _exits_under_if(stmts: List[ast.stmt], test: Optional[ast.AST] = None, out: Optional[List[ast.AST]] = None) -> List[ast.AST]:
+    """Tests of the ``if`` branches that leave the loop (break/return), not entering nested loops or functions."""
+    out = out if out is not None else []
+    for stmt in stmts:
+        if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(stmt, (ast.Break, ast.Return)) and test is not None:
+            out.append(test)
+            continue
+        if isinstance(stmt, ast.If):
+            _exits_under_if(stmt.body, stmt.test, out)
+            _exits_under_if(stmt.orelse, test, out)
+            continue
+        for field_name in ("body", "orelse", "finalbody"):
+            children = getattr(stmt, field_name, None)
+            if isinstance(children, list):
+                _exits_under_if([c for c in children if isinstance(c, ast.stmt)], test, out)
+        for handler in getattr(stmt, "handlers", []) or []:
+            _exits_under_if(handler.body, test, out)
+    return out
+
+
+def _guard_of(loop_body: List[ast.stmt], call: ast.Call) -> Optional[ast.If]:
+    """Innermost ``if`` inside the loop whose body contains ``call``."""
+    guards = [n for n in iter_scope_nodes(loop_body) if isinstance(n, ast.If) and any(c is call for c in _calls_in(n.body))]
+    return max(guards, key=lambda n: n.lineno) if guards else None
+
+
+def classify_commit_loop(node: ast.AST, call: ast.Call) -> Tuple[str, str]:
+    """Structural kind of a commit inside a loop, with the evidence that decided it:
+
+    * ``batch``: the commit is guarded by a modulo test, a buffer-size test (``len(buf) >= N`` or a counter
+      incremented in the loop), or the loop iterates over chunks (``chunked(...)``, ``range(a, b, step)``);
+    * ``paginated``: a ``while``/``range`` loop that stops when a fetched page is empty;
+    * ``convergence``: a ``while``/``range`` loop that stops when a non-emptiness condition holds;
+    * ``per_item``: none of the above. Names (``BATCH_SIZE``) prove nothing and are never consulted.
+    """
+    body = node.body
+    guard = _guard_of(body, call)
+    if guard is not None:
+        if any(isinstance(b, ast.BinOp) and isinstance(b.op, ast.Mod) for b in ast.walk(guard.test)):
+            return "batch", "commit guarded by a modulo test on the iteration counter"
+        if _is_size_test(guard.test, _counted_names(body)):
+            return "batch", "commit guarded by a buffer-size or counter threshold"
+    if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.iter, ast.Call):
+        fparts = dotted_name(node.iter.func) or []
+        fname = fparts[-1] if fparts else ""
+        if fname in CHUNK_FUNCS or (fname == "range" and len(node.iter.args) == 3):
+            return "batch", f"loop iterates over chunks ({fname})"
+    bounded = isinstance(node, ast.While) or (
+        isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.iter, ast.Call) and (dotted_name(node.iter.func) or [""])[-1] in {"range", "count", "repeat"}
+    )
+    exits = _exits_under_if(body)
+    if exits and bounded:
+        if any(_is_empty_test(t) for t in exits):
+            return "paginated", "loop stops when a fetched page is empty"
+        return "convergence", "bounded loop that stops when a condition holds"
+    return "per_item", "no batching, pagination or convergence structure around the commit"
+
+
+DELIBERATE_LOOP_KINDS = frozenset({"batch", "paginated", "convergence"})
+
+
+def _census(ctx: FileContext, kind: str) -> None:
+    """Count every classified commit loop in the project facts, reported or not, so the classification is visible."""
+    facts = ctx.facts
+    if facts is not None and hasattr(facts, "commit_loops"):
+        facts.commit_loops[kind] = facts.commit_loops.get(kind, 0) + 1
+
+
+def _session_commits(stmts: List[ast.stmt], kinds: Dict[str, str]) -> List[ast.Call]:
+    return [c for c in _calls_in(stmts) if isinstance(c.func, ast.Attribute) and c.func.attr == "commit" and _session_receiver(c, kinds) is not None]
+
+
+def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None, skip: Optional[Set[int]] = None) -> None:
     reported: Set[int] = set()
+    skip = skip or set()
     for node in func.scope_nodes():
         if not isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             continue
@@ -71,17 +183,14 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
         if tries and len(node.body) == len(tries) + sum(1 for s in node.body if isinstance(s, (ast.Expr, ast.Assign)) and not isinstance(getattr(s, "value", None), ast.Call)):
             retry_like = any(isinstance(n, (ast.Break, ast.Return)) for t in tries for n in iter_scope_nodes(t.body))
             if retry_like or isinstance(node, ast.While):
+                if _session_commits(node.body, kinds):
+                    _census(ctx, "retry" if retry_like else "worker_tick")
                 continue
-        # `if index % BATCH == 0: commit()` is explicit batching, which is what the rule asks for
-        batched: Set[int] = set()
-        for branch in iter_scope_nodes(node.body):
-            if isinstance(branch, ast.If) and any(isinstance(b, ast.BinOp) and isinstance(b.op, ast.Mod) for b in ast.walk(branch.test)):
-                batched |= {id(c) for c in _calls_in(branch.body)}
         for call in _calls_in(node.body):
             if not (isinstance(call.func, ast.Attribute) and call.func.attr == "commit"):
                 continue
-            if id(call) in batched:
-                continue
+            if id(call) in skip:
+                continue  # reported as a commit inside a begin() block
             if id(call) in reported:
                 break  # already reported for an enclosing loop
             confidence = _session_receiver(call, kinds)
@@ -91,6 +200,15 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
             ev = _receiver_evidence(call, kinds, evidence)
             if ev == "inferred" and confidence == "high":
                 confidence = "medium"
+            # v1.8: the loop's structure decides whether the commit is accidental (per item) or deliberate.
+            # Deliberate kinds (batch by modulo/size/chunks, pagination, convergence) are counted in
+            # facts.commit_loops and not reported, like retry loops since v1.6; the message of a per-item
+            # finding is unchanged, so its fingerprint is stable, and the kind and evidence live in details.
+            loop_kind, loop_evidence = classify_commit_loop(node, call)
+            _census(ctx, loop_kind)
+            if loop_kind in DELIBERATE_LOOP_KINDS:
+                reported.discard(id(call))
+                continue
             name = receiver_name(call)
             out.append(
                 new_finding(
@@ -111,9 +229,85 @@ def _commit_in_loop(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str],
                     environment=ctx.environment,
                     evidence=ev,
                     recommended_test="Make a later iteration fail and assert whether earlier rows should or should not remain committed.",
+                    details={"loop_kind": loop_kind, "loop_evidence": loop_evidence, "loop_line": node.lineno},
                 )
             )
             break  # one finding per loop
+
+
+def _commit_inside_begin(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], out: List[Finding], evidence: Optional[Dict[str, str]] = None) -> Set[int]:
+    """``x.commit()`` inside ``with x.begin():`` (v1.8). Returns the ids of the reported commit calls so the
+    commit-in-loop rule does not report the same line again."""
+    reported: Set[int] = set()
+
+    def walk(stmts: List[ast.stmt], active: Set[str], block_body: Optional[List[ast.stmt]] = None) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            opened: Set[str] = set()
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                for item in stmt.items:
+                    expr = item.context_expr
+                    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == "begin" and isinstance(expr.func.value, ast.Name):
+                        opened.add(expr.func.value.id)
+            if active:
+                for node in ast.walk(stmt) if not isinstance(stmt, (ast.With, ast.AsyncWith)) else []:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        continue
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "commit" and isinstance(node.func.value, ast.Name) and node.func.value.id in active and id(node) not in reported:
+                        receiver = node.func.value.id
+                        confidence = _session_receiver(node, kinds) or "medium"
+                        ev = _receiver_evidence(node, kinds, evidence)
+                        if ev == "inferred" and confidence == "high":
+                            confidence = "medium"
+                        reported.add(id(node))
+                        _census(ctx, "inside_begin")
+                        last = stmt is stmts[-1] and isinstance(stmt, (ast.Expr, ast.Assign, ast.AnnAssign)) and stmts is block_body
+                        out.append(
+                            new_finding(
+                                "TX_COMMIT_INSIDE_BEGIN_BLOCK",
+                                ctx.relpath,
+                                node.lineno,
+                                node.col_offset,
+                                (
+                                    f"'{receiver}.commit()' is called inside a 'with {receiver}.begin()' block in '{func.qualname}'. "
+                                    "The context manager owns that transaction and commits it on exit; the explicit commit closes it early. "
+                                    + (
+                                        "It is the last statement of the block, so today it is only redundant; the next statement added "
+                                        "after it (or the next loop iteration) will raise."
+                                        if last else
+                                        "Statements that follow it inside the block (including the next loop iteration) raise "
+                                        "sqlalchemy.exc.InvalidRequestError: \"Can't operate on closed transaction inside context manager\" "
+                                        "(reproduced on PostgreSQL with SQLAlchemy 2.0 in examples/tenant-ledger)."
+                                    )
+                                    + " Remove the inner commit (flush() if you need the SQL emitted) or drop the begin() block."
+                                ),
+                                confidence=confidence,
+                                symbol=f"{receiver}.commit",
+                                function=func.qualname,
+                                environment=ctx.environment,
+                                evidence=ev,
+                                severity="medium" if last else None,
+                                recommended_test=(
+                                    "Run the block against PostgreSQL: the statement after the inner commit raises InvalidRequestError; "
+                                    "without the inner commit every write of the block is visible together after exit."
+                                ),
+                                details={"follows": not last},
+                            )
+                        )
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                walk(stmt.body, active | opened, stmt.body if opened else block_body)
+                continue
+            for field_name in ("body", "orelse", "finalbody"):
+                children = getattr(stmt, field_name, None)
+                if isinstance(children, list) and children and not active:
+                    walk([c for c in children if isinstance(c, ast.stmt)], active, block_body)
+            if not active:
+                for handler in getattr(stmt, "handlers", []) or []:
+                    walk(handler.body, active, block_body)
+
+    walk(func.body, set())
+    return reported
 
 
 NETWORK_DEPTH = 2
@@ -395,7 +589,8 @@ def run(ctx: FileContext) -> List[Finding]:
         return out
     for func in ctx.functions:
         kinds, evidence = function_kinds_ex(func, ctx.facts, ctx.local_factories, ctx.relpath)
-        _commit_in_loop(ctx, func, kinds, out, evidence)
+        inside_begin = _commit_inside_begin(ctx, func, kinds, out, evidence)
+        _commit_in_loop(ctx, func, kinds, out, evidence, skip=inside_begin)
         _external_call_in_transaction(ctx, func, kinds, out)
         _read_modify_write(ctx, func, kinds, out)
         _commit_without_rollback(ctx, func, kinds, out, evidence)
