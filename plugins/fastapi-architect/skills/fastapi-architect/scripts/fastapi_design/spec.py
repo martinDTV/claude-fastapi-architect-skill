@@ -1,0 +1,623 @@
+"""Architecture contract: a declarative, versioned specification of the backend to design (v2.0, schema 1.0).
+
+The specification is plain JSON (never executed), validated strictly like ``.audit-fastapi.json``: unknown
+properties are errors unless prefixed ``x-``, identifiers are checked, enumerations are closed, and every
+problem is reported with its JSON path. Validation also records **provenance**: which values were written by
+the author (``explicit``) and which were filled with a default (``assumed``), so the architecture report can
+separate requirements from assumptions; ``decisions`` with ``status: pending`` and ``open_questions`` are the
+pending decisions.
+
+Top-level keys (``schema`` is required):
+
+* ``name``, ``package`` (python identifier, defaults from the name), ``description``;
+* ``scope``: ``size`` (small | medium | large), ``team_size``, ``expected_rps``, ``data_volume`` (small | medium | large);
+* ``functional``: ``modules`` (at least one) with ``entities`` (at least one, with ``fields`` and ``operations``) and ``depends_on``;
+* ``nonfunctional``: ``availability``, ``latency_p95_ms``, ``consistency`` (strong | eventual), ``auditability``, ``compliance``;
+* ``persistence``: ``kind`` (memory | postgresql), ``migrations``;
+* ``security``: ``authentication`` (none | api_key | oauth2_jwt | session), ``authorization`` (none | role | resource), ``multi_tenant``
+  (``enabled``, ``strategy`` shared_schema_rls | schema_per_tenant | database_per_tenant, ``tenant_param``);
+* ``integrations``: ``name``, ``kind`` (http | queue | smtp | storage | database), ``direction`` (outbound | inbound), ``criticality``;
+* ``infrastructure``: ``deployment`` (container | vm | serverless), ``cache``, ``broker``, ``regions``;
+* ``architecture``: ``style_preference`` (layered | modular_monolith | hexagonal | microservices), ``independent_deployment``;
+* ``decisions``: ``id``, ``title``, ``status`` (accepted | pending | rejected), ``rationale``;
+* ``components``: free list of named components with ``depends_on`` (documentation; validated for identifiers);
+* ``testing``: ``levels`` (unit | integration | contract | end_to_end), ``coverage_target``;
+* ``assumptions``, ``open_questions``: lists of strings.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import keyword
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+SPEC_SCHEMA = "fastapi-architect/spec/1.0"
+IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+CLASS_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$")
+FIELD_TYPES = ("str", "int", "float", "bool", "uuid", "datetime", "date", "decimal")
+OPERATIONS = ("create", "get", "list", "update", "delete")
+SIZES = ("small", "medium", "large")
+CONSISTENCY = ("strong", "eventual")
+PERSISTENCE = ("memory", "postgresql")
+AUTHENTICATION = ("none", "api_key", "oauth2_jwt", "session")
+AUTHORIZATION = ("none", "role", "resource")
+TENANT_STRATEGIES = ("shared_schema_rls", "schema_per_tenant", "database_per_tenant")
+INTEGRATION_KINDS = ("http", "queue", "smtp", "storage", "database")
+DIRECTIONS = ("outbound", "inbound")
+CRITICALITY = ("low", "medium", "high")
+DEPLOYMENTS = ("container", "vm", "serverless")
+STYLES = ("layered", "modular_monolith", "hexagonal", "microservices")
+DECISION_STATUS = ("accepted", "pending", "rejected")
+TEST_LEVELS = ("unit", "integration", "contract", "end_to_end")
+RESERVED_MODULE_NAMES = frozenset({"core", "api", "tests", "main", "modules", "services", "repositories", "schemas", "models", "ports", "adapters", "config", "db", "errors"})
+RESERVED_FIELD_NAMES = frozenset({"id", "tenant_id", "created_at", "updated_at"})
+TOP_LEVEL = ("schema", "name", "package", "description", "scope", "functional", "nonfunctional", "persistence", "security", "integrations", "infrastructure", "architecture", "decisions", "components", "testing", "assumptions", "open_questions")
+
+
+class SpecError(ValueError):
+    def __init__(self, source: Optional[str], errors: List[str]) -> None:
+        self.source = source or "<spec>"
+        self.errors = list(errors)
+        super().__init__(f"{self.source}: {len(self.errors)} specification error(s): " + "; ".join(self.errors))
+
+
+# --------------------------------------------------------------------------- #
+# model
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class FieldSpec:
+    name: str
+    type: str
+    required: bool = True
+    max_length: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    description: Optional[str] = None
+
+
+@dataclass
+class EntitySpec:
+    name: str  # ClassName
+    fields: List[FieldSpec]
+    operations: List[str]
+
+    @property
+    def snake(self) -> str:
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", self.name).lower()
+
+    @property
+    def plural(self) -> str:
+        """Collection name for routes and tables: entries, boxes, orders (regular English plurals only)."""
+        s = self.snake
+        if s.endswith("y") and len(s) > 1 and s[-2] not in "aeiou":
+            return s[:-1] + "ies"
+        if s.endswith(("s", "x", "z", "ch", "sh")):
+            return s + "es"
+        return s + "s"
+
+
+@dataclass
+class ModuleSpec:
+    name: str
+    description: str
+    entities: List[EntitySpec]
+    depends_on: List[str] = field(default_factory=list)
+
+
+@dataclass
+class IntegrationSpec:
+    name: str
+    kind: str
+    direction: str
+    criticality: str
+    module: Optional[str] = None
+
+
+@dataclass
+class DecisionSpec:
+    id: str
+    title: str
+    status: str
+    rationale: str
+
+
+@dataclass
+class Spec:
+    schema: str
+    name: str
+    package: str
+    description: str
+    scope: Dict[str, Any]
+    modules: List[ModuleSpec]
+    nonfunctional: Dict[str, Any]
+    persistence: Dict[str, Any]
+    security: Dict[str, Any]
+    integrations: List[IntegrationSpec]
+    infrastructure: Dict[str, Any]
+    architecture: Dict[str, Any]
+    decisions: List[DecisionSpec]
+    components: List[Dict[str, Any]]
+    testing: Dict[str, Any]
+    assumptions: List[str]
+    open_questions: List[str]
+    provenance: Dict[str, str]  # json path -> explicit | assumed
+    digest: str  # sha256 of the canonical source document
+    source: Optional[str] = None
+
+    @property
+    def multi_tenant(self) -> bool:
+        return bool(self.security["multi_tenant"]["enabled"])
+
+    def pending_decisions(self) -> List[str]:
+        out = [f"decision {d.id}: {d.title}" for d in self.decisions if d.status == "pending"]
+        out.extend(f"open question: {q}" for q in self.open_questions)
+        return out
+
+    def assumed_paths(self) -> List[str]:
+        return sorted(p for p, how in self.provenance.items() if how == "assumed")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "name": self.name,
+            "package": self.package,
+            "description": self.description,
+            "scope": dict(self.scope),
+            "functional": {"modules": [
+                {"name": m.name, "description": m.description, "depends_on": list(m.depends_on), "entities": [
+                    {"name": e.name, "operations": list(e.operations), "fields": [
+                        {k: v for k, v in {"name": f.name, "type": f.type, "required": f.required, "max_length": f.max_length, "min_value": f.min_value, "max_value": f.max_value, "description": f.description}.items() if v is not None}
+                        for f in e.fields
+                    ]} for e in m.entities
+                ]} for m in self.modules
+            ]},
+            "nonfunctional": dict(self.nonfunctional),
+            "persistence": dict(self.persistence),
+            "security": json.loads(json.dumps(self.security)),
+            "integrations": [{"name": i.name, "kind": i.kind, "direction": i.direction, "criticality": i.criticality, "module": i.module} for i in self.integrations],
+            "infrastructure": dict(self.infrastructure),
+            "architecture": dict(self.architecture),
+            "decisions": [{"id": d.id, "title": d.title, "status": d.status, "rationale": d.rationale} for d in self.decisions],
+            "components": list(self.components),
+            "testing": dict(self.testing),
+            "assumptions": list(self.assumptions),
+            "open_questions": list(self.open_questions),
+            "provenance": dict(sorted(self.provenance.items())),
+            "digest": self.digest,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# validation helpers
+# --------------------------------------------------------------------------- #
+
+
+class _V:
+    def __init__(self) -> None:
+        self.errors: List[str] = []
+        self.provenance: Dict[str, str] = {}
+
+    def unknown(self, obj: Dict[str, Any], known: Tuple[str, ...], path: str) -> None:
+        for key in obj:
+            if key not in known and not str(key).startswith("x-"):
+                self.errors.append(f"{path}.{key}: unknown property (known: {', '.join(known)}; use an 'x-' prefix for annotations)")
+
+    def obj(self, parent: Dict[str, Any], key: str, path: str, required: bool = False) -> Dict[str, Any]:
+        value = parent.get(key)
+        if value is None:
+            if required:
+                self.errors.append(f"{path}: required object is missing")
+            else:
+                self.provenance[path] = "assumed"
+            return {}
+        if not isinstance(value, dict):
+            self.errors.append(f"{path}: expected an object, got {type(value).__name__}")
+            return {}
+        self.provenance[path] = "explicit"
+        return value
+
+    def choice(self, obj: Dict[str, Any], key: str, path: str, options: Tuple[str, ...], default: Optional[str]) -> Optional[str]:
+        if key not in obj:
+            if default is not None:
+                self.provenance[f"{path}.{key}"] = "assumed"
+            return default
+        value = obj[key]
+        if not isinstance(value, str) or value not in options:
+            self.errors.append(f"{path}.{key}: expected one of {', '.join(options)}, got {value!r}")
+            return default
+        self.provenance[f"{path}.{key}"] = "explicit"
+        return value
+
+    def boolean(self, obj: Dict[str, Any], key: str, path: str, default: bool) -> bool:
+        if key not in obj:
+            self.provenance[f"{path}.{key}"] = "assumed"
+            return default
+        if not isinstance(obj[key], bool):
+            self.errors.append(f"{path}.{key}: expected true or false, got {obj[key]!r}")
+            return default
+        self.provenance[f"{path}.{key}"] = "explicit"
+        return bool(obj[key])
+
+    def integer(self, obj: Dict[str, Any], key: str, path: str, default: Optional[int], minimum: int = 0, maximum: Optional[int] = None) -> Optional[int]:
+        if key not in obj:
+            if default is not None:
+                self.provenance[f"{path}.{key}"] = "assumed"
+            return default
+        value = obj[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum or (maximum is not None and value > maximum):
+            self.errors.append(f"{path}.{key}: expected an integer between {minimum} and {maximum if maximum is not None else 'infinity'}, got {value!r}")
+            return default
+        self.provenance[f"{path}.{key}"] = "explicit"
+        return value
+
+    def text(self, obj: Dict[str, Any], key: str, path: str, default: Optional[str], pattern: Optional[re.Pattern] = None, required: bool = False) -> Optional[str]:
+        if key not in obj:
+            if required:
+                self.errors.append(f"{path}.{key}: required")
+            elif default is not None:
+                self.provenance[f"{path}.{key}"] = "assumed"
+            return default
+        value = obj[key]
+        if not isinstance(value, str) or not value.strip():
+            self.errors.append(f"{path}.{key}: expected a non-empty string, got {value!r}")
+            return default
+        if pattern is not None and not pattern.match(value):
+            self.errors.append(f"{path}.{key}: {value!r} does not match {pattern.pattern}")
+            return default
+        self.provenance[f"{path}.{key}"] = "explicit"
+        return value
+
+    def strings(self, obj: Dict[str, Any], key: str, path: str, options: Optional[Tuple[str, ...]] = None) -> List[str]:
+        if key not in obj:
+            return []
+        value = obj[key]
+        if not isinstance(value, list):
+            self.errors.append(f"{path}.{key}: expected a list of strings, got {type(value).__name__}")
+            return []
+        out: List[str] = []
+        for i, item in enumerate(value):
+            if not isinstance(item, str) or not item.strip():
+                self.errors.append(f"{path}.{key}[{i}]: expected a non-empty string, got {item!r}")
+            elif options is not None and item not in options:
+                self.errors.append(f"{path}.{key}[{i}]: expected one of {', '.join(options)}, got {item!r}")
+            else:
+                out.append(item)
+        self.provenance[f"{path}.{key}"] = "explicit"
+        return out
+
+
+def _ident(v: _V, value: Any, path: str, what: str) -> Optional[str]:
+    if not isinstance(value, str) or not IDENT_RE.match(value) or keyword.iskeyword(value):
+        v.errors.append(f"{path}: {what} must be a lowercase python identifier (a-z, 0-9, _), got {value!r}")
+        return None
+    return value
+
+
+def canonical_digest(document: Dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# validation
+# --------------------------------------------------------------------------- #
+
+
+def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional[Spec], List[str]]:
+    """``(spec, errors)``: the spec is None when there are errors."""
+    v = _V()
+    if not isinstance(document, dict):
+        return None, ["top level: expected an object"]
+    v.unknown(document, TOP_LEVEL, "spec")
+    schema = document.get("schema")
+    if schema != SPEC_SCHEMA:
+        v.errors.append(f"spec.schema: expected {SPEC_SCHEMA!r}, got {schema!r}")
+    name = v.text(document, "name", "spec", None, NAME_RE, required=True) or "service"
+    default_package = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "service"
+    if default_package[0].isdigit():
+        default_package = "svc_" + default_package
+    package = v.text(document, "package", "spec", default_package)
+    if package is not None and (not IDENT_RE.match(package) or keyword.iskeyword(package)):
+        v.errors.append(f"spec.package: {package!r} must be a lowercase python identifier")
+    description = v.text(document, "description", "spec", f"{name} backend")
+
+    scope_in = v.obj(document, "scope", "spec.scope")
+    v.unknown(scope_in, ("size", "team_size", "expected_rps", "data_volume"), "spec.scope")
+    scope = {
+        "size": v.choice(scope_in, "size", "spec.scope", SIZES, "small"),
+        "team_size": v.integer(scope_in, "team_size", "spec.scope", 2, 1, 1000),
+        "expected_rps": v.integer(scope_in, "expected_rps", "spec.scope", 50, 0, 10_000_000),
+        "data_volume": v.choice(scope_in, "data_volume", "spec.scope", SIZES, "small"),
+    }
+
+    functional = v.obj(document, "functional", "spec.functional", required=True)
+    v.unknown(functional, ("modules",), "spec.functional")
+    modules: List[ModuleSpec] = []
+    raw_modules = functional.get("modules")
+    if not isinstance(raw_modules, list) or not raw_modules:
+        v.errors.append("spec.functional.modules: expected a non-empty list of modules")
+        raw_modules = []
+    module_names: List[str] = []
+    for i, raw in enumerate(raw_modules):
+        path = f"spec.functional.modules[{i}]"
+        if not isinstance(raw, dict):
+            v.errors.append(f"{path}: expected an object")
+            continue
+        v.unknown(raw, ("name", "description", "entities", "depends_on"), path)
+        mname = _ident(v, raw.get("name"), f"{path}.name", "module name")
+        if mname in RESERVED_MODULE_NAMES:
+            v.errors.append(f"{path}.name: {mname!r} is reserved")
+            mname = None
+        if mname in module_names:
+            v.errors.append(f"{path}.name: duplicate module {mname!r}")
+        if mname:
+            module_names.append(mname)
+        mdesc = v.text(raw, "description", path, f"{mname or 'module'} module")
+        entities: List[EntitySpec] = []
+        raw_entities = raw.get("entities")
+        if not isinstance(raw_entities, list) or not raw_entities:
+            v.errors.append(f"{path}.entities: expected a non-empty list of entities")
+            raw_entities = []
+        entity_names: List[str] = []
+        for j, ent in enumerate(raw_entities):
+            epath = f"{path}.entities[{j}]"
+            if not isinstance(ent, dict):
+                v.errors.append(f"{epath}: expected an object")
+                continue
+            v.unknown(ent, ("name", "fields", "operations"), epath)
+            ename = ent.get("name")
+            if not isinstance(ename, str) or not CLASS_RE.match(ename):
+                v.errors.append(f"{epath}.name: entity name must be a CapitalizedWord, got {ename!r}")
+                ename = None
+            if ename in entity_names:
+                v.errors.append(f"{epath}.name: duplicate entity {ename!r}")
+            if ename:
+                entity_names.append(ename)
+            fields: List[FieldSpec] = []
+            raw_fields = ent.get("fields")
+            if not isinstance(raw_fields, list) or not raw_fields:
+                v.errors.append(f"{epath}.fields: expected a non-empty list of fields")
+                raw_fields = []
+            seen_fields: List[str] = []
+            for k, fld in enumerate(raw_fields):
+                fpath = f"{epath}.fields[{k}]"
+                if not isinstance(fld, dict):
+                    v.errors.append(f"{fpath}: expected an object")
+                    continue
+                v.unknown(fld, ("name", "type", "required", "max_length", "min_value", "max_value", "description"), fpath)
+                fname = _ident(v, fld.get("name"), f"{fpath}.name", "field name")
+                if fname in RESERVED_FIELD_NAMES:
+                    v.errors.append(f"{fpath}.name: {fname!r} is generated automatically and cannot be declared")
+                    fname = None
+                if fname in seen_fields:
+                    v.errors.append(f"{fpath}.name: duplicate field {fname!r}")
+                if fname:
+                    seen_fields.append(fname)
+                ftype = v.choice(fld, "type", fpath, FIELD_TYPES, None)
+                if ftype is None and "type" not in fld:
+                    v.errors.append(f"{fpath}.type: required (one of {', '.join(FIELD_TYPES)})")
+                required = v.boolean(fld, "required", fpath, True)
+                max_length = v.integer(fld, "max_length", fpath, None, 1, 100_000)
+                if max_length is not None and ftype != "str":
+                    v.errors.append(f"{fpath}.max_length: only valid for type 'str'")
+                min_value = fld.get("min_value")
+                max_value = fld.get("max_value")
+                for key, val in (("min_value", min_value), ("max_value", max_value)):
+                    if val is not None:
+                        if isinstance(val, bool) or not isinstance(val, (int, float)):
+                            v.errors.append(f"{fpath}.{key}: expected a number, got {val!r}")
+                        elif ftype not in ("int", "float", "decimal"):
+                            v.errors.append(f"{fpath}.{key}: only valid for numeric types")
+                        else:
+                            v.provenance[f"{fpath}.{key}"] = "explicit"
+                if isinstance(min_value, (int, float)) and isinstance(max_value, (int, float)) and not isinstance(min_value, bool) and min_value > max_value:
+                    v.errors.append(f"{fpath}: min_value {min_value} is greater than max_value {max_value}")
+                fdesc = v.text(fld, "description", fpath, None)
+                if fname and ftype:
+                    fields.append(FieldSpec(fname, ftype, required, max_length, min_value if isinstance(min_value, (int, float)) else None, max_value if isinstance(max_value, (int, float)) else None, fdesc))
+            operations = v.strings(ent, "operations", epath, OPERATIONS) if "operations" in ent else list(OPERATIONS)
+            if "operations" not in ent:
+                v.provenance[f"{epath}.operations"] = "assumed"
+            elif not operations:
+                v.errors.append(f"{epath}.operations: expected at least one of {', '.join(OPERATIONS)}")
+            if ename and fields:
+                entities.append(EntitySpec(ename, fields, sorted(set(operations), key=OPERATIONS.index)))
+        depends_on = [d for d in v.strings(raw, "depends_on", path) if _ident(v, d, f"{path}.depends_on", "module name")]
+        if mname and mname in depends_on:
+            v.errors.append(f"{path}.depends_on: a module cannot depend on itself")
+        if mname and entities:
+            modules.append(ModuleSpec(mname, mdesc or f"{mname} module", entities, depends_on))
+    for m in modules:
+        for d in m.depends_on:
+            if d not in module_names:
+                v.errors.append(f"spec.functional.modules[{module_names.index(m.name)}].depends_on: unknown module {d!r}")
+    _check_cycles(v, modules)
+
+    nf_in = v.obj(document, "nonfunctional", "spec.nonfunctional")
+    v.unknown(nf_in, ("availability", "latency_p95_ms", "consistency", "auditability", "compliance"), "spec.nonfunctional")
+    nonfunctional = {
+        "availability": v.text(nf_in, "availability", "spec.nonfunctional", "99.5%"),
+        "latency_p95_ms": v.integer(nf_in, "latency_p95_ms", "spec.nonfunctional", 300, 1, 600_000),
+        "consistency": v.choice(nf_in, "consistency", "spec.nonfunctional", CONSISTENCY, "strong"),
+        "auditability": v.boolean(nf_in, "auditability", "spec.nonfunctional", False),
+        "compliance": v.strings(nf_in, "compliance", "spec.nonfunctional"),
+    }
+
+    p_in = v.obj(document, "persistence", "spec.persistence")
+    v.unknown(p_in, ("kind", "migrations"), "spec.persistence")
+    persistence = {"kind": v.choice(p_in, "kind", "spec.persistence", PERSISTENCE, "memory"), "migrations": v.boolean(p_in, "migrations", "spec.persistence", False)}
+    if persistence["migrations"] and persistence["kind"] == "memory":
+        v.errors.append("spec.persistence.migrations: migrations require persistence.kind 'postgresql'")
+
+    s_in = v.obj(document, "security", "spec.security")
+    v.unknown(s_in, ("authentication", "authorization", "multi_tenant"), "spec.security")
+    mt_in = v.obj(s_in, "multi_tenant", "spec.security.multi_tenant")
+    v.unknown(mt_in, ("enabled", "strategy", "tenant_param"), "spec.security.multi_tenant")
+    tenant_param = v.text(mt_in, "tenant_param", "spec.security.multi_tenant", "tenant_id")
+    if tenant_param and (not IDENT_RE.match(tenant_param) or keyword.iskeyword(tenant_param)):
+        v.errors.append(f"spec.security.multi_tenant.tenant_param: {tenant_param!r} must be a python identifier")
+    security = {
+        "authentication": v.choice(s_in, "authentication", "spec.security", AUTHENTICATION, "none"),
+        "authorization": v.choice(s_in, "authorization", "spec.security", AUTHORIZATION, "none"),
+        "multi_tenant": {
+            "enabled": v.boolean(mt_in, "enabled", "spec.security.multi_tenant", False),
+            "strategy": v.choice(mt_in, "strategy", "spec.security.multi_tenant", TENANT_STRATEGIES, "shared_schema_rls"),
+            "tenant_param": tenant_param,
+        },
+    }
+    if security["authorization"] != "none" and security["authentication"] == "none":
+        v.errors.append("spec.security.authorization: authorization requires an authentication kind other than 'none'")
+    if security["multi_tenant"]["enabled"] and security["authentication"] == "none":
+        v.errors.append("spec.security.multi_tenant.enabled: a multi-tenant API needs authentication (who is the member of the tenant?)")
+
+    integrations: List[IntegrationSpec] = []
+    raw_int = document.get("integrations", [])
+    if not isinstance(raw_int, list):
+        v.errors.append("spec.integrations: expected a list")
+        raw_int = []
+    else:
+        v.provenance["spec.integrations"] = "explicit" if "integrations" in document else "assumed"
+    seen_int: List[str] = []
+    for i, raw in enumerate(raw_int):
+        path = f"spec.integrations[{i}]"
+        if not isinstance(raw, dict):
+            v.errors.append(f"{path}: expected an object")
+            continue
+        v.unknown(raw, ("name", "kind", "direction", "criticality", "module"), path)
+        iname = _ident(v, raw.get("name"), f"{path}.name", "integration name")
+        if iname in seen_int:
+            v.errors.append(f"{path}.name: duplicate integration {iname!r}")
+        if iname:
+            seen_int.append(iname)
+        kind = v.choice(raw, "kind", path, INTEGRATION_KINDS, None)
+        if kind is None and "kind" not in raw:
+            v.errors.append(f"{path}.kind: required (one of {', '.join(INTEGRATION_KINDS)})")
+        direction = v.choice(raw, "direction", path, DIRECTIONS, "outbound")
+        criticality = v.choice(raw, "criticality", path, CRITICALITY, "medium")
+        module = raw.get("module")
+        if module is not None and module not in module_names:
+            v.errors.append(f"{path}.module: unknown module {module!r}")
+        if iname and kind:
+            integrations.append(IntegrationSpec(iname, kind, direction or "outbound", criticality or "medium", module if isinstance(module, str) else None))
+
+    i_in = v.obj(document, "infrastructure", "spec.infrastructure")
+    v.unknown(i_in, ("deployment", "cache", "broker", "regions"), "spec.infrastructure")
+    infrastructure = {
+        "deployment": v.choice(i_in, "deployment", "spec.infrastructure", DEPLOYMENTS, "container"),
+        "cache": v.boolean(i_in, "cache", "spec.infrastructure", False),
+        "broker": v.boolean(i_in, "broker", "spec.infrastructure", False),
+        "regions": v.integer(i_in, "regions", "spec.infrastructure", 1, 1, 50),
+    }
+
+    a_in = v.obj(document, "architecture", "spec.architecture")
+    v.unknown(a_in, ("style_preference", "independent_deployment"), "spec.architecture")
+    architecture = {
+        "style_preference": v.choice(a_in, "style_preference", "spec.architecture", STYLES, None),
+        "independent_deployment": v.boolean(a_in, "independent_deployment", "spec.architecture", False),
+    }
+
+    decisions: List[DecisionSpec] = []
+    raw_dec = document.get("decisions", [])
+    if not isinstance(raw_dec, list):
+        v.errors.append("spec.decisions: expected a list")
+        raw_dec = []
+    seen_dec: List[str] = []
+    for i, raw in enumerate(raw_dec):
+        path = f"spec.decisions[{i}]"
+        if not isinstance(raw, dict):
+            v.errors.append(f"{path}: expected an object")
+            continue
+        v.unknown(raw, ("id", "title", "status", "rationale"), path)
+        did = v.text(raw, "id", path, None, re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$"), required=True)
+        if did in seen_dec:
+            v.errors.append(f"{path}.id: duplicate decision id {did!r}")
+        if did:
+            seen_dec.append(did)
+        title = v.text(raw, "title", path, None, required=True)
+        status = v.choice(raw, "status", path, DECISION_STATUS, "pending")
+        rationale = v.text(raw, "rationale", path, "")
+        if status == "accepted" and not rationale:
+            v.errors.append(f"{path}.rationale: an accepted decision must state its rationale")
+        if did and title:
+            decisions.append(DecisionSpec(did, title, status or "pending", rationale or ""))
+
+    components: List[Dict[str, Any]] = []
+    raw_comp = document.get("components", [])
+    if not isinstance(raw_comp, list):
+        v.errors.append("spec.components: expected a list")
+        raw_comp = []
+    comp_names: List[str] = []
+    for i, raw in enumerate(raw_comp):
+        path = f"spec.components[{i}]"
+        if not isinstance(raw, dict):
+            v.errors.append(f"{path}: expected an object")
+            continue
+        v.unknown(raw, ("name", "kind", "depends_on", "description"), path)
+        cname = _ident(v, raw.get("name"), f"{path}.name", "component name")
+        if cname:
+            comp_names.append(cname)
+            components.append({"name": cname, "kind": raw.get("kind", "component"), "depends_on": v.strings(raw, "depends_on", path), "description": raw.get("description", "")})
+    for i, comp in enumerate(components):
+        for dep in comp["depends_on"]:
+            if dep not in comp_names and dep not in module_names:
+                v.errors.append(f"spec.components[{i}].depends_on: unknown component or module {dep!r}")
+
+    t_in = v.obj(document, "testing", "spec.testing")
+    v.unknown(t_in, ("levels", "coverage_target"), "spec.testing")
+    levels = v.strings(t_in, "levels", "spec.testing", TEST_LEVELS) if "levels" in t_in else ["unit", "integration"]
+    if "levels" not in t_in:
+        v.provenance["spec.testing.levels"] = "assumed"
+    testing = {"levels": levels, "coverage_target": v.integer(t_in, "coverage_target", "spec.testing", 80, 0, 100)}
+
+    assumptions = v.strings(document, "assumptions", "spec")
+    open_questions = v.strings(document, "open_questions", "spec")
+
+    if v.errors:
+        return None, sorted(set(v.errors))
+    spec = Spec(
+        schema=SPEC_SCHEMA, name=name, package=package or default_package, description=description or "", scope=scope, modules=modules,
+        nonfunctional=nonfunctional, persistence=persistence, security=security, integrations=integrations, infrastructure=infrastructure,
+        architecture=architecture, decisions=decisions, components=components, testing=testing, assumptions=assumptions,
+        open_questions=open_questions, provenance=v.provenance, digest=canonical_digest(document), source=source,
+    )
+    return spec, []
+
+
+def _check_cycles(v: _V, modules: List[ModuleSpec]) -> None:
+    graph = {m.name: set(m.depends_on) for m in modules}
+    state: Dict[str, int] = {}
+
+    def visit(node: str, stack: List[str]) -> None:
+        if state.get(node) == 1:
+            v.errors.append("spec.functional.modules: dependency cycle " + " -> ".join(stack + [node]))
+            return
+        if state.get(node) == 2:
+            return
+        state[node] = 1
+        for nxt in sorted(graph.get(node, ())):
+            if nxt in graph:
+                visit(nxt, stack + [node])
+        state[node] = 2
+
+    for name in sorted(graph):
+        visit(name, [])
+
+
+def load_spec(path: str) -> Spec:
+    """Read a JSON specification (never executed) and validate it; raises ``SpecError`` listing every problem."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except OSError as exc:
+        raise SpecError(path, [f"cannot read the specification: {exc}"])
+    except ValueError as exc:
+        raise SpecError(path, [f"the specification is not valid JSON: {exc}"])
+    spec, errors = validate_spec(document, path)
+    if errors or spec is None:
+        raise SpecError(path, errors)
+    return spec
