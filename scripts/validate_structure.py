@@ -51,7 +51,7 @@ for part in ('dev','acceptance','holdout'):
     assert (root/f'tests/fixtures/truth17/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth17/{part}/EXPECTATIONS.md'
 assert (root/'scripts/audit_precision.py').is_file(), 'Missing scripts/audit_precision.py'
 # v1.8: precision corpora, the report comparison tool (skill + root shim) and the remediation module
-for part in ('dev','acceptance'):
+for part in ('dev','acceptance','holdout'):
     assert (root/f'tests/fixtures/truth18/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth18/{part}/EXPECTATIONS.md'
 diff_tool=base/'scripts/audit_diff.py'
 diff_shim=root/'scripts/audit_diff.py'
