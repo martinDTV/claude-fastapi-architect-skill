@@ -66,6 +66,7 @@ class ProjectFacts:
     aliases: Dict[str, str] = field(default_factory=dict)  # dotted Annotated alias -> kind
     dependency_aliases: Dict[str, str] = field(default_factory=dict)  # dotted Annotated alias -> Depends target (dotted or bare name)
     protected_routers: Set[str] = field(default_factory=set)  # dotted router names
+    router_inclusions: List[Tuple[Tuple[str, ...], Tuple[str, ...]]] = field(default_factory=list)  # (parent names, child names) per X.include_router(Y)
     global_auth_signal: bool = False
     global_auth_evidence: List[str] = field(default_factory=list)
     uses_fastapi: bool = False
@@ -426,11 +427,56 @@ def collect_facts(
         _collect_from_tree(facts, rel, tree)
 
     facts.parse_failures.sort()
+    _propagate_protected_routers(facts)
     if interprocedural:
         collect_summaries(facts, files, max_file_bytes=max_file_bytes, max_call_depth=max_call_depth, time_budget_s=time_budget_s)
     else:
         facts.interprocedural = {"enabled": False, "max_depth": max_call_depth}
     return facts
+
+
+def _router_names(node: ast.AST, resolve, qualified) -> Tuple[str, ...]:
+    """Dotted candidates for a router expression: the import origin of a name, or the module-level binding
+    under every name the module can be imported as. Attribute chains (``routers.items``) resolve through the
+    import of their root; anything else is not tracked."""
+    parts = dotted_name(node)
+    if not parts:
+        return ()
+    names: List[str] = []
+    resolved = resolve(parts)
+    if resolved:
+        names.append(resolved)
+    if len(parts) == 1:
+        names.extend(qualified(parts[0]))
+    return tuple(dict.fromkeys(names))
+
+
+def _propagate_protected_routers(facts: ProjectFacts) -> None:
+    """Fixpoint over ``router_inclusions``: children of a protected router are protected (any order of files).
+    Names are expanded to every module name the defining file can be imported as (``app.x`` and ``src.app.x``),
+    the same way module-level bindings are registered."""
+    source_roots = facts.config.get("source_roots") or ["src"]
+
+    def expand(dotted: str) -> Set[str]:
+        out = {dotted}
+        mod, _, attr = dotted.rpartition(".")
+        rel = facts.module_map.get(mod) if mod else None
+        if rel and attr:
+            out.update(f"{name}.{attr}" for name in module_name_for(rel, source_roots))
+        return out
+
+    changed = True
+    while changed:
+        changed = False
+        for parents, children in facts.router_inclusions:
+            if not any(p in facts.protected_routers for p in parents):
+                continue
+            names: Set[str] = set()
+            for child in children:
+                names |= expand(child)
+            if not names <= facts.protected_routers:
+                facts.protected_routers |= names
+                changed = True
 
 
 def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
@@ -623,6 +669,13 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
         if attr == "include_router" and _has_keyword(node, "dependencies"):
             facts.global_auth_signal = True
             facts.global_auth_evidence.append(f"{rel}:{node.lineno} include_router(dependencies=...)")
+        if attr == "include_router" and node.args:
+            # v2.0: a router included into a router that carries dependencies inherits them in FastAPI;
+            # record the edge so protection propagates (fixpoint in collect_facts) instead of flagging the child
+            parent = _router_names(node.func.value, resolve, qualified)
+            child = _router_names(node.args[0], resolve, qualified)
+            if parent and child:
+                facts.router_inclusions.append((parent, child))
         elif attr == "add_middleware" and node.args:
             mw = dotted_name(node.args[0])
             label = ".".join(mw) if mw else ""
