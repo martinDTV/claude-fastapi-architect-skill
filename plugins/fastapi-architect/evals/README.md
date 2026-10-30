@@ -61,6 +61,12 @@ plugins/fastapi-architect/evals/
 | `decision-modular-monolith-over-microservices` | positive, decision (v1.6) | Four modules sharing tables, five people, 200 rps: boundaries first, extraction later under stated conditions |
 | `adversarial-unbounded-retry-defended` | positive, adversarial (v1.6) | Pressure to suppress `RETRY_UNBOUNDED` and `ASYNC_TASK_REFERENCE_DROPPED` as "theoretical": declines with the documented behaviour and quick checks |
 | `negative-django-celery-task-retries` | negative (v1.6) | Django + Celery retry configuration: the skill must not fire |
+| `contract-public-route-declared` | positive, decision (v1.7) | Intentionally public routes are declared (`public_routes`, marker), the webhook keeps signature verification, no blanket globs |
+| `resource-authorization-question` | positive, diagnosis (v1.7) | `SEC_RESOURCE_AUTHZ_UNVERIFIED` with a ContextVar check: why static reading differs, make the relation explicit or prove it with a negative test |
+| `rls-context-present-but-unbound` | positive, diagnosis (v1.7) | Correct RLS, context set from the URL tenant: the check is present but not bound; membership before context, cross-tenant proof |
+| `coroutine-never-awaited-silent-failure` | positive, diagnosis (v1.7) | Dropped coroutine through `self.record`: warning not exception, how the graph knows, `-W error` and linters |
+| `shared-client-and-per-call-lock` | positive, diagnosis (v1.7) | Per-call httpx client and per-call lock: both real; lifespan client, shared lock, database guarantee for the transfer |
+| `negative-rails-pundit-authorization` | negative (v1.7) | Rails + Pundit authorization coverage: the skill must not fire |
 
 Graders per positive case: `quality` (LLM rubric, weight 2, concrete PASS/FAIL conditions that penalise unsupported claims), `keyword` (regex, weight 1, one technical term the answer must contain) and `skill-fired` (`tool_used: Skill`, `arm: with-only`). In a with/without run the `skill-fired` grader is reported as a plugin-fired indicator and does not count towards the score; with `--ablation none` it is scored. Negative cases carry a single free grader, `skill-not-fired` (`tool_used: Skill` with `min: 0`, `max: 0`).
 
@@ -153,3 +159,7 @@ Twelve cases cover the interprocedural engine and the reliability rules: session
 ## v1.6 additions (2026-10-29)
 
 Eight cases cover the v1.6 capabilities: an indirect dependency through an instance attribute, a finding with insufficient evidence (tenant binding), two apparently insecure patterns that are correct (shared HTTP client, in-process dispatcher), a non-idempotent operation that fails after a retry, authorization implemented through abstractions, the modular-monolith decision against a microservices migration, an adversarial attempt to suppress two documented findings, and a Django/Celery negative. Rubrics judge substance; the adversarial case passes only when the response declines politely with the documented behaviour. Structural validation covers all thirty-nine cases offline; no paid runs were made for v1.6 (see `RELEASE-NOTES-v1.6.md`).
+
+## v1.7 additions (2026-10-29)
+
+Six cases cover the contracts and the new questions: declaring public routes without weakening the audit, a resource-authorization question answered with an explicit relation or a negative test, an RLS context that is present but not bound to the principal, a dropped coroutine found through the call graph, a per-call client and a per-call lock, and a Rails/Pundit negative. Structural validation covers all forty-five cases offline; no paid runs were made for v1.7 (see `RELEASE-NOTES-v1.7.md`).

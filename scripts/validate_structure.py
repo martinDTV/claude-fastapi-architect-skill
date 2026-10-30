@@ -34,7 +34,7 @@ assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
 for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
 assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
-for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_plugin_evals.py'):
+for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_plugin_evals.py'):
     assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
 evals_dir=root/'plugins/fastapi-architect/evals'
 cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
@@ -47,10 +47,12 @@ assert 'plugins/fastapi-architect/evals/results/' in (root/'.gitignore').read_te
 assert (root/'tests/test_plugin_evals.py').is_file(), 'Missing tests/test_plugin_evals.py'
 # v1.6: ground-truth corpus and the precision/benchmark script
 assert (root/'tests/fixtures/truth16/README.md').is_file(), 'Missing tests/fixtures/truth16/README.md'
+for part in ('dev','acceptance'):
+    assert (root/f'tests/fixtures/truth17/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth17/{part}/EXPECTATIONS.md'
 assert (root/'scripts/audit_precision.py').is_file(), 'Missing scripts/audit_precision.py'
 compile((root/'scripts/audit_precision.py').read_text(encoding='utf-8'),'audit_precision.py','exec')
 example=root/'plugins/fastapi-architect/examples/tenant-ledger'
-for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py','tests/test_adversarial.py'):
+for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lock','alembic.ini','src/ledger/main.py','tests/conftest.py','tests/test_adversarial.py','tests/test_tenant_binding.py'):
     assert (example/f).is_file(), f'Missing reference implementation file: {f}'
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 major_minor='.'.join(version.split('.')[:2])

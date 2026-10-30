@@ -1,6 +1,6 @@
 {
   "name": "fastapi-architect",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Chooses the right architecture for a FastAPI project (prototype, modular monolith, ports and adapters, or microservices), enforces module boundaries, and applies production code standards.",
   "author": {
     "name": "Martín De La Torre",
