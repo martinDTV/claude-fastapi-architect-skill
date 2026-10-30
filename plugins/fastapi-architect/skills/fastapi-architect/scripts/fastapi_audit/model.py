@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 TOOL_NAME = "audit_fastapi"
-TOOL_VERSION = "1.9.0"
+TOOL_VERSION = "2.0.0"
 # 1.0: base report. 1.1: environment/suppression fields. 1.2: category, fingerprint,
 # verification, recommended_test, migration environment, facts/config/comparison blocks.
 # 1.3: evidence and call_path per finding, interprocedural block, reliability category.

@@ -201,7 +201,7 @@ class CompatibilityTests(ProjectCase):
         self.assertEqual(len(audit.RULES), 59)  # v1.7 shipped 58; v1.8 adds TX_COMMIT_INSIDE_BEGIN_BLOCK (see tests/test_audit_v18.py)
         self.assertIn("contracts", audit.CATEGORIES)
         self.assertEqual(audit.SCHEMA_VERSION, "1.7")  # additive over 1.5/1.6: details, remediation (+recipe/automatable), commit_loops, coverage/uncertainty keys
-        self.assertEqual(audit.TOOL_VERSION, "1.9.0")
+        self.assertEqual(audit.TOOL_VERSION, "2.0.0")
 
     def test_report_without_routes_has_an_empty_contract_block(self) -> None:
         self.write("app/m.py", "def f():\n    return 1\n")
