@@ -66,7 +66,7 @@ ABSTRACT_DECORATORS = frozenset({"abc.abstractmethod"})
 CALLABLE_TYPES = frozenset({"typing.Callable", "collections.abc.Callable", "typing.Awaitable", "collections.abc.Awaitable", "typing.Coroutine"})
 TENANT_CONTEXT_MARKERS = ("set local", "set_config(", "set role")
 IDEMPOTENCY_MARKERS = ("idempotency", "idempotent", "on conflict", "on_conflict", "dedup", "request_id", "requestid", "x-request-id")
-PRINCIPAL_PARAM_RE = ("user", "principal", "tenant", "actor", "identity", "member", "org", "account_id", "auth")
+PRINCIPAL_PARAM_RE = ("user", "principal", "tenant", "actor", "identity", "member", "org", "auth", "staff", "caller", "subject")
 BLOCKING_DIRECT: Dict[str, str] = {  # same table as async_rules.BLOCKING_CALLS, duplicated to avoid an import cycle
     "time.sleep": "high", "urllib.request.urlopen": "high", "urllib.request.urlretrieve": "high",
     "subprocess.run": "high", "subprocess.call": "high", "subprocess.check_call": "high", "subprocess.check_output": "high",

@@ -28,10 +28,10 @@ from .model import (
 )
 from .report import compare_with_baseline
 from .resolver import awaited_call_ids, collect_functions, module_imports, resolve_in_scopes
-from .rules import FileContext, architecture, async_rules, interprocedural, migrations, reliability, security, sqlalchemy_rules, transactions
+from .rules import FileContext, architecture, async_rules, interprocedural, lifecycle, migrations, reliability, security, sqlalchemy_rules, transactions
 from .suppressions import line_comments, suppression_for
 
-FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security, interprocedural, reliability)
+FILE_RULE_MODULES = (async_rules, sqlalchemy_rules, transactions, migrations, security, interprocedural, reliability, lifecycle)
 TEST_DOWNGRADE_PREFIXES = ("ASYNC_BLOCKING_CALL", "SA_", "TX_", "RETRY_", "BG_")
 ASYNC_TEST_NOTE = (
     " Test code: the stalled event loop is the test's own; confirm the call does not run "
@@ -141,6 +141,23 @@ def build_context(relpath: str, source: bytes, tree: ast.Module, facts: Optional
         awaited=awaited_call_ids(tree),
         returned=returned,
     )
+
+
+def _contracts_block(facts: ProjectFacts) -> Dict[str, Any]:
+    routes = sorted(facts.route_contracts, key=lambda c: (c["file"], c["line"], c["function"]))
+    counts = {
+        "routes": len(routes),
+        "authenticated": sum(1 for c in routes if c["authentication"] == "present"),
+        "public": sum(1 for c in routes if c["public"]),
+        "unauthenticated_not_public": sum(1 for c in routes if c["authentication"] == "absent" and not c["public"]),
+        "authorization_visible": sum(1 for c in routes if c["authorization"]),
+        "authorization_unknown": sum(1 for c in routes if c["authentication"] == "present" and not c["authorization"] and (c["resource_params"] or c["tenant_params"])),
+    }
+    kinds: Dict[str, int] = {}
+    for c in routes:
+        for k in c["authorization"]:
+            kinds[k] = kinds.get(k, 0) + 1
+    return {"summary": counts, "authorization_kinds": dict(sorted(kinds.items())), "routes": routes}
 
 
 def _rule_enabled(rule: str, options: AuditOptions) -> bool:
@@ -360,6 +377,7 @@ def audit_project(
         "config": options.effective(),
         "facts": facts.summary(),
         "interprocedural": facts.interprocedural,
+        "contracts": _contracts_block(facts),  # schema 1.5
         "comparison": None,
         "disclaimer": DISCLAIMER,
     }

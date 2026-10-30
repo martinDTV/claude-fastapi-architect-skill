@@ -9,14 +9,15 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Sequence, Tuple
 
 TOOL_NAME = "audit_fastapi"
-TOOL_VERSION = "1.6.0"
+TOOL_VERSION = "1.7.0"
 # 1.0: base report. 1.1: environment/suppression fields. 1.2: category, fingerprint,
 # verification, recommended_test, migration environment, facts/config/comparison blocks.
 # 1.3: evidence and call_path per finding, interprocedural block, reliability category.
 # 1.4: resolution adds builtin/object/ambiguous; interprocedural adds edges, coverage, uncertainty,
 #      limits, attribute_kinds, files_skipped; config adds time_budget_s; ANALYSIS_PARTIAL rule.
+# 1.5: top-level `contracts` block (security contract per route); five rules.
 # Every field of an earlier schema keeps its name, type and meaning.
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.5"
 
 EVIDENCE_VERIFIED = "verified"  # pattern and symbols resolved directly from the AST
 EVIDENCE_INFERRED = "inferred"  # a type or flow was propagated from callers/dependencies or guessed from names
@@ -561,6 +562,64 @@ RULES.update(
             "summary": (
                 "A rule module hit a resource limit (recursion or memory) on this file and reported "
                 "nothing for it. The remaining rule modules ran; the file's analysis is partial."
+            ),
+        },
+    }
+)
+
+RULES.update(
+    {
+        # ---- v1.7 ---------------------------------------------------------------
+        "SEC_RESOURCE_AUTHZ_UNVERIFIED": {
+            "severity": "medium",
+            "category": "security",
+            "verification": VERIFICATION_NOT_STATIC,
+            "summary": (
+                "An authenticated route acts on a resource identified by the request and hands the id "
+                "to project code without the principal; no role, scope, membership or resource dependency, "
+                "policy call or comparison relates the resource to the caller in the visible code. Whether "
+                "ownership is enforced elsewhere cannot be decided statically."
+            ),
+        },
+        "SEC_RLS_CONTEXT_FROM_REQUEST": {
+            "severity": "medium",
+            "category": "security",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "The row-level-security tenant context (set_config / SET LOCAL) is set from a tenant id "
+                "taken from the request in an authenticated route that does not bind that tenant to the "
+                "principal. The check exists but is not tied to who is calling: the policies show whatever "
+                "tenant the caller names."
+            ),
+        },
+        "ASYNC_COROUTINE_NOT_AWAITED": {
+            "severity": "high",
+            "category": "async",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "A project coroutine function is called without await and its result is neither awaited "
+                "later, scheduled (gather, create_task, TaskGroup) nor handed to a caller that awaits it. "
+                "The body never runs; Python warns 'coroutine was never awaited'."
+            ),
+        },
+        "ASYNC_LOCK_PER_CALL": {
+            "severity": "medium",
+            "category": "async",
+            "verification": VERIFICATION_STATIC,
+            "summary": (
+                "A lock is created inside the function that acquires it, so every call gets a fresh lock "
+                "and nothing is mutually excluded. Create the lock once (module or object attribute) and "
+                "share it."
+            ),
+        },
+        "REL_HTTP_CLIENT_PER_CALL": {
+            "severity": "low",
+            "category": "reliability",
+            "verification": VERIFICATION_RUNTIME,
+            "summary": (
+                "An HTTP client is built inside a function for a single use and neither managed with "
+                "`with` nor closed: no connection reuse, and sockets or pooled connections leak until "
+                "garbage collection. Share one client per application (lifespan) or manage it with `with`."
             ),
         },
     }

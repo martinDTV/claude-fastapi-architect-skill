@@ -12,9 +12,11 @@ import ast
 import re
 from typing import List, Optional, Set, Tuple
 
+from ..contracts import RouteContract, build_contracts, decorator_authz, names_in, route_public, tenant_param_set
 from ..facts import AUTH_RE
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, annotation_to_dotted, dotted_name
+from ..summaries import TENANT_CONTEXT_MARKERS
 from . import FileContext
 
 CATEGORY = "security"
@@ -192,6 +194,8 @@ def _providers(ctx: FileContext, func: FunctionInfo) -> List[Tuple[str, Optional
                         if inner is None and isinstance(arg0, ast.Call):  # Depends(require(p.X)): factory + its arguments
                             inner = dotted_name(arg0.func)
                             label = ast.unparse(arg0) if hasattr(ast, "unparse") else (inner[-1] if inner else "")
+                        if sub.keywords and hasattr(ast, "unparse"):  # Security(f, scopes=[...]): the scopes are part of the contract
+                            label = f"{parts[-1]}({label}, " + ", ".join(ast.unparse(k) for k in sub.keywords) + ")"
                         found = (func.resolve(inner) if inner else None, inner, label)
                         break
             if found:
@@ -224,47 +228,122 @@ def _names_and_roots(node: ast.AST) -> Set[str]:
     return out
 
 
-def _tenant_binding(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:
-    """Authenticated route that uses a request-supplied tenant id without a visible binding to the principal."""
+def _unbound_tenant(ctx: FileContext, func: FunctionInfo) -> Optional[Tuple[List[str], Set[str]]]:
+    """``(tenant_params, principal_names)`` when the route is authenticated, uses a request-supplied
+    tenant id and nothing visible binds it to the principal; None otherwise."""
     route = func.route
     if route is None:
-        return
+        return None
+    tenant_names = tenant_param_set(ctx)
     used = _used_names(func)
-    tenant_params = sorted(p.arg for p in func.params() if p.arg in TENANT_PARAMS and p.arg in used)
+    tenant_params = sorted(p.arg for p in func.params() if p.arg in tenant_names and p.arg in used)
     if not tenant_params:
-        return
+        return None
     providers = _providers(ctx, func)
     principal_names: Set[str] = set()
     for param, dotted, raw, label in providers:
         chain = _dependency_chain(ctx, _dependency_record(ctx, dotted, raw))
         if TENANT_BINDING_RE.search(label) or TENANT_BINDING_RE.search(param):
-            return  # a membership/authorization dependency binds the tenant
+            return None  # a membership/authorization dependency binds the tenant
         for rec in chain:
-            if rec.tenant_params or TENANT_BINDING_RE.search(rec.name) or any(p in TENANT_PARAMS for p in rec.params):
-                return  # the dependency itself receives the tenant: the binding happens there
+            if rec.tenant_params or TENANT_BINDING_RE.search(rec.name) or any(p in tenant_names for p in rec.params):
+                return None  # the dependency itself receives the tenant: the binding happens there
         if AUTH_RE.search(label) or any(AUTH_RE.search(rec.name) for rec in chain) or AUTH_RE.search(param):
             principal_names.add(param)
     for arg in func.params():
-        if arg.arg not in tenant_params and AUTH_RE.search(arg.arg) and arg.arg not in TENANT_PARAMS:
+        if arg.arg not in tenant_params and AUTH_RE.search(arg.arg) and arg.arg not in tenant_names:
             principal_names.add(arg.arg)
     if not principal_names:
-        return  # unauthenticated: SEC_TENANT_ID_FROM_REQUEST covers it
+        return None  # unauthenticated: SEC_TENANT_ID_FROM_REQUEST covers it
     if route.decorator is not None:
         for kw in route.decorator.keywords:
             if kw.arg == "dependencies" and TENANT_BINDING_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
-                return
+                return None
+    receiver_root = route.receiver.split(".")[0]
+    for stmt in ctx.tree.body:  # router-level membership dependency in the same file
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call) and any(isinstance(t, ast.Name) and t.id == receiver_root for t in stmt.targets):
+            for kw in stmt.value.keywords:
+                if kw.arg == "dependencies" and TENANT_BINDING_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
+                    return None
     tenant_set = set(tenant_params)
     for node in func.scope_nodes():
         if isinstance(node, (ast.Compare, ast.BoolOp, ast.Assert)) or (isinstance(node, ast.If)):
             names = _names_and_roots(node.test if isinstance(node, ast.If) else node)
             if names & tenant_set and names & principal_names:
-                return  # tenant compared against the principal's data
+                return None  # tenant compared against the principal's data
         if isinstance(node, ast.Call):
             names = set()
             for a in [*node.args, *[k.value for k in node.keywords]]:
                 names |= _names_and_roots(a)
             if names & tenant_set and names & principal_names:
-                return  # tenant and principal flow together into the same call
+                return None  # tenant and principal flow together into the same call
+    return tenant_params, principal_names
+
+
+def _rls_context_from_request(ctx: FileContext, func: FunctionInfo, unbound: Tuple[List[str], Set[str]], out: List[Finding]) -> bool:
+    """The unbound requested tenant is written into the RLS context (set_config / SET LOCAL) directly or
+    through a project call: the policies then show whatever the caller asked for."""
+    tenant_params, principal_names = unbound
+    tenant_set = set(tenant_params)
+    graph = _graph(ctx)
+    for node in func.scope_nodes():
+        if not isinstance(node, ast.Call):
+            continue
+        names: Set[str] = set()
+        for a in [*node.args, *[k.value for k in node.keywords]]:
+            names |= _names_and_roots(a)
+        if not names & tenant_set:
+            continue
+        texts = " ".join(c.value for c in ast.walk(node) if isinstance(c, ast.Constant) and isinstance(c.value, str)).lower()
+        direct = any(m in texts for m in TENANT_CONTEXT_MARKERS)
+        through: Optional[str] = None
+        if not direct and graph is not None:
+            status, key = graph.site_target(ctx.relpath, node.lineno, node.col_offset)
+            callee = graph.functions.get(key) if (status == "project" and key) else None
+            if callee is not None and callee.sets_tenant_context:
+                through = callee.qualname
+        if not (direct or through):
+            continue
+        route = func.route
+        where = f"'{func.qualname}' ({route.method} {route.path or ''})".replace(" )", ")")
+        out.append(
+            new_finding(
+                "SEC_RLS_CONTEXT_FROM_REQUEST",
+                ctx.relpath,
+                func.lineno,
+                getattr(func.node, "col_offset", 0),
+                (
+                    f"{where} sets the row-level-security tenant context from '{tenant_params[0]}', a value taken from the request, "
+                    + (f"through '{through}' (line {node.lineno})" if through else f"at line {node.lineno}")
+                    + f". The route is authenticated through '{', '.join(sorted(principal_names))}' but nothing visible binds the requested "
+                    "tenant to that principal (no membership dependency, no comparison), so the policies show whatever tenant the "
+                    "caller names. A tenant check is present but not tied to the principal; bind it (membership dependency or a "
+                    "comparison with the principal's tenant) before setting the context."
+                ),
+                confidence="medium",
+                symbol="set_config" if direct else through,
+                function=func.qualname,
+                environment=ctx.environment,
+                evidence="verified",
+                call_path=[func.qualname, through, "set_config"] if through else None,
+                recommended_test=CROSS_TENANT_TEST,
+            )
+        )
+        return True
+    return False
+
+
+def _tenant_binding(ctx: FileContext, func: FunctionInfo, out: List[Finding]) -> None:
+    """Authenticated route that uses a request-supplied tenant id without a visible binding to the principal."""
+    route = func.route
+    if route is None:
+        return
+    unbound = _unbound_tenant(ctx, func)
+    if unbound is None:
+        return
+    if _rls_context_from_request(ctx, func, unbound, out):
+        return  # the stronger, mechanism-level finding replaces the generic question
+    tenant_params, principal_names = unbound
     where = f"'{func.qualname}' ({route.method} {route.path or ''})".replace(" )", ")")
     out.append(
         new_finding(
@@ -327,6 +406,8 @@ def _privilege_change(ctx: FileContext, func: FunctionInfo, out: List[Finding]) 
         for kw in route.decorator.keywords:
             if kw.arg == "dependencies" and ADMIN_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
                 return
+    if decorator_authz(func):
+        return  # @requires("admin") and similar decorators name the policy
     for node in func.scope_nodes():  # an explicit check in the body: if not user.is_admin / require(...)
         if isinstance(node, ast.If) and ADMIN_RE.search(ast.unparse(node.test) if hasattr(ast, "unparse") else ""):
             return
@@ -387,8 +468,8 @@ def _route_rules(ctx: FileContext, out: List[Finding]) -> None:
                 )
             )
             continue
-        if PUBLIC_PATH_RE.match(path):
-            continue
+        if route_public(ctx, func):
+            continue  # health-style path, `public_routes` in .audit-fastapi.json, or `# audit-fastapi: public`
         out.append(
             new_finding(
                 "SEC_ROUTE_WITHOUT_AUTH_SIGNAL",
@@ -454,15 +535,62 @@ def _rls_rules(ctx: FileContext, out: List[Finding]) -> None:
         )
 
 
+RESOURCE_TEST = (
+    "Authenticate as a user who is not related to the resource (another tenant, another owner, a plain member) "
+    "and call this route with a valid resource id; expect 403/404 and no change. Repeat with a related user to keep "
+    "the positive path."
+)
+
+
+def _resource_authorization(ctx: FileContext, contract: RouteContract, func: FunctionInfo, out: List[Finding]) -> None:
+    """Authenticated route acting on a resource id with no visible relation between resource and principal."""
+    if contract.authentication != "present" or contract.public or not contract.resource_params:
+        return
+    if contract.authorization:
+        return  # role, scopes, decorator, membership, a resource dependency, a policy call or the principal flowing with the id
+    if not contract.resource_calls_without_principal:
+        return  # the id never reaches a project call without the principal: nothing to relate statically
+    route = func.route
+    where = f"'{func.qualname}' ({route.method} {route.path or ''})".replace(" )", ")")
+    out.append(
+        new_finding(
+            "SEC_RESOURCE_AUTHZ_UNVERIFIED",
+            ctx.relpath,
+            func.lineno,
+            getattr(func.node, "col_offset", 0),
+            (
+                f"{where} is authenticated through '{', '.join(contract.principal_params)}' and acts on '{', '.join(contract.resource_params)}' "
+                f"by calling {', '.join(contract.resource_calls_without_principal)} with the resource id but without the principal. "
+                "No role, scope, membership or resource dependency, policy call or comparison relates the resource to the caller in "
+                "the visible code. If the service or a middleware enforces ownership this is a false positive; otherwise any "
+                "authenticated caller can act on any resource id. Not verifiable statically."
+            ),
+            confidence="low",
+            symbol=contract.resource_params[0],
+            function=func.qualname,
+            environment=ctx.environment,
+            evidence="unknown",
+            recommended_test=RESOURCE_TEST,
+        )
+    )
+
+
 def run(ctx: FileContext) -> List[Finding]:
     out: List[Finding] = []
     if ctx.environment == ENV_MIGRATION:
         return out
     if ctx.fastapi_imported or any(f.route for f in ctx.functions):
         _route_rules(ctx, out)
+        contracts = build_contracts(ctx, _providers, _dependency_chain, _dependency_record, _param_signal, _router_signal)
+        by_function = {c.function: c for c in contracts}
+        if ctx.facts is not None:
+            ctx.facts.route_contracts.extend(c.to_dict() for c in contracts)
         for func in ctx.functions:
             if func.route is not None:
                 _tenant_binding(ctx, func, out)
                 _privilege_change(ctx, func, out)
+                contract = by_function.get(func.qualname)
+                if contract is not None:
+                    _resource_authorization(ctx, contract, func, out)
     _rls_rules(ctx, out)
     return out

@@ -126,6 +126,14 @@ def render_text(report: Dict[str, object]) -> str:
             )
     elif isinstance(inter, dict):
         lines.append("call graph: disabled (--no-interprocedural)")
+    contracts = report.get("contracts")
+    if isinstance(contracts, dict) and contracts.get("summary", {}).get("routes"):
+        cs = contracts["summary"]
+        lines.append(
+            f"contracts: {cs['routes']} routes, authenticated {cs['authenticated']}, public {cs['public']}, "
+            f"unauthenticated and not public {cs['unauthenticated_not_public']}, authorization visible {cs['authorization_visible']}, "
+            f"authorization unknown {cs['authorization_unknown']}"
+        )
     comparison = report.get("comparison")
     if isinstance(comparison, dict):
         c = comparison["counts"]

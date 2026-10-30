@@ -208,6 +208,32 @@ def _check_await_and_blocking(ctx: FileContext, func: FunctionInfo, kinds: Dict[
             )
 
 
+def _spawned_then_awaited(func: FunctionInfo, call: ast.Call) -> bool:
+    """``t = create_task(coro(session)); ...; await t`` with no other statement using the session in between
+    is not concurrent use of the session (the v1.6 docs listed this as an expected false positive)."""
+    body = list(func.scope_nodes())
+    target = None
+    for stmt in body:
+        if isinstance(stmt, ast.Assign) and stmt.value is call and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            target = stmt.targets[0].id
+    if target is None:
+        return False
+    session_names = _names_in(call)
+    seen_call = False
+    for stmt in body:
+        if isinstance(stmt, ast.Assign) and stmt.value is call:
+            seen_call = True
+            continue
+        if not seen_call or not isinstance(stmt, ast.stmt):
+            continue
+        awaits_task = any(isinstance(n, ast.Await) and isinstance(n.value, ast.Name) and n.value.id == target for n in ast.walk(stmt))
+        if awaits_task:
+            return True  # `await task`, `return await task`, `x = await task`
+        if _names_in(stmt) & session_names - {target}:
+            return False  # the creator keeps using the session while the task runs
+    return False
+
+
 def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict[str, str], evidence: Dict[str, str], out: List[Finding]) -> None:
     session_names = {n for n, k in kinds.items() if k in SESSION_KINDS}
     for call in iter_function_calls(func):
@@ -225,6 +251,8 @@ def _check_shared_concurrently(ctx: FileContext, func: FunctionInfo, kinds: Dict
         args = [*call.args, *[k.value for k in call.keywords]]
         per_arg = [_names_in(a) for a in args]
         starred = any(isinstance(a, ast.Starred) for a in call.args)
+        if is_spawn and _spawned_then_awaited(func, call):
+            continue  # task = create_task(f(session)); await task  -> sequential in practice
         candidates = session_names | {n for n in SESSION_LIKE_NAMES if any(n in s for s in per_arg)}
         for sname in sorted(candidates):
             count = sum(1 for s in per_arg if sname in s)
