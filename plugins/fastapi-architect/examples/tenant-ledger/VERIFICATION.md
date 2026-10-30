@@ -25,18 +25,29 @@ $ uv run pytest -q
 ..............................
 30 passed in 7.90s            (22 in the initial record; 5 adversarial tests added for v1.6; 2 tenant-binding tests for v1.7; 1 commit-inside-begin test for v1.8)
 
-$ uv run pytest -q -m remediation tests/test_remediation_targets.py            (v1.9 target, deselected by default)
-1 failed in 1.85s             (fails on the anti-pattern on purpose: InvalidRequestError after the inner commit)
+$ uv run pytest -q -m remediation tests/test_remediation_targets.py            (v1.9 targets, deselected by default)
+5 failed in 2.00s             (they fail on the anti-patterns on purpose: begin-block raise, loop shape, dropped insert, swallowed error, non-atomic loop)
 
-$ python3 ../../../../scripts/audit_remediate.py . --select TX_COMMIT_INSIDE_BEGIN_BLOCK \
-    --authorize-execution --test-command "uv run --frozen --extra dev pytest -q -m remediation tests/test_remediation_targets.py" \
-    --env-passthrough UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR --patch-dir patches --output run.json
-project untouched: yes        (digest of src/ and tests/ identical before and after; the copy lived in a temporary directory)
-tests before: failed (exit 1)  1 failed     -> the defect is observable on PostgreSQL
-tests after:  passed           1 passed     -> after removing the two inner commits in the copy
-cases: 2 verified              antipatterns.py:176 and :190, recipe remove_commit_inside_begin; no new finding in the copy
-(a first attempt without `--extra dev` ended `rejected 2`: pytest was not in the copy's environment and the
- suite failed before and after; the tool reported it as such instead of claiming anything)
+$ python3 ../../../../scripts/audit_remediate.py . --authorize-execution --trust fixture --trust-scope . \
+    --env-passthrough UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR --timeout 900 \
+    --link "src/ledger/modules/ledger/antipatterns.py:176=uv run --frozen --extra dev pytest -q -m remediation tests/test_remediation_targets.py -k test_commit_inside_begin_is_remediated" \
+    --link "src/ledger/modules/ledger/antipatterns.py:190=... -k test_commit_per_item_inside_begin_is_remediated" \
+    --link "SA_ASYNC_SESSION_NOT_AWAITED=... -k note_without_await" --link "TX_COMMIT_IN_LOOP=... -k deposit_each" \
+    --test-command "uv run --frozen --extra dev pytest -q" --patch-dir patches --output run.json
+project untouched: yes        (digest of the project's Python files identical before and after; one temporary copy per case plus a combined copy)
+executor: local (process_hygiene); not provided: network isolation, filesystem confinement beyond the fresh HOME, memory limits, protection against a malicious suite
+cases: 4 verified             each in its own copy, each with its own reproducer run before (failed) and after (passed) on a throwaway PostgreSQL 16 cluster:
+  antipatterns.py:176  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  before: 1 failed  after: 1 passed
+  antipatterns.py:190  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  before: 1 failed  after: 1 passed   (loop shape)
+  antipatterns.py:212  SA_ASYNC_SESSION_NOT_AWAITED  add_await                   before: 2 failed  after: 2 passed   (executed once, no 'never awaited' warning; FK error now surfaces)
+  antipatterns.py:224  TX_COMMIT_IN_LOOP             move_commit_after_loop      before: 1 failed  after: 1 passed   (balance unchanged after a rejected amount)
+combined copy (4 candidates): audit ok; suite before 30 passed; suite after 29 passed, 1 failed -> composable: no
+  the failing test is test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement, which asserts the
+  anti-pattern itself (it documents the raise); applying the candidates to this example would require retiring that test.
+  The tool reports this as a limitation on every candidate instead of hiding it; the four individual verdicts stand.
+73 s wall clock, 112 MB peak RSS (five virtual environments synced from the local uv cache, five clusters)
+(a first attempt without `--extra dev`, in the first delivery, ended `rejected`: pytest was not in the copy's environment; the
+ tool reported the failure instead of claiming anything; with the hardened model that case is `inconclusive: infrastructure_error`)
 
 $ uv run ruff check src tests alembic
 All checks passed!
@@ -44,7 +55,7 @@ $ uv run ruff format --check src tests alembic
 41 files already formatted
 
 $ python3 ../../../../scripts/audit_fastapi.py .          (auditor 1.8.0, schema 1.6)
-files scanned: 38  findings: 8 (high 4, medium 3, low 0, info 1)
+files scanned: 39  findings: 10 (high 5, medium 4, low 0, info 1)
   alembic/versions/0002_rls.py:32  MIG_RAW_SQL                      info   (dynamic SQL: role name from configuration)
   src/ledger/modules/ledger/antipatterns.py:20   TX_READ_MODIFY_WRITE            medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:29   SA_ASYNC_LAZY_LOAD_RISK         medium (deliberate, reproduced in tests)
@@ -53,13 +64,15 @@ files scanned: 38  findings: 8 (high 4, medium 3, low 0, info 1)
   src/ledger/modules/ledger/antipatterns.py:142  SEC_RLS_CONTEXT_FROM_REQUEST    medium (deliberate, reproduced in tests)
   src/ledger/modules/ledger/antipatterns.py:176  TX_COMMIT_INSIDE_BEGIN_BLOCK    high   (deliberate, reproduced in tests; v1.8)
   src/ledger/modules/ledger/antipatterns.py:190  TX_COMMIT_INSIDE_BEGIN_BLOCK    high   (deliberate, loop shape, reproduced in tests; v1.8)
-  the six earlier fingerprints are identical to the v1.7 record; the two new findings carry a `remediation` block (status proposed, never applied)
+  src/ledger/modules/ledger/antipatterns.py:212  SA_ASYNC_SESSION_NOT_AWAITED    high   (deliberate, remediated on PostgreSQL by the tool; v1.9)
+  src/ledger/modules/ledger/antipatterns.py:224  TX_COMMIT_IN_LOOP               medium (deliberate per-item loop, remediated on PostgreSQL by the tool; v1.9)
+  the six v1.7 fingerprints are identical; the four later findings carry a `remediation` block (status proposed, never applied) that names the recipe
   contracts: 13 routes, authenticated 12, public 1 (/health, declared in .audit-fastapi.json; a naming convention alone would leave it as exposure undetermined), unauthenticated and not public 0, authorization visible 9, authorization unknown 1 (the deliberate unbound route)
 $ python3 ../../../../scripts/audit_fastapi.py . --exclude-path "*/antipatterns.py" --ignore MIG_RAW_SQL --fail-on info
 exit 0 (no findings)
 ```
 
-## What each test proves (30 tests plus one deselected remediation target, all against PostgreSQL)
+## What each test proves (30 tests plus five deselected remediation targets, all against PostgreSQL)
 
 | Requirement | Test | Evidence |
 |---|---|---|
@@ -83,7 +96,7 @@ exit 0 (no findings)
 | RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
 | Tenant check present but not bound (v1.7) | `test_tenant_binding.py::test_rls_context_from_the_requested_tenant_leaks_and_membership_binding_closes_it` | with the RLS context set from the URL tenant, a member of ACME reads Globex's accounts (`["globex-ops"]`) although RLS is correctly configured; binding membership first (the real `require_member`) yields 404 for Globex and the ACME rows for ACME |
 | commit() inside `with session.begin()` (v1.8) | `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement` | SQLAlchemy 2.0.55 on PostgreSQL: the inner commit closes the block's transaction and the next statement raises `InvalidRequestError` ("Can't operate on closed transaction inside context manager"); the first delta is committed, the second never runs; the loop shape fails on its second iteration; without the inner commit both deltas are visible together after exit. This record corrected the rule's first draft, which claimed the later statements ran in an unmanaged transaction |
-| Remediation target (v1.9, marker `remediation`, deselected by default) | `test_remediation_targets.py::test_commit_inside_begin_is_remediated` | fails on the anti-pattern (the statement after the inner commit raises) and passes once `scripts/audit_remediate.py` has removed the inner commit in an isolated copy: both deltas are committed together. The tool ran it before and after on a throwaway cluster inside the copy |
+| Remediation targets (v1.9, marker `remediation`, deselected by default) | `test_remediation_targets.py` (5 tests) | each fails on its anti-pattern and passes once its recipe has been applied in the case's isolated copy: begin-block statement after the commit, begin-block loop shape, dropped insert executed exactly once without a `never awaited` warning, a foreign-key error that now surfaces (documented behaviour change of `add_await`), and a per-item deposit loop that leaves the balance unchanged when an amount is rejected (atomicity). The tool ran each before and after on a throwaway cluster inside its copy |
 | Tenant id alone never authorizes (v1.7) | `test_tenant_binding.py::test_a_tenant_id_alone_never_authorizes_a_background_worker` | a worker handed only a tenant id writes into that tenant: the binding must happen where the principal is known, before the id is handed over |
 
 ## Defects found while verifying (and fixed before labelling)

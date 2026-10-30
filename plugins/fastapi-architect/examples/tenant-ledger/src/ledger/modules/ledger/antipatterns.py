@@ -6,11 +6,11 @@ Nothing in the application imports this module.
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ledger.modules.ledger.models import Account
+from ledger.modules.ledger.models import Account, Entry
 
 
 async def naive_deposit(session: AsyncSession, account_id: UUID, amount: int) -> int:
@@ -196,3 +196,29 @@ async def deltas_in_one_block(session: AsyncSession, tenant_id: UUID, account_id
         await set_tenant_context(session, tenant_id)
         await repository.apply_delta(session, tenant_id, account_id, 1)
         await repository.apply_delta(session, tenant_id, account_id, 1)
+
+
+# --------------------------------------------------------------------------- #
+# v1.9 hardening: two more defects with an automatic recipe, verified on PostgreSQL
+# (tests/test_remediation_targets.py, marker `remediation`)
+# --------------------------------------------------------------------------- #
+
+
+async def note_without_await(session: AsyncSession, tenant_id: UUID, account_id: UUID, amount: int) -> None:
+    """The coroutine returned by execute() is dropped: the entry is never written and Python warns
+    'coroutine ... was never awaited'. After `add_await` the insert runs exactly once and its errors
+    (a foreign-key violation, for instance) surface at the call site."""
+    await set_tenant_context(session, tenant_id)
+    session.execute(  # audit: SA_ASYNC_SESSION_NOT_AWAITED
+        insert(Entry).values(tenant_id=tenant_id, account_id=account_id, amount=amount, kind="deposit")
+    )
+    await session.commit()
+
+
+async def deposit_each(session: AsyncSession, tenant_id: UUID, account_id: UUID, amounts: list[int]) -> None:
+    """One transaction per amount: an amount the CHECK constraint rejects leaves the earlier ones
+    committed. After `move_commit_after_loop` the loop is one transaction: all or nothing."""
+    for amount in amounts:
+        await set_tenant_context(session, tenant_id)
+        await repository.apply_delta(session, tenant_id, account_id, amount)
+        await session.commit()  # audit: TX_COMMIT_IN_LOOP
