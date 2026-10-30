@@ -31,6 +31,7 @@ from .model import (
 )
 from .report import compare_with_baseline
 from .resolver import awaited_call_ids, collect_functions, module_imports, resolve_in_scopes
+from .remediation import REMEDIATIONS, build_remediation
 from .rules import FileContext, architecture, async_rules, declared, interprocedural, lifecycle, migrations, reliability, security, sqlalchemy_rules, transactions
 from .suppressions import line_comments, suppression_for
 
@@ -351,6 +352,9 @@ def audit_project(
 
     findings.sort(key=Finding.sort_key)
     skipped.sort(key=lambda item: (item["file"], item["reason"]))
+    # v1.8: classify, then attach the structured (never applied) remediation proposal of the selected rules
+    findings = [replace(f, evidence_state=f.evidence_state or evidence_state_for(f)) for f in findings]
+    findings = [replace(f, remediation=build_remediation(f)) if f.rule in REMEDIATIONS else f for f in findings]
 
     by_rule: Dict[str, int] = {}
     by_severity: Dict[str, int] = {level: 0 for level in SEVERITY_ORDER}
