@@ -108,6 +108,32 @@ def _chain_is_auth(ctx: FileContext, dotted: Optional[str], raw_parts: Optional[
     return False
 
 
+def _enclosing_alias(func: FunctionInfo, name: str) -> Optional[Tuple[Optional[str], Optional[List[str]], str]]:
+    """v1.8: ``Name = Annotated[T, Depends(f)]`` assigned in an enclosing function (routes defined inside an app
+    factory). Returns (dotted provider, raw parts, label) like a module-level alias; None when not found."""
+    parent = func.parent
+    depth = 0
+    while parent is not None and depth < 4:
+        for stmt in parent.body:
+            target = None
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                target, value = stmt.targets[0].id, stmt.value
+            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+                target, value = stmt.target.id, stmt.value
+            if target != name:
+                continue
+            for sub in ast.walk(value):
+                if isinstance(sub, ast.Call):
+                    parts = dotted_name(sub.func)
+                    if parts and parts[-1] in {"Depends", "Security"} and sub.args:
+                        inner = dotted_name(sub.args[0])
+                        label = inner[-1] if inner else (ast.unparse(sub.args[0]) if hasattr(ast, "unparse") else "")
+                        return (parent.resolve(inner) if inner else None, inner, label)
+            return None
+        parent, depth = parent.parent, depth + 1
+    return None
+
+
 def _param_signal(ctx: FileContext, func: FunctionInfo) -> bool:
     defaults = func.param_defaults()
     module = ctx.facts.file_module.get(ctx.relpath, "") if ctx.facts is not None else ""
@@ -136,6 +162,10 @@ def _param_signal(ctx: FileContext, func: FunctionInfo) -> bool:
                 local = f"{module}.{'.'.join(raw_parts)}" if module else ".".join(raw_parts)
                 if _alias_target_is_auth(ctx, imported) or _alias_target_is_auth(ctx, local):
                     return True
+                if len(raw_parts) == 1 and imported is None:
+                    enclosing = _enclosing_alias(func, raw_parts[0])
+                    if enclosing is not None and (AUTH_RE.search(enclosing[2]) or (enclosing[1] and _chain_is_auth(ctx, enclosing[0], enclosing[1]))):
+                        return True
             text = ast.unparse(arg.annotation) if hasattr(ast, "unparse") else ""
             if text and ("Depends(" in text or "Security(" in text) and AUTH_RE.search(text):
                 return True
@@ -215,6 +245,8 @@ def _providers(ctx: FileContext, func: FunctionInfo) -> List[Tuple[str, Optional
                         label = labels.get(alias or "") or next((v for k, v in labels.items() if alias and k.endswith("." + alias.rsplit(".", 1)[-1])), None) or target.rsplit(".", 1)[-1]
                         found = (target if "." in target else None, [target.rsplit(".", 1)[-1]], label)
                         break
+                if found is None and len(raw) == 1 and func.resolve(raw) is None:
+                    found = _enclosing_alias(func, raw[0])  # v1.8: alias assigned in the enclosing app factory
         if found:
             out.append((arg.arg, found[0], found[1], found[2]))
     return out
@@ -564,7 +596,8 @@ def _resource_authorization(ctx: FileContext, contract: RouteContract, func: Fun
             func.lineno,
             getattr(func.node, "col_offset", 0),
             (
-                f"{where} is authenticated through '{', '.join(contract.principal_params)}' and acts on '{', '.join(contract.resource_params)}' "
+                f"{where} is authenticated through '{', '.join(p for p in contract.principal_params if p.strip('_')) or ', '.join(contract.authentication_evidence) or 'a dependency'}' "
+                f"and acts on '{', '.join(contract.resource_params)}' "
                 f"by calling {', '.join(contract.resource_calls_without_principal)} with the resource id but without the principal. "
                 "No role, scope, membership or resource dependency, policy call or comparison relates the resource to the caller in "
                 "the visible code. If the service or a middleware enforces ownership this is a false positive; otherwise any "
