@@ -148,16 +148,18 @@ def sanitised_env(policy: ExecutionPolicy, workspace: Workspace) -> Dict[str, st
     return env
 
 
-def run_command(policy: ExecutionPolicy, workspace: Workspace) -> TestRun:
-    """Execute the policy's command inside the copy; never called without ``policy.authorized``."""
+def run_command(policy: ExecutionPolicy, workspace: Workspace, command: Optional[str] = None) -> TestRun:
+    """Execute ``command`` (default: the policy's suite command) inside the copy. Only executors call this, and
+    only after ``executors.select_executor`` accepted the authorization; the ``authorized`` flag is re-checked."""
     if not policy.authorized:
-        return TestRun(ran=False, refused="execution not authorized")
-    if not policy.command:
-        return TestRun(ran=False, refused="no test command given")
-    argv = parse_command(policy.command)
+        return interpret_run(TestRun(ran=False, refused="execution not authorized"))
+    command = command or policy.command
+    if not command:
+        return interpret_run(TestRun(ran=False, refused="no test command given"))
+    argv = parse_command(command)
     refused = command_allowed(argv, policy.allowed_commands)
     if refused:
-        return TestRun(ran=False, command=argv, refused=refused)
+        return interpret_run(TestRun(ran=False, command=argv, refused=refused))
     try:
         proc = subprocess.run(
             argv,
@@ -172,10 +174,104 @@ def run_command(policy: ExecutionPolicy, workspace: Workspace) -> TestRun:
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-        return TestRun(ran=True, command=argv, returncode=None, passed=False, timed_out=True, stdout_tail=out[-TAIL:], stderr_tail=err[-TAIL:])
+        return interpret_run(TestRun(ran=True, command=argv, returncode=None, passed=False, timed_out=True, stdout_tail=out[-TAIL:], stderr_tail=err[-TAIL:]))
     except (OSError, ValueError) as exc:
-        return TestRun(ran=False, command=argv, refused=f"could not start the command: {exc}")
-    return TestRun(ran=True, command=argv, returncode=proc.returncode, passed=proc.returncode == 0, stdout_tail=proc.stdout[-TAIL:], stderr_tail=proc.stderr[-TAIL:])
+        return interpret_run(TestRun(ran=False, command=argv, refused=f"could not start the command: {exc}"))
+    return interpret_run(TestRun(ran=True, command=argv, returncode=proc.returncode, passed=proc.returncode == 0, stdout_tail=proc.stdout[-TAIL:], stderr_tail=proc.stderr[-TAIL:]))
+
+
+PYTEST_COUNT_RE = re.compile(r"(\d+) (passed|failed|error|errors|skipped|xfailed|xpassed|deselected)\b")
+UNITTEST_RAN_RE = re.compile(r"^Ran (\d+) tests?", re.M)
+UNITTEST_SKIPPED_RE = re.compile(r"skipped=(\d+)")
+
+
+def runner_kind(argv: Optional[List[str]]) -> str:
+    tokens = " ".join(argv or [])
+    if "pytest" in tokens:
+        return "pytest"
+    if "unittest" in tokens:
+        return "unittest"
+    return "generic"
+
+
+def interpret_run(run: TestRun) -> TestRun:
+    """Derive ``outcome`` and ``counts`` from the runner's conventions. A passing exit code with no test
+    executed (none collected, all skipped) is **not** a pass; runner-internal and usage errors are
+    infrastructure, never a verdict on the patch."""
+    from .model import (
+        OUTCOME_FAILED,
+        OUTCOME_INFRASTRUCTURE_ERROR,
+        OUTCOME_NO_TESTS,
+        OUTCOME_NOT_RUN,
+        OUTCOME_PASSED,
+        OUTCOME_REFUSED,
+        OUTCOME_SKIPPED_ONLY,
+        OUTCOME_TIMEOUT,
+    )
+
+    run.runner = runner_kind(run.command)
+    text = (run.stdout_tail or "") + "\n" + (run.stderr_tail or "")
+    if run.refused:
+        run.outcome = OUTCOME_REFUSED
+        return run
+    if not run.ran:
+        run.outcome = OUTCOME_NOT_RUN
+        return run
+    if run.timed_out:
+        run.outcome = OUTCOME_TIMEOUT
+        run.passed = False
+        return run
+    counts: Dict[str, int] = {}
+    if run.runner == "pytest":
+        for number, label in PYTEST_COUNT_RE.findall(text):
+            key = "errors" if label.startswith("error") else label
+            counts[key] = counts.get(key, 0) + int(number)
+        run.counts = counts
+        code = run.returncode
+        if code == 0:
+            if counts.get("passed", 0) == 0 and (counts.get("skipped", 0) > 0 or "no tests ran" in text.lower()):
+                run.outcome = OUTCOME_SKIPPED_ONLY if counts.get("skipped", 0) else OUTCOME_NO_TESTS
+                run.passed = False
+            else:
+                run.outcome = OUTCOME_PASSED
+        elif code == 1:
+            # 'errors' are exceptions outside a test body (fixture setup such as a database that did not start,
+            # collection errors): infrastructure, not a verdict; 'failed' are assertion failures
+            if counts.get("errors", 0) > 0 and counts.get("failed", 0) == 0:
+                run.outcome = OUTCOME_INFRASTRUCTURE_ERROR
+            else:
+                run.outcome = OUTCOME_FAILED
+        elif code == 5:
+            run.outcome, run.passed = OUTCOME_NO_TESTS, False
+        else:  # 2 interrupted, 3 internal error, 4 usage/config error, anything else
+            run.outcome, run.passed = OUTCOME_INFRASTRUCTURE_ERROR, False
+        return run
+    if run.runner == "unittest":
+        ran = UNITTEST_RAN_RE.search(text)
+        skipped = UNITTEST_SKIPPED_RE.search(text)
+        if ran:
+            counts["ran"] = int(ran.group(1))
+        if skipped:
+            counts["skipped"] = int(skipped.group(1))
+        run.counts = counts
+        code = run.returncode
+        if code == 0:
+            if ran and counts["ran"] == 0:
+                run.outcome, run.passed = OUTCOME_NO_TESTS, False
+            elif ran and counts.get("skipped", 0) >= counts["ran"] > 0:
+                run.outcome, run.passed = OUTCOME_SKIPPED_ONLY, False
+            elif ran is None:
+                run.outcome, run.passed = OUTCOME_INFRASTRUCTURE_ERROR, False  # no summary line: not a unittest run we can read
+            else:
+                run.outcome = OUTCOME_PASSED
+        elif code == 1 and (ran or "FAILED" in text):
+            # a selector that does not resolve (unittest.loader._FailedTest) or an import error is infrastructure
+            run.outcome = OUTCOME_INFRASTRUCTURE_ERROR if ("_FailedTest" in text or "ModuleNotFoundError" in text) else OUTCOME_FAILED
+        else:
+            run.outcome, run.passed = OUTCOME_INFRASTRUCTURE_ERROR, False
+        return run
+    run.outcome = OUTCOME_PASSED if run.returncode == 0 else OUTCOME_FAILED
+    return run
 
 
 def digest_tree(root: str, suffixes: Tuple[str, ...] = (".py",), ignored: Tuple[str, ...] = DEFAULT_IGNORED_DIRS) -> Dict[str, str]:

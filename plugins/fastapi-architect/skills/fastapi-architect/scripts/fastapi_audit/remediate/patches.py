@@ -292,6 +292,46 @@ def move_commit_after_loop(finding: Dict[str, object], source: str) -> Union[Pat
     return _proposal(RECIPE_MOVE_COMMIT_AFTER_LOOP, str(finding["file"]), summary, source, edits)
 
 
+# what each recipe promises, and how the pipeline checks it (audit | parse | linked_tests)
+RECIPE_META: Dict[str, Dict[str, object]] = {
+    RECIPE_REMOVE_COMMIT_INSIDE_BEGIN: {
+        "rule": "TX_COMMIT_INSIDE_BEGIN_BLOCK",
+        "maturity": "postgresql-verified",
+        "changes_failure_semantics": False,
+        "invariants": [
+            ("the finding is no longer detected, active or suppressed", "audit"),
+            ("no new finding appears in the copy", "audit"),
+            ("the patched file parses", "parse"),
+            ("every statement of the block runs inside the transaction the block owns: all writes visible together after exit, none after an exception, no InvalidRequestError on the following statement", "linked_tests"),
+        ],
+    },
+    RECIPE_ADD_AWAIT: {
+        "rule": "SA_ASYNC_SESSION_NOT_AWAITED",
+        "maturity": "postgresql-verified",
+        "changes_failure_semantics": True,  # errors of the statement now surface at the call site
+        "invariants": [
+            ("the finding is no longer detected, active or suppressed", "audit"),
+            ("no new finding appears in the copy", "audit"),
+            ("the patched file parses and the call sits in an async def", "parse"),
+            ("the statement executes exactly once and no 'coroutine was never awaited' warning is emitted", "linked_tests"),
+            ("exceptions raised by the statement now propagate at the call site (documented change)", "linked_tests"),
+        ],
+    },
+    RECIPE_MOVE_COMMIT_AFTER_LOOP: {
+        "rule": "TX_COMMIT_IN_LOOP",
+        "maturity": "postgresql-verified",
+        "changes_failure_semantics": True,  # all or nothing instead of partial progress
+        "invariants": [
+            ("the finding is no longer detected, active or suppressed", "audit"),
+            ("no new finding appears in the copy", "audit"),
+            ("the patched file parses; the loop contains no return", "parse"),
+            ("either every item is committed or none is; a failure half-way leaves nothing committed", "linked_tests"),
+            ("the committed rows after a successful run are unchanged", "linked_tests"),
+        ],
+    },
+}
+
+
 GENERATORS: Dict[str, Callable[[Dict[str, object], str], Union[PatchProposal, Blocked]]] = {
     RECIPE_REMOVE_COMMIT_INSIDE_BEGIN: remove_commit_inside_begin,
     RECIPE_ADD_AWAIT: add_await,
