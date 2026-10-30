@@ -32,7 +32,10 @@ packages = ["src/ledger"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider -m 'not remediation'"
-markers = ["remediation: passes only once the anti-pattern has been remediated; selected by scripts/audit_remediate.py, deselected by default"]
+markers = [
+  "remediation: passes only once the anti-pattern has been remediated; selected by scripts/audit_remediate.py, deselected by default",
+  "antipattern_demo: asserts the defective behaviour of an anti-pattern on purpose (documentation); excluded from the regression suite of the corrected code (-m 'remediation or not antipattern_demo')",
+]
 
 [tool.ruff]
 line-length = 110

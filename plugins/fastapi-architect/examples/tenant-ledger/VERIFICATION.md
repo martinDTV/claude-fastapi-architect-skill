@@ -33,21 +33,24 @@ $ python3 ../../../../scripts/audit_remediate.py . --authorize-execution --trust
     --link "src/ledger/modules/ledger/antipatterns.py:176=uv run --frozen --extra dev pytest -q -m remediation tests/test_remediation_targets.py -k test_commit_inside_begin_is_remediated" \
     --link "src/ledger/modules/ledger/antipatterns.py:190=... -k test_commit_per_item_inside_begin_is_remediated" \
     --link "SA_ASYNC_SESSION_NOT_AWAITED=... -k note_without_await" --link "TX_COMMIT_IN_LOOP=... -k deposit_each" \
-    --test-command "uv run --frozen --extra dev pytest -q" --patch-dir patches --output run.json
-project untouched: yes        (digest of the project's Python files identical before and after; one temporary copy per case plus a combined copy)
+    --test-command "uv run --frozen --extra dev pytest -q -m 'remediation or not antipattern_demo'" --patch-dir patches --output run.json
+project untouched: yes        (digest of the project's Python files identical before and after; one temporary copy per case plus a composed copy)
 executor: local (process_hygiene); not provided: network isolation, filesystem confinement beyond the fresh HOME, memory limits, protection against a malicious suite
-cases: 4 verified             each in its own copy, each with its own reproducer run before (failed) and after (passed) on a throwaway PostgreSQL 16 cluster:
-  antipatterns.py:176  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  before: 1 failed  after: 1 passed
-  antipatterns.py:190  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  before: 1 failed  after: 1 passed   (loop shape)
-  antipatterns.py:212  SA_ASYNC_SESSION_NOT_AWAITED  add_await                   before: 2 failed  after: 2 passed   (executed once, no 'never awaited' warning; FK error now surfaces)
-  antipatterns.py:224  TX_COMMIT_IN_LOOP             move_commit_after_loop      before: 1 failed  after: 1 passed   (balance unchanged after a rejected amount)
-combined copy (4 candidates): audit ok; suite before 30 passed; suite after 29 passed, 1 failed -> composable: no
-  the failing test is test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement, which asserts the
-  anti-pattern itself (it documents the raise); applying the candidates to this example would require retiring that test.
-  The tool reports this as a limitation on every candidate instead of hiding it; the four individual verdicts stand.
-73 s wall clock, 112 MB peak RSS (five virtual environments synced from the local uv cache, five clusters)
-(a first attempt without `--extra dev`, in the first delivery, ended `rejected`: pytest was not in the copy's environment; the
- tool reported the failure instead of claiming anything; with the hardened model that case is `inconclusive: infrastructure_error`)
+cases: 4 verified             each in its own copy, each reproducer instrumented with the pytest JUnit adapter (report bound to the run by its nonce),
+                              run before (failed) and after (passed) on a throwaway PostgreSQL 16 cluster, with the tests that flipped:
+  antipatterns.py:176  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  1 executed: failed -> passed   flipped test_commit_inside_begin_is_remediated
+  antipatterns.py:190  TX_COMMIT_INSIDE_BEGIN_BLOCK  remove_commit_inside_begin  1 executed: failed -> passed   flipped test_commit_per_item_inside_begin_is_remediated
+  antipatterns.py:212  SA_ASYNC_SESSION_NOT_AWAITED  add_await                   2 executed: failed -> passed   flipped ..._executes_exactly_once_without_warnings, ..._surfaces_database_errors_after_the_fix
+  antipatterns.py:224  TX_COMMIT_IN_LOOP             move_commit_after_loop      1 executed: failed -> passed   flipped test_deposit_each_is_atomic_when_an_amount_is_rejected
+composition: verified         the four candidates applied to one more copy (identities and digests recorded); audit clean; every reproducer passes there;
+                              regression suite of the corrected code (-m 'remediation or not antipattern_demo') before: 29 passed, 5 failed; after: 34 passed
+124 s wall clock, 116 MB peak RSS (six virtual environments synced from the local uv cache, six clusters)
+Why the regression suite excludes one test: tests/test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement asserts the
+anti-pattern's defective behaviour on purpose (it documents the raise). An earlier composition that ran the default suite failed exactly that test;
+it was neither deleted nor silenced: it carries the `antipattern_demo` marker, still runs in the default suite against the anti-pattern code, and
+the regression suite of the corrected code is declared without it. The other anti-pattern tests keep passing after the candidates.
+(the first delivery's attempt without `--extra dev` ended `rejected`: pytest was not in the copy's environment; with the hardened model that run
+ is `inconclusive: infrastructure_error`, and a run whose report is missing is `inconclusive: evidence_missing`)
 
 $ uv run ruff check src tests alembic
 All checks passed!
@@ -96,7 +99,7 @@ exit 0 (no findings)
 | RLS configuration invariants (v1.6) | `test_adversarial.py::test_rls_configuration_invariants_hold` | the application role is not superuser, cannot bypass RLS, cannot create roles, owns no table; `accounts`, `entries` and `idempotency_keys` have RLS enabled and forced |
 | Tenant check present but not bound (v1.7) | `test_tenant_binding.py::test_rls_context_from_the_requested_tenant_leaks_and_membership_binding_closes_it` | with the RLS context set from the URL tenant, a member of ACME reads Globex's accounts (`["globex-ops"]`) although RLS is correctly configured; binding membership first (the real `require_member`) yields 404 for Globex and the ACME rows for ACME |
 | commit() inside `with session.begin()` (v1.8) | `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement` | SQLAlchemy 2.0.55 on PostgreSQL: the inner commit closes the block's transaction and the next statement raises `InvalidRequestError` ("Can't operate on closed transaction inside context manager"); the first delta is committed, the second never runs; the loop shape fails on its second iteration; without the inner commit both deltas are visible together after exit. This record corrected the rule's first draft, which claimed the later statements ran in an unmanaged transaction |
-| Remediation targets (v1.9, marker `remediation`, deselected by default) | `test_remediation_targets.py` (5 tests) | each fails on its anti-pattern and passes once its recipe has been applied in the case's isolated copy: begin-block statement after the commit, begin-block loop shape, dropped insert executed exactly once without a `never awaited` warning, a foreign-key error that now surfaces (documented behaviour change of `add_await`), and a per-item deposit loop that leaves the balance unchanged when an amount is rejected (atomicity). The tool ran each before and after on a throwaway cluster inside its copy |
+| Remediation targets (v1.9, marker `remediation`, deselected by default) | `test_remediation_targets.py` (5 tests) | each fails on its anti-pattern and passes once its recipe has been applied in the case's isolated copy: begin-block statement after the commit, begin-block loop shape, dropped insert executed exactly once without a `never awaited` warning, a foreign-key error that now surfaces (documented behaviour change of `add_await`), and a per-item deposit loop that leaves the balance unchanged when an amount is rejected (atomicity). The tool ran each before and after on a throwaway cluster inside its copy, reading the JUnit report bound to the run; `test_antipatterns.py::test_commit_inside_begin_block_raises_on_the_next_statement` carries the `antipattern_demo` marker because it asserts the defect on purpose |
 | Tenant id alone never authorizes (v1.7) | `test_tenant_binding.py::test_a_tenant_id_alone_never_authorizes_a_background_worker` | a worker handed only a tenant id writes into that tenant: the binding must happen where the principal is known, before the id is handed over |
 
 ## Defects found while verifying (and fixed before labelling)

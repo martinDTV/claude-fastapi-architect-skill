@@ -89,6 +89,7 @@ async def test_implicit_lazy_load_raises_missing_greenlet_and_selectinload_fixes
         assert await entries_eager(session, aid) == 1
 
 
+@pytest.mark.antipattern_demo
 async def test_commit_inside_begin_block_raises_on_the_next_statement(client, app_engine, acme):
     """TX_COMMIT_INSIDE_BEGIN_BLOCK, reproduced on PostgreSQL with SQLAlchemy 2.0: the inner commit
     closes the block's transaction; the statement after it raises InvalidRequestError, so the first
