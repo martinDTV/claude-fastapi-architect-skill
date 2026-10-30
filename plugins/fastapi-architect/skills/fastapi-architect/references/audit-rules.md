@@ -1,6 +1,6 @@
 # Static audit rules: what each one proves, what it cannot, and how to verify
 
-Catalogue for `scripts/audit_fastapi.py` (v1.6, report schema 1.4; additive over 1.0–1.3). Read it when interpreting a report, deciding whether a finding is a defect, or explaining why the tool stayed silent. `--list-rules` prints the short form.
+Catalogue for `scripts/audit_fastapi.py` (v1.7, report schema 1.5; additive over 1.0–1.4). Read it when interpreting a report, deciding whether a finding is a defect, or explaining why the tool stayed silent. `--list-rules` prints the short form.
 
 Every finding carries `verification`:
 
@@ -142,6 +142,18 @@ The engine now resolves relative imports, facade re-exports, instance attributes
 | `SA_SESSION_SHARED_CONCURRENTLY` (extended) | Also `gather(self._a(), self._b())` where both methods use the same `self._session`; the `call_path` names the methods | That the driver raises: asyncpg serialises statements with a lock, so the sharing is silent and the two units share one transaction (see `examples/tenant-ledger/tests/test_adversarial.py`) | Two units of work on one session where one rolls back: the other's write disappears |
 | `TX_EXTERNAL_CALL_IN_TRANSACTION` (extended) | Also a project call inside the transaction block whose callee reaches the network within two calls; the `call_path` is the evidence | — | — |
 
+## Rules added in v1.7 (schema 1.5, built on route contracts)
+
+| Rule | Proves | Does not prove | Verify |
+|---|---|---|---|
+| `SEC_RESOURCE_AUTHZ_UNVERIFIED` | An authenticated route acts on a resource id from the path and hands it to project code without the principal, and no authorization kind is visible on the route (`evidence: unknown`) | That ownership is not enforced through ambient state (a ContextVar, middleware) or inside the service | A user unrelated to the resource calls the route: 403/404 and no change |
+| `SEC_RLS_CONTEXT_FROM_REQUEST` | The row-level-security context (`set_config` / `SET LOCAL`, directly or through a project call) is set from a request-supplied tenant id in an authenticated route that does not bind that tenant to the principal (`evidence: verified`); it replaces the generic tenant-binding question for that route | That the leak is reachable in deployment (a gateway may bind the tenant) | Member of A asks for B: the reference implementation reproduces the leak on PostgreSQL and the membership binding that closes it |
+| `ASYNC_COROUTINE_NOT_AWAITED` | A project `async def` is called and its coroutine is dropped: bare statement, assignment never awaited or scheduled, or `return coro()` from an `async def` | That the dropped work mattered | `-W error::RuntimeWarning` in tests, or assert the callee's side effect |
+| `ASYNC_LOCK_PER_CALL` | A lock/semaphore is constructed inside the function that acquires it | That the critical section needed a lock at all (a database invariant needs a database guarantee) | Two concurrent calls sleeping inside the section are both inside |
+| `REL_HTTP_CLIENT_PER_CALL` | An httpx client is built inside a function, used there and neither managed with `with`, closed, returned nor stored | That connections leak in a given runtime | Socket count under load; share the client in the lifespan |
+
+Contracts and declarations: `public_routes` (globs) and `tenant_params` (domain tenant names) in `.audit-fastapi.json`; `# audit-fastapi: public` on a route. `SEC_ROUTE_WITHOUT_AUTH_SIGNAL` stays silent on declared-public routes and no longer treats `@router.get("")` on a prefixed router as public. The words `staff` and `manager` are no longer privilege signals (they name user types); `is_staff`-style attribute changes are still privilege changes.
+
 ## Backlog (not implemented on purpose)
 
-`SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count, inbox/dedup detection on consumers, lock ordering and deadlock analysis, cancellation landing inside a driver operation, attribute chains deeper than one level, decorators that replace functions, Protocols with several implementations (deliberately `ambiguous`). Each needs either deeper flow analysis or runtime data; they are documented here so their absence is not read as a clean bill.
+`SET LOCAL` outside an explicit transaction, hard-coded permissions, external identifiers, multiple commits per use case, long transactions by statement count, inbox/dedup detection on consumers, lock ordering and deadlock analysis, cancellation landing inside a driver operation, attribute chains deeper than one level, decorators that replace functions, Protocols with several implementations (deliberately `ambiguous`), authorization carried by ambient state (ContextVars, request.state), identity propagation into workers beyond the first hop, SQL filters whose tenant value comes from the request inside services. Each needs either deeper flow analysis or runtime data; they are documented here so their absence is not read as a clean bill.
