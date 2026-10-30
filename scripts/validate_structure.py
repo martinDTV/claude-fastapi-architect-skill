@@ -34,7 +34,7 @@ assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
 for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
 assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
-for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_sarif_schema.py','test_plugin_evals.py'):
+for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_audit_v18.py','test_sarif_schema.py','test_plugin_evals.py'):
     assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
 evals_dir=root/'plugins/fastapi-architect/evals'
 cases=[d for d in evals_dir.iterdir() if d.is_dir() and d.name!='results'] if evals_dir.is_dir() else []
@@ -50,6 +50,15 @@ assert (root/'tests/fixtures/truth16/README.md').is_file(), 'Missing tests/fixtu
 for part in ('dev','acceptance','holdout'):
     assert (root/f'tests/fixtures/truth17/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth17/{part}/EXPECTATIONS.md'
 assert (root/'scripts/audit_precision.py').is_file(), 'Missing scripts/audit_precision.py'
+# v1.8: precision corpora, the report comparison tool (skill + root shim) and the remediation module
+for part in ('dev','acceptance'):
+    assert (root/f'tests/fixtures/truth18/{part}/EXPECTATIONS.md').is_file(), f'Missing tests/fixtures/truth18/{part}/EXPECTATIONS.md'
+diff_tool=base/'scripts/audit_diff.py'
+diff_shim=root/'scripts/audit_diff.py'
+assert diff_tool.is_file(), f'Missing comparison tool: {diff_tool}'
+assert diff_shim.is_file() and 'audit_diff.py' in diff_shim.read_text(encoding='utf-8'), 'Root audit_diff.py does not forward to the skill tool'
+compile(diff_tool.read_text(encoding='utf-8'),str(diff_tool),'exec')
+assert (package/'remediation.py').is_file(), 'Missing fastapi_audit/remediation.py'
 compile((root/'scripts/audit_precision.py').read_text(encoding='utf-8'),'audit_precision.py','exec')
 assert (root/'tests/fixtures/contracts_declared/.audit-fastapi.json').is_file(), 'Missing declared-contracts fixture'
 assert (root/'tests/fixtures/regressions_v17/.audit-fastapi.json').is_file(), 'Missing v1.7 regression fixture'

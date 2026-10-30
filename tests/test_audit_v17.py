@@ -55,7 +55,7 @@ class ContractTests(unittest.TestCase):
         cls.routes = {c["function"]: c for c in cls.report["contracts"]["routes"]}
 
     def test_contract_block_is_additive_and_summarised(self) -> None:
-        self.assertEqual(self.report["schema_version"], "1.5")
+        self.assertGreaterEqual(tuple(int(x) for x in self.report["schema_version"].split(".")), (1, 5))  # 1.5 introduced the block; later schemas are additive
         summary = self.report["contracts"]["summary"]
         self.assertEqual(summary["routes"], len(self.report["contracts"]["routes"]))
         self.assertEqual(summary["unauthenticated_not_public"], 1)  # /orders
@@ -198,10 +198,10 @@ class CompatibilityTests(ProjectCase):
         for rule in ("SEC_RESOURCE_AUTHZ_UNVERIFIED", "SEC_RLS_CONTEXT_FROM_REQUEST", "ASYNC_COROUTINE_NOT_AWAITED", "ASYNC_LOCK_PER_CALL", "REL_HTTP_CLIENT_PER_CALL",
                      "CONTRACT_ROUTE_AUTH_REQUIRED", "CONTRACT_MUTATION_AUTHZ_REQUIRED", "CONTRACT_IMPORT_FORBIDDEN", "CONTRACT_COMMIT_OUTSIDE_LAYER", "REL_CONSUMER_WITHOUT_INBOX"):
             self.assertIn(rule, audit.RULES)
-        self.assertEqual(len(audit.RULES), 58)
+        self.assertEqual(len(audit.RULES), 59)  # v1.7 shipped 58; v1.8 adds TX_COMMIT_INSIDE_BEGIN_BLOCK (see tests/test_audit_v18.py)
         self.assertIn("contracts", audit.CATEGORIES)
-        self.assertEqual(audit.SCHEMA_VERSION, "1.5")
-        self.assertEqual(audit.TOOL_VERSION, "1.7.0")
+        self.assertEqual(audit.SCHEMA_VERSION, "1.6")  # additive over 1.5: details, remediation, commit_loops, coverage/uncertainty keys
+        self.assertEqual(audit.TOOL_VERSION, "1.8.0")
 
     def test_report_without_routes_has_an_empty_contract_block(self) -> None:
         self.write("app/m.py", "def f():\n    return 1\n")
