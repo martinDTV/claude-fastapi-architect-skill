@@ -170,6 +170,33 @@ def test_the_application_role_cannot_lift_the_protection(database_url):
             run(sql(database_url, statement, commit=True))
 
 
+def test_the_context_is_a_setting_that_any_statement_run_as_the_application_role_can_change(client, database_url):
+    """The boundary of the mechanism: the policies read a transaction setting, and the application role may set it. A
+    statement executed as that role (application code, or an injection that reaches statement level) can switch tenant;
+    a bound parameter cannot. Row-level security protects against missing filters, not against arbitrary SQL."""
+    seed(client)
+    switch = f"SELECT set_config(:key, :other, true), (SELECT count(*) FROM {TABLE})"
+    rows = run(sql(database_url, switch, {"key": CONTEXT_KEY, "other": str(TENANT_B)}, tenant=TENANT_A))
+    assert rows[0][1] == 1  # after the switch the same transaction sees tenant B's row: the limit, demonstrated
+    injected = f"'; SELECT set_config('{CONTEXT_KEY}', '{TENANT_B}', true); --"
+    probe = f"SELECT count(*) FROM {TABLE} WHERE CAST(id AS text) = :value"
+    # a bound parameter is data, not a statement: nothing is switched and the context stays on tenant A
+    assert run(sql(database_url, probe, {"value": injected}, tenant=TENANT_A))[0][0] == 0
+    assert run(sql(database_url, f"SELECT count(*) FROM {TABLE}", tenant=TENANT_A))[0][0] == 1
+
+
+def test_the_application_role_has_row_privileges_only(database_url):
+    for statement, reason in (
+        ("SELECT rolpassword FROM pg_authid LIMIT 1", "permission denied"),
+        ("SELECT * FROM alembic_version", "permission denied"),
+        ("CREATE TABLE smuggled (id int)", "permission denied"),
+        (f"CREATE POLICY open_door ON {TABLE} USING (true)", "must be owner"),
+        (f"ALTER TABLE {TABLE} OWNER TO current_user", "must be owner|permission denied"),
+    ):
+        with pytest.raises(DBAPIError, match=reason):
+            run(sql(database_url, statement, commit=True))
+
+
 def test_concurrent_requests_of_two_tenants_never_see_each_other(app):
     async def scenario() -> list[tuple[str, int, list]]:
         results: list[tuple[str, int, list]] = []

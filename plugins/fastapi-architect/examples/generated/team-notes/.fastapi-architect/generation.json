@@ -1,9 +1,9 @@
 {
   "files": {
     ".audit-fastapi.json": "cf20265bcfd25b9421cb451fe7c045c7f91c924e48866086a49fda9cb4753b56",
-    ".env.example": "60f9a5d3e4552162b437051469d684361e28c143c5081905a3f6ed33bfa6e4df",
+    ".env.example": "f443db984439b2e6a9d70207eb12781d897e5245f0d886eeb6b96b5fbde82490",
     ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
-    "README.md": "adc793bbcb677a1e38b9504e0d4005061dcf2438cf2b74d7409d499c55fd9429",
+    "README.md": "cd1aa0814ba6d56033060e41c15928c5ba3ce418f9050632c1641d8d1fc84d47",
     "pyproject.toml": "707fc13ce6b84981557b37806e6f02291d62ae83b3bd73e773b7d0446ce3d400",
     "src/team_notes/__init__.py": "9f8069f44a1e182cf1060c128e8a16fa568b2f2125ca5945c47729c13b18adfc",
     "src/team_notes/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -11,9 +11,9 @@
     "src/team_notes/api/router.py": "c166d67a5f9f356cc73f004e4b8de59c45d5defe989a56e5696e4b18d859b3b8",
     "src/team_notes/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/team_notes/core/authz.py": "49dd7cf344d9b5676ec7fc26c64d8d5591e2bbe83cb5b81b5fcd94e94ad627c6",
-    "src/team_notes/core/config.py": "51ca01db14bb183d9b9ff5458590a6bed5c904247f6e2f140b433c0ad9e0e48d",
+    "src/team_notes/core/config.py": "0acfc86ed3ca25b2a430835202ae8a9261d0f924084bc788dea36e991389b879",
     "src/team_notes/core/errors.py": "a47bf9f9299223787ede53bcb5875292dc8f75f7fcf19fc79aad76fbd0db0174",
-    "src/team_notes/core/security.py": "03e699bfdb137aeda6ee42a28591f8bcebd3df9c3d0479b15f462a6a57720942",
+    "src/team_notes/core/security.py": "105c18906ca27dc5895d7afd2d67e23a1c11dbe2b1bf28754c2eb1be4d177922",
     "src/team_notes/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/team_notes/dependencies/notes.py": "560a2daa63196c7d2c57cae571bf2664667bbd06613c09687d305beca8c08155",
     "src/team_notes/main.py": "adcd5af6bc1175b3ce593888b3c37a430615bff354193ea598bed5fe9eb6844f",
@@ -26,8 +26,9 @@
     "src/team_notes/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/team_notes/services/notes.py": "96c5511b5662550445250cabbc54737cf80dd1743f30b0499868590a15c49e76",
     "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "tests/conftest.py": "633bfab85555bbe6eee361c40ec49ecb4545e0424b2ab8f021ed8631cafb512c",
+    "tests/conftest.py": "aec01349c2846c4d41ec48f06b229de751b107e8dda55d805ec2c9be7c93e0e6",
     "tests/test_auth.py": "8faafaeb47454b7bb26550ce90c60ffcdbd89b8ba95ab966c18ab4cfa2a10659",
+    "tests/test_jwks.py": "c5fd99b05cadecfe1d6c7c220af7c94981a33dd8a8f8849186bb104a5e8a895b",
     "tests/test_notes.py": "22dd39f4c73b8b25bf8eaa2e72cc3cca3949fe56e7d7dd9e0d3247bfc6d4e7c7"
   },
   "history": [

@@ -38,7 +38,7 @@
     "tests/conftest.py": "68e047ec279e238497466c39e15893d4492ee43fc1a66ee998d43f9a97d0753a",
     "tests/test_migrations.py": "4d7c72c28c9e5888ed33680321574784eaf02476d96bf1d261853bb1a63a2051",
     "tests/test_projects.py": "7ae1609bb4fe08fac6e7a1427f77d647ce0afd3eca6b254c488456bf28b41c93",
-    "tests/test_rls.py": "fd5526a851c02ab1ba3c9c84b365d07514ebb3a9074bc425f00aaa68dbc7173f",
+    "tests/test_rls.py": "34e9996f8eb998ce1faa4330b03bffd183ceb8699e087690deac89b319846868",
     "tests/test_tasks.py": "6093c6838b89ee58c46352a4a0ec7cc04ed0094e42c7be282540e19b423d6385"
   },
   "history": [

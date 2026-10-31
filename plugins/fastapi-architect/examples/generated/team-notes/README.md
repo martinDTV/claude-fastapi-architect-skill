@@ -53,6 +53,7 @@ tests/
   __init__.py
   conftest.py
   test_auth.py
+  test_jwks.py
   test_notes.py
 ```
 

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     oidc_jwks_url: str = "https://login.example.com/.well-known/jwks.json"
     oidc_jwks_json: str = ""  # static JWKS document for tests only (refused unless environment == "test")
     oidc_jwks_cache_s: int = 300
+    oidc_jwks_stale_max_s: int = 3600  # keep serving the last keys this long when a refresh fails; never without any
+    oidc_fetch_timeout_s: float = 5.0
+    oidc_ca_bundle: str = ""  # PEM bundle of a private CA that signs the provider certificate; empty: system store
     oidc_leeway_s: int = 30
 
 

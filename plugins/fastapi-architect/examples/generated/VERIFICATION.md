@@ -295,3 +295,73 @@ shared_schema_application_scoping`, and an evolution plan names it in the risks.
 - Concurrency covers 24 interleaved requests on one process; it is not a load test.
 - Everything executed ran through the local executor (process hygiene, not a sandbox), authorised explicitly by
   the test that generated the project.
+
+# Security acceptance hardening (after increment 5)
+
+Run of 2026-10-31, same machine and tooling as the increment 5 section.
+
+## Auditor precision (`scripts/audit_precision.py --against HEAD`, working tree versus `36211c1`)
+
+| Corpus or project | Before (tp/fp/fn) | After (tp/fp/fn) | Findings before → after |
+|---|---|---|---|
+| truth16 | 16/0/0 | 16/0/0 | identical per rule |
+| truth17 dev | 21/0/0 | 21/0/0 | identical per rule |
+| truth17 acceptance | 11/3/2 | 11/3/2 | identical per rule (the three known FPs and two FNs predate this change) |
+| truth18 dev | 7/0/0 | 7/0/0 | identical per rule |
+| truth18 acceptance | 5/0/0 | 5/0/0 | identical per rule |
+| plataforma-citas-medicas (read-only) | n/a | n/a | 52 → 52; `authorization_visible` 127 → 125 (two routes with router-level authentication only lose a kind they never had; four routes gain one through a delegated decision); project edges 9790 → 9791 |
+| agentforge-notify (read-only) | n/a | n/a | 15 → 15 |
+
+Holdout not re-scored. The intermediate state of the change (structural evidence without the denial rule and
+without following re-exports across source-root spellings) would have moved 54 routes of the clinic project to
+"unknown" and added two `SEC_PRIVILEGE_CHANGE_UNVERIFIED` findings on real permission dependencies; both gaps were
+closed before the change was accepted, which is what the calibration projects are for.
+
+## Negative controls of the name-based heuristic (`tests/fixtures/regressions_v20/named_authz`)
+
+| Dependency | Shape | Before | After |
+|---|---|---|---|
+| `require_nothing` | returns the user, no check | `role` | `authorization_named_only`, unknown, `CONTRACT_MUTATION_AUTHZ_REQUIRED` + `SEC_RESOURCE_AUTHZ_UNVERIFIED` |
+| `require_admin_none` | `-> None`, no check | `role` | named only, unknown, `CONTRACT_MUTATION_AUTHZ_REQUIRED` (no principal to bind) |
+| `require_any_token` | yields a principal for any header | `role` | named only, unknown, both findings |
+| `require_authenticated` | 401 only | `role` | named only, unknown, both findings |
+| `require_editor` | copies the principal through | `role` | named only, unknown, both findings |
+| `require_owner` | never reads the principal | `role` | named only, unknown, `CONTRACT_MUTATION_AUTHZ_REQUIRED` |
+| `get_ctx` over `require_admin_none` | nested name-only | nothing visible | named only (chain named), unknown, both findings |
+| `current_superuser` (external) | not in the project | `role` | named only ("implementation not in the project"), unknown, both findings |
+| `require_admin`, `require_scope("x")`, `RoleChecker("admin")`, `get_admin_ctx`, `guard`, `gate` | real decisions (condition, closure, `__call__`, nested, 403, delegated) | `role` | `role` with the line of the decision |
+| router `dependencies=[Depends(require_admin)]` / `[Depends(require_nothing)]` | | `role`+`router_dependencies` / `role`+`router_dependencies` | `role`+`router_dependencies` / nothing (named only) |
+
+## JWKS client over HTTPS (`team-notes`, generated `tests/test_jwks.py`, through the trust model)
+
+`team-notes` now passes **71 generated tests** (54 in increment 5): the 17 new ones run against an HTTPS identity
+provider started on 127.0.0.1 with a session certificate authority trusted only through `oidc_ca_bundle`
+(certificate and hostname verification on; strict verifiers required subject and authority key identifiers, key
+usage and server-auth usage on the certificates, which the generated tests now emit). Scenarios and outcomes:
+valid fetch and signature (one hit), cache (one hit for five requests), rotation (a new `kid` is 401 until the
+30 s interval passes, then fetched once), ten forged `kid`s cause at most one fetch, a key replaced under the same
+`kid` is 401 until the cache expires, a removed key is 401 after expiry, malformed JSON / invalid set / symmetric-only
+set / JSON list / HTTP 500 / HTTP 404 / oversized body are all 503 without `WWW-Authenticate`, a 2 s provider with a
+0.5 s timeout is 503 in under 1.9 s, the system trust store and a foreign CA both fail the handshake (503, zero
+provider hits), an outage with no cache is 503 and the provider is not hammered (one hit for two requests) and
+recovers after the interval, a warm cache serves through an outage for the stale window only, eight concurrent
+cold starts fetch once. The journal fixture (ES256) runs the same module.
+
+## Row-level security boundary (`tenant-projects`, PostgreSQL 16, role `fa_app`)
+
+Generated suite **53 passed, 0 failed, 0 skipped** as the restricted role (51 in increment 5): the two new
+demonstrations show (13) that a `set_config` statement executed as the application role switches the tenant of
+its transaction (the same text as a bound parameter switches nothing and the context stays on tenant A) and (14)
+that the role cannot read `pg_authid` or `alembic_version`, create a table or a policy, or take ownership. The
+negative controls (BYPASSRLS and missing roles refused by the migration) and the evolution with a protected table
+(66 tests) pass unchanged. Opt-in class wall time 33.8 s; design run 12.8 s, 124 MB max RSS of the children.
+
+## What this does not show
+
+- The precision figures are against the dev and acceptance corpora and two calibration projects; the holdout was
+  not re-scored, so the absence of regressions there is not claimed.
+- The HTTPS provider is local and cooperative: no real identity provider, no proxy, no certificate revocation, no
+  HTTP/2, no redirect handling was exercised.
+- The RLS boundary tests demonstrate what the mechanism cannot stop; they do not claim an injection is impossible
+  in the generated code (every generated statement is parameterised, and that is a property of the code, not a
+  guarantee against future code).

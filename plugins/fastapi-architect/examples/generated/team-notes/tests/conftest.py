@@ -32,13 +32,24 @@ TENANT_CLAIM = "workspace_id"
 ROLES_CLAIM = "roles"
 SUBJECT_CLAIM = "sub"
 KID = "test-key-1"
-PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)  # one key pair per session
+
+
+def new_private_key():
+    """A fresh signing key of the contract algorithm family (the fake provider of tests/test_jwks.py rotates them)."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def public_jwk(private_key, kid: str) -> dict:
+    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    jwk.update({"kid": kid, "alg": ALGORITHM, "use": "sig"})
+    return jwk
+
+
+PRIVATE_KEY = new_private_key()  # one key pair per session
 
 
 def jwks_json() -> str:
-    jwk = json.loads(RSAAlgorithm.to_jwk(PRIVATE_KEY.public_key()))
-    jwk.update({"kid": KID, "alg": ALGORITHM, "use": "sig"})
-    return json.dumps({"keys": [jwk]})
+    return json.dumps({"keys": [public_jwk(PRIVATE_KEY, KID)]})
 
 
 def mint(
