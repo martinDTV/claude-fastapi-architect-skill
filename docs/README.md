@@ -31,6 +31,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | Version | Title |
 |---|---|
 | [v2.0](releases/RELEASE-NOTES-v2.0.md) | Architecture & Engineering Foundations (increments 1 to 5: design engine, PostgreSQL, evolution, adoption, identity and tenant isolation) |
+| [v2.0.0 acceptance report](releases/ACCEPTANCE-v2.0.0.md) | release-candidate audit of the whole v2.0.0 range: integrity, capability matrix, end-to-end cycle, architecture, security limits, compatibility, recovery, executed validations, defects fixed, residual risks, verdict |
 | [v1.9](releases/RELEASE-NOTES-v1.9.md) | Verified Remediation & Safe Refactoring |
 | [v1.8](releases/RELEASE-NOTES-v1.8.md) | Program Analysis Precision & Verified Remediation Foundations |
 | [v1.7](releases/RELEASE-NOTES-v1.7.md) | Verified Security, Architecture Contracts & Reliability Engineering |

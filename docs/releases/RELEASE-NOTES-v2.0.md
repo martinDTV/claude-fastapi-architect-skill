@@ -428,6 +428,29 @@ them. Nothing cloud-native or distributed is started.
   options that would survive arbitrary SQL (none generated). The generated `tests/test_rls.py` demonstrates the
   boundary and the least privilege (14 demonstrations; `tenant-projects` passes 53 generated tests as `fa_app`).
 
+### Acceptance of v2.0.0 (release candidate)
+
+- `decorator` and `authorization_call` follow the evidence rule of the hardening: a decorator counts through its
+  resolved import origin being a framework decorator with documented enforcement (`starlette.authentication.requires`)
+  or through a decision visible in the project function it resolves to; a policy-like call counts only when it
+  resolves to a project function that shows a decision (itself or one call deep). Both otherwise go to
+  `authorization_named_only`. Controls added to `tests/fixtures/regressions_v20/named_authz` (known, fake and external
+  decorators; real and fake policy calls). Corpora identical per rule; calibration projects unchanged (52, 15).
+- Recoverable writer: an operation directory whose journal is missing, truncated, not JSON or of another schema was
+  silently ignored by `pending_operations`; it now blocks plans (`no_unreadable_operation`), is reported by `recover`
+  as `needs_attention` with its staged files kept, and nothing is touched (`journal.unreadable_operations`).
+- Generated `core/authz.py` no longer names the owned entities in its docstring, so adding an owned module by
+  evolution does not require regenerating the policy module (which is not an integration point); the end-to-end
+  acceptance scenario found this. The generated PostgreSQL conftest now tolerates the empty `alembic_version` table
+  its own downgrade leaves behind, so a second run on the same disposable database (an evolution after a generation)
+  no longer fails before testing; any other pre-existing table still refuses the database.
+- `tests/test_acceptance_v20.py`: the whole cycle on the plugin's own fixtures (requirements, reasoned architecture,
+  generation, audit, tests through the trust model, evolution with a new owned module, verification, compatibility of
+  the previous tests and routes, manifest history, idempotent repeat) in memory with team-notes, and on a throwaway
+  PostgreSQL as the restricted role with tenant-projects (second Alembic revision with RLS on the new table); plus a
+  consistency check between every snapshot's manifest `security` record and its guarantees. The acceptance report is
+  `docs/releases/ACCEPTANCE-v2.0.0.md`.
+
 ### Guarantees as a contract
 
 - `guarantees.multi_tenant.rls` gains `context_set_by`, `context_trust`, `role_privileges`, `owner`; `not_claimed`
@@ -452,10 +475,10 @@ them. Nothing cloud-native or distributed is started.
   1.1, tenant binding refusal, Alembic and foreign keys, guarantees, ruff on the generated projects when ruff or
   uvx is available), `tests/test_audit_v20.py` (12 tests: router propagation and route composition),
   `tests/test_evolve_v20.py` (26), `tests/test_evolve_v20_recovery.py` (17), `tests/test_evolve_v20_adoption.py`
-  (22), `tests/test_design_v20_security.py` (29), `tests/test_audit_v20_named_authz.py` (12) and the opt-in
-  `tests/test_design_v20_postgresql.py` (9 tests, `FA_DESIGN_PG=1`). Full suite: 546 tests on Python 3.13 (10
-  skipped: the opt-in PostgreSQL tests and ruff) and 3.9 (22 skipped: plus the generated suites, which need Python
-  3.12+).
+  (22), `tests/test_design_v20_security.py` (29), `tests/test_audit_v20_named_authz.py` (13),
+  `tests/test_acceptance_v20.py` (3, one of them PostgreSQL opt-in) and the opt-in `tests/test_design_v20_postgresql.py`
+  (9 tests, `FA_DESIGN_PG=1`). Full suite: 551 tests on Python 3.13 (11 skipped: the opt-in PostgreSQL tests and ruff)
+  and 3.9 (24 skipped: plus the generated suites, which need Python 3.12+).
 - Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (9 + 15 contracts),
   `tests/fixtures/regressions_v20/{nested_routers,route_composition}`, `tests/fixtures/adoption20/handmade_shop`.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`

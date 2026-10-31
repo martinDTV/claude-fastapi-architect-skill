@@ -166,7 +166,10 @@ justified to rewrite existing nodes, which this increment does not do.
 | `publish` | journal → `publishing`; preconditions re-checked once more (a concurrent change aborts with nothing published); each file written to a temporary sibling and renamed into place (`os.replace`, atomic per file on POSIX, same filesystem); the journal records every landed path; → `published`; staging removed; journal deleted | an interruption leaves a journal that says exactly which files landed |
 | `recover` | files classified by current digest: `published`, `pending`, `conflict`; `rollback` restores the backups of published files and removes files the operation created; `forward` publishes the pending files from the staging copies; conflicts (edited after the crash) are never touched and keep the journal (`needs_attention`); progress is journaled, so an interrupted recovery resumes and a repeated recovery changes nothing | a crash after any number of files is recoverable without losing anyone else's changes |
 
-Limits, stated plainly: there is no global atomicity across files; a crash between two renames leaves a mixed
+An operation directory whose journal is missing, truncated, not JSON or of another schema is never skipped
+(v2.0 acceptance): `plan` blocks with `no_unreadable_operation`, `recover` lists it under `unreadable` as
+`needs_attention` with the number of staged files kept, exits 1 and touches nothing; a human decides from the staged
+content and the backups. Limits, stated plainly: there is no global atomicity across files; a crash between two renames leaves a mixed
 tree until `recover` runs (a new `plan` refuses while a journal is pending); the staging directory must be on
 the same filesystem as the project for the renames to be atomic; nothing protects against a writer that ignores
 the journal. The tests inject failures before publication, after the n-th file, after the last file, before

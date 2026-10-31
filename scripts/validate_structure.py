@@ -128,6 +128,8 @@ assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.
 assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file() and (root/'tests/test_design_v20_security.py').is_file(), 'Missing v2.0 test modules'
 assert (root/'tests/fixtures/design20/specs/valid/rls_claim_binding.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/security12_policy.json').is_file(), 'Missing schema 1.2 security fixtures'
 assert (root/'tests/test_audit_v20_named_authz.py').is_file() and (root/'tests/fixtures/regressions_v20/named_authz/named/security.py').is_file() and (root/'tests/fixtures/regressions_v20/named_authz_privilege/priv/api.py').is_file(), 'Missing the name-based authorization negative controls (security hardening)'
+assert (root/'tests/test_acceptance_v20.py').is_file(), 'Missing the v2.0.0 end-to-end acceptance scenario'
+assert (root/'docs/releases/ACCEPTANCE-v2.0.0.md').is_file() and 'ACCEPTANCE-v2.0.0.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'Missing or unindexed acceptance report docs/releases/ACCEPTANCE-v2.0.0.md'
 for name in ('inventory-service','orders-platform','team-notes','tenant-projects','oidc_owner_scoped','rls_claim_binding','tenant_unbound'):
     assert 'not_claimed' in json.loads((root/f'tests/fixtures/design20/guarantees/{name}.json').read_text(encoding='utf-8')), f'Missing or incomplete guarantees fixture {name}'
 assert (base.parent.parent/'examples/generated/team-notes/tests/test_jwks.py').is_file(), 'team-notes lacks the generated HTTPS JWKS tests'

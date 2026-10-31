@@ -149,5 +149,8 @@ python3 scripts/evolve_fastapi.py recover /path/to/project --forward  # finish: 
 ```
 
 A file edited by hand after the crash is a conflict: recovery leaves it alone, restores or publishes the others,
-and keeps the journal (`needs_attention`) until you decide. There is no atomicity across files; the renames are
-atomic per file; the journal is what makes the whole operation recoverable.
+and keeps the journal (`needs_attention`) until you decide. A journal that cannot be read at all (missing, truncated,
+another schema) is reported as `needs_attention` too, with its staged files kept, and blocks new plans until you look
+at it. There is no atomicity across files; the renames are atomic per file; the journal is what makes the whole
+operation recoverable. Nothing here claims durability against power loss: files are written and renamed, not
+synced to stable storage, and the staging directory must live on the project's filesystem.
