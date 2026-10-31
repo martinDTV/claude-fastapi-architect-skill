@@ -2,6 +2,9 @@
 """Discover an existing FastAPI project and evolve a generated one under an evolution contract (v2.0).
 
     python3 evolve_fastapi.py discover PROJECT [--format text|json] [--output FILE]
+    python3 evolve_fastapi.py propose PROJECT                  # candidate modules of a hand-written project (nothing adopted)
+    python3 evolve_fastapi.py adopt ADOPTION.json              # record the adoption baseline (adoption/1.0)
+    python3 evolve_fastapi.py recover PROJECT [--forward]      # finish or undo an interrupted operation
     python3 evolve_fastapi.py plan CONTRACT.json [--baseline-contract SPEC.json] [--no-verify] [--format ...] [--output FILE]
     python3 evolve_fastapi.py apply CONTRACT.json [--baseline-contract SPEC.json]
                               [--authorize-execution --trust fixture|trusted [--trust-scope DIR] --test-command CMD
@@ -35,8 +38,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi_audit.remediate.executors import REGISTRY, TRUST_PROFILES, TRUST_UNTRUSTED, Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_ENV_PASSTHROUGH, ExecutionPolicy  # noqa: E402
+from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.evolution import EvolutionError, EvolveOptions, render_text, run_evolution, to_json  # noqa: E402
+from fastapi_design.journal import load_operation, pending_operations, recover  # noqa: E402
 
 PROG = "evolve_fastapi"
 OK_STATES = ("planned", "noop", "audit_clean", "verified")
@@ -75,6 +80,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     d = sub.add_parser("discover", help="static model of an existing project")
     d.add_argument("project")
     d.add_argument("--no-audit", action="store_true", help="skip the route contracts and audit summary")
+    pr = sub.add_parser("propose", help="candidate modules of a hand-written project for adoption (nothing is adopted)")
+    pr.add_argument("project")
+    ad = sub.add_parser("adopt", help="record the adoption baseline of the modules named in an adoption contract")
+    ad.add_argument("contract", help="adoption contract (JSON, schema fastapi-architect/adoption/1.0)")
+    rc = sub.add_parser("recover", help="finish or undo an interrupted operation (journal under .fastapi-architect/ops)")
+    rc.add_argument("project")
+    rc.add_argument("--forward", action="store_true", help="publish the pending files (default: roll back the published ones)")
+    rc.add_argument("--op", metavar="ID", help="only this operation id")
     for name in ("plan", "apply"):
         p = sub.add_parser(name, help="compute the change set (and verify it in a copy)" if name == "plan" else "verify in a copy, then write the project")
         p.add_argument("contract", help="evolution contract (JSON, schema fastapi-architect/evolution/1.0)")
@@ -89,7 +102,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--env-passthrough", action="append", default=[], metavar="NAMES")
         p.add_argument("--allow-command", action="append", default=[], metavar="NAME")
         p.add_argument("--keep-copy", action="store_true", help="keep the verification copy (its path is reported)")
-    for p in (d, sub.choices["plan"], sub.choices["apply"]):
+    for p in (d, pr, ad, rc, sub.choices["plan"], sub.choices["apply"]):
         p.add_argument("--output", metavar="FILE", help="write the JSON report to FILE")
         p.add_argument("--format", choices=("text", "json"), default="text")
     sub.choices["plan"].add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
@@ -107,6 +120,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with open(args.output, "w", encoding="utf-8") as handle:
                 handle.write(payload)
         sys.stdout.write(payload if args.format == "json" else _render_discovery(model))
+        return 0
+
+    if args.command in ("propose", "adopt", "recover"):
+        try:
+            if args.command == "propose":
+                payload_obj = propose_adoption(discover(args.project, audit=True))
+                text = render_proposal(payload_obj)
+            elif args.command == "adopt":
+                payload_obj = adopt(load_adoption_contract(args.contract))
+                text = f"adopted {', '.join(payload_obj['adopted'])} in {payload_obj['project']}: {payload_obj['written']} written (operation {payload_obj['operation']}); {payload_obj['protected_files']} other file(s) stay protected\n" + "".join(f"  ? {u}\n" for u in payload_obj["uncertainties"])
+            else:
+                ops = pending_operations(os.path.abspath(args.project))
+                if args.op:
+                    ops = [op for op in ops if op.op_id == args.op]
+                reports = [recover(os.path.abspath(args.project), op, strategy="forward" if args.forward else "rollback").to_dict() for op in ops]
+                payload_obj = {"project": os.path.abspath(args.project), "recovered": reports}
+                text = ("no pending operation\n" if not reports else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
+        except (AdoptionError,) as exc:
+            sys.stderr.write(f"{PROG}: adoption refused ({exc.source}):\n")
+            for error in exc.errors:
+                sys.stderr.write(f"  - {error}\n")
+            return 2
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            sys.stderr.write(f"{PROG}: error: {exc}\n")
+            return 2
+        payload = json.dumps(payload_obj, indent=2, sort_keys=True) + "\n"
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+        sys.stdout.write(payload if args.format == "json" else text)
+        if args.command == "recover" and any(r["state"] == "needs_attention" for r in payload_obj["recovered"]):
+            return 1
         return 0
 
     if args.test_command and not args.authorize_execution:
