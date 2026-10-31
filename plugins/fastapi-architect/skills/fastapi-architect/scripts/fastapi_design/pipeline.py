@@ -98,7 +98,8 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
         o = spec.oidc
         authentication = (
             f"oidc: bearer tokens of issuer {o['issuer']} for audience {o['audience']!r}, algorithms {'/'.join(o['algorithms'])} only (HS*/none refused), signature verified against the JWKS at "
-            f"{o['jwks_url']} (cached {o['jwks_cache_s']} s, refreshed once per unknown key id, https only outside tests), exp/nbf/iat required with {o['leeway_s']} s leeway; provider unreachable is 503, not 401"
+            f"{o['jwks_url']} (TLS verified, private CA only added through oidc_ca_bundle, response capped, cached {o['jwks_cache_s']} s, one fetch attempt per 30 s, stale keys served for at most oidc_jwks_stale_max_s), "
+            f"exp/nbf/iat required with {o['leeway_s']} s leeway; provider unreachable, failing or unusable is 503, not 401; the client is verified against a local HTTPS provider in tests/test_jwks.py"
         )
         identity = {"principal": "per token (verified claims only)", "subject_source": f"claim {o['claims']['subject']}", "roles_source": f"claim {o['claims']['roles']} (list or space-separated)", "tenant_source": f"claim {o['claims']['tenant']} (uuid)" if binding == "principal_claim" else None}
     elif auth == "none":
@@ -137,15 +138,27 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
                 + "; enforced in the service and the repository, the router only carries the principal"
             )
         resource_authorization = f"{spec.authz_model}: " + "; ".join(parts)
-    not_claimed = ["network or filesystem isolation of executed tests"]
+    not_claimed = ["network or filesystem isolation of executed tests", "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)"]
     if not spec.rls:
         not_claimed.append("row-level security")
+    else:
+        not_claimed.append("isolation against SQL statements executed as the application role (an injection that reaches statement level can change the tenant context; the policies protect against missing filters, not against arbitrary SQL)")
     not_claimed.append("schema or database per tenant")
     if spec.authz_model == "none":
         not_claimed.append("resource-level authorization")
+    else:
+        not_claimed.append("business rules beyond the declared policy (roles per operation and ownership are enforced; anything finer is the author's code)")
     if not (auth == "oauth2_jwt" and spec.oidc):
         not_claimed.append("OAuth2/JWT authentication" if auth != "oauth2_jwt" else "OAuth2/JWT authentication (declared without security.oidc)")
-    not_claimed += ["session authentication", "refresh tokens, token issuance or an authorization server", "cross-tenant administration", "public resources inside an authenticated API"]
+    else:
+        not_claimed.append("validation against a real identity provider (the JWKS client is verified against a local HTTPS provider with a private CA; a provider's own behaviour is not)")
+    not_claimed += [
+        "session authentication",
+        "OAuth2 authorization flows (code, PKCE, device), consent, token issuance, refresh tokens or an authorization server (only externally issued tokens are validated)",
+        "cross-tenant administration",
+        "public resources inside an authenticated API",
+        "authorization proven by the name of a dependency (the auditor counts a policy only where its code shows the decision)",
+    ]
     return {
         "multi_tenant": {
             "requested": spec.multi_tenant,
@@ -154,7 +167,15 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
             "principal_tenant_binding": tenant_binding,
             "storage_isolation": storage,
             "row_level_security": bool(spec.rls),
-            "rls": {"app_role": mt["rls"]["app_role"], "context_key": mt["rls"]["context_key"], "context_scope": "transaction (set_config third argument true); never SET at session level"} if spec.rls else None,
+            "rls": {
+                "app_role": mt["rls"]["app_role"],
+                "context_key": mt["rls"]["context_key"],
+                "context_scope": "transaction (set_config third argument true); never SET at session level",
+                "context_set_by": "get_tenant_session, from the authenticated principal's tenant, before the first statement of the request transaction",
+                "context_trust": "any statement run as the application role within that transaction can change it: the boundary holds against missing filters and ordinary application bugs, not against SQL injection or arbitrary SQL as that role",
+                "role_privileges": "SELECT, INSERT, UPDATE, DELETE on the tenant tables and USAGE on the schema; no DDL, no TRUNCATE, no BYPASSRLS, no CREATEROLE, no access to alembic_version or pg_authid",
+                "owner": "migrations run as the owner; FORCE makes the owner subject to the policies too unless it is a superuser or BYPASSRLS",
+            } if spec.rls else None,
             "schema_or_database_per_tenant": False,
         },
         "authentication": authentication,
