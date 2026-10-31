@@ -1,0 +1,31 @@
+# Lint configuration for the plugin's own code (v2.1, increment 0).
+#
+# Scope: the engines under plugins/fastapi-architect/skills/fastapi-architect/scripts, the root scripts and the test
+# modules. Generated projects and the reference example carry their own configuration (the nearest pyproject.toml
+# wins); fixtures, examples and evals are corpora, not code to lint, and are excluded here.
+#
+# Deliberate choices:
+# * target-version py39 is the floor the plugin supports; no pyupgrade (UP) rules are selected, so typing.List,
+#   typing.Optional and friends, which the 3.9 interpreter needs, are never rewritten;
+# * E501 is not selected: the engines use long single-line dictionaries by design, and reflowing them is churn;
+# * B (bugbear) is not selected in this increment: its findings are reviewed by hand, not auto-fixed.
+
+target-version = "py39"
+line-length = 200
+extend-exclude = [
+    "tests/fixtures",
+    "tests/schemas",
+    "plugins/fastapi-architect/examples",
+    "plugins/fastapi-architect/evals",
+    "docs",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "W"]
+
+[lint.isort]
+known-first-party = ["fastapi_audit", "fastapi_design", "fastapi_common", "_audit_support", "_pg_support"]
+
+[lint.per-file-ignores]
+# the skill entry point re-exports the package surface on purpose (tests/_audit_support.load_auditor reads it)
+"plugins/fastapi-architect/skills/fastapi-architect/scripts/audit_fastapi.py" = ["F401"]

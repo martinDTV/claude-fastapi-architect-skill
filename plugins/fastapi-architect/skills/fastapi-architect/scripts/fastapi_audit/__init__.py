@@ -6,7 +6,9 @@ this package is the command-line entry point.
 
 from __future__ import annotations
 
+from .callgraph import DEFAULT_MAX_CALL_DEPTH, CallGraph, CallGraphStats
 from .cli import build_parser, main
+from .config_schema import ConfigError, validate_config  # noqa: F401
 from .discovery import (
     DEFAULT_EXCLUDED_DIRS,
     DEFAULT_MAX_FILE_BYTES,
@@ -15,10 +17,8 @@ from .discovery import (
     classify_environment,
     iter_python_files,
 )
-from .config_schema import ConfigError, validate_config  # noqa: F401
 from .engine import AuditOptions, analyse_source, audit_project, audit_source
 from .facts import CONFIG_FILENAME, ProjectFacts, collect_facts
-from .callgraph import DEFAULT_MAX_CALL_DEPTH, CallGraph, CallGraphStats
 from .kinds import function_kinds, function_kinds_ex
 from .model import (
     CATEGORIES,
@@ -47,6 +47,14 @@ from .report import compare_with_baseline, fingerprint_of, list_rules_text, rend
 from .suppressions import MARKER_RE, NOQA_CODES_BY_RULE, NOQA_RE, line_comments, suppression_for
 
 __all__ = [
+    "CallGraph",
+    "CallGraphStats",
+    "DEFAULT_MAX_CALL_DEPTH",
+    "EVIDENCE_INFERRED",
+    "EVIDENCE_UNKNOWN",
+    "EVIDENCE_VERIFIED",
+    "function_kinds",
+    "function_kinds_ex",
     "ConfigError",
     "validate_config",
     "AuditOptions",

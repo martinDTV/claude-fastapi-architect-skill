@@ -12,7 +12,7 @@ import ast
 import re
 from typing import List, Optional, Set, Tuple
 
-from ..contracts import TENANT_PARAMS, RouteContract, build_contracts, decorator_policy, names_in, policy_evidence_in, policy_records, route_public, router_dependency_targets, tenant_param_set
+from ..contracts import TENANT_PARAMS, RouteContract, build_contracts, decorator_policy, policy_evidence_in, policy_records, route_public, router_dependency_targets, tenant_param_set
 from ..facts import AUTH_RE
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, annotation_to_dotted, dotted_name

@@ -5,8 +5,10 @@ Checks: reference links from SKILL.md, manifest version consistency, eval JSON
 validity, and (since v1.3) the static auditor, its root entry point, its test
 suite and the release notes for the current version.
 """
+import json
+import re
 from pathlib import Path
-import json,re,sys
+
 root=Path(__file__).resolve().parents[1]
 base=root/'plugins/fastapi-architect/skills/fastapi-architect'
 skill=(base/'SKILL.md').read_text(encoding='utf-8')
@@ -17,7 +19,8 @@ unlinked=refs-links
 market=json.loads((root/'.claude-plugin/marketplace.json').read_text())
 plugin=json.loads((root/'plugins/fastapi-architect/.claude-plugin/plugin.json').read_text())
 versions={market['metadata']['version'],market['plugins'][0]['version'],plugin['version']}
-for p in (root/'evals').glob('*.json'):json.loads(p.read_text(encoding='utf-8'))
+for p in (root/'evals').glob('*.json'):
+    json.loads(p.read_text(encoding='utf-8'))
 assert not missing, f'Missing references: {missing}'
 assert not unlinked, f'Unlinked references: {unlinked}'
 assert len(versions)==1, f'Version mismatch: {versions}'
@@ -31,8 +34,10 @@ assert shim.is_file(), f'Missing root entry point: {shim}'
 assert 'skills' in shim.read_text(encoding='utf-8') and 'audit_fastapi.py' in shim.read_text(encoding='utf-8'), 'Root entry point does not forward to the skill auditor'
 package=base/'scripts/fastapi_audit'
 assert (package/'__init__.py').is_file(), f'Missing auditor package: {package}'
-for script in (auditor,shim,*sorted(package.rglob('*.py'))):compile(script.read_text(encoding='utf-8'),str(script),'exec')
-assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(package/'model.py').read_text(encoding='utf-8')), f'Auditor TOOL_VERSION != {version}'
+for script in (auditor,shim,*sorted(package.rglob('*.py'))):
+    compile(script.read_text(encoding='utf-8'),str(script),'exec')
+assert re.search(r'TOOL_VERSION\s*=\s*"'+re.escape(version)+'"',(base/'scripts/fastapi_common/version.py').read_text(encoding='utf-8')), f'fastapi_common TOOL_VERSION != {version}'
+assert 'from fastapi_common.version import TOOL_VERSION' in (package/'model.py').read_text(encoding='utf-8'), 'the auditor must re-export the single version constant'
 assert 'scripts/audit_fastapi.py' in skill, 'SKILL.md does not reference scripts/audit_fastapi.py'
 for t in ('test_audit_fastapi.py','test_audit_sqlalchemy.py','test_audit_transactions.py','test_audit_migrations.py','test_audit_security.py','test_audit_architecture.py','test_audit_v14_cli.py','test_audit_interprocedural.py','test_audit_v16.py','test_audit_v17.py','test_audit_v18.py','test_audit_v19.py','test_sarif_schema.py','test_plugin_evals.py'):
     assert (root/'tests'/t).is_file(), f'Missing tests/{t}'
@@ -81,7 +86,7 @@ for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lo
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 # v2.0: design engine (contract, advisor, blueprint, generator, verification, report), tool (skill + root shim), examples, fixtures, docs
 design=base/'scripts/fastapi_design'
-for mod in ('__init__.py','spec.py','advisor.py','blueprint.py','generator.py','verify.py','report.py','pipeline.py','discovery.py','evolution.py','journal.py','transforms.py','adoption.py'):
+for mod in ('__init__.py','spec.py','advisor.py','blueprint/__init__.py','blueprint/_base.py','blueprint/_helpers.py','blueprint/scaffold.py','blueprint/security.py','blueprint/persistence.py','blueprint/modules.py','blueprint/testing.py','blueprint/security_tests.py','generator.py','verify.py','report.py','pipeline.py','discovery.py','evolution.py','journal.py','transforms.py','adoption.py'):
     assert (design/mod).is_file(), f'Missing fastapi_design/{mod}'
     compile((design/mod).read_text(encoding='utf-8'),str(design/mod),'exec')
 design_tool=base/'scripts/design_fastapi.py'

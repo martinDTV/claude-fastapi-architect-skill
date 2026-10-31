@@ -156,7 +156,7 @@ class NamedPolicyInExistingCorporaTests(unittest.TestCase):
     def test_privilege_change_and_tenant_binding_keep_their_question_behind_a_policy_like_name(self) -> None:
         fixture = FIXTURES / "regressions_v20" / "named_authz_privilege"
         source = (fixture / "priv" / "api.py").read_text(encoding="utf-8").splitlines()
-        line_of = lambda name: next(i + 1 for i, l in enumerate(source) if l.startswith(f"async def {name}("))  # noqa: E731
+        line_of = lambda name: next(i + 1 for i, item in enumerate(source) if item.startswith(f"async def {name}("))  # noqa: E731
         report = audit.audit_project(str(fixture))
         privilege = [f for f in report["findings"] if f["rule"] == "SEC_PRIVILEGE_CHANGE_UNVERIFIED"]
         self.assertEqual([f["line"] for f in privilege], [line_of("set_role")])  # set_role_guarded (require_real_admin compares the role) stays silent

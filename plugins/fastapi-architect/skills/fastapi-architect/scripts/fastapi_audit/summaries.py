@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 
 from .kinds import (
     CLIENT_KINDS,
@@ -26,7 +26,6 @@ from .kinds import (
     KIND_SESSION,
     SESSION_KINDS,
     SYNC_SESSION_IO,
-    TYPE_KINDS,
     function_kinds,
     kind_of_call,
     kind_of_type,

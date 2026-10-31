@@ -14,13 +14,11 @@ import sys
 import textwrap
 import unittest
 from copy import deepcopy
-from pathlib import Path
 
-from _audit_support import FIXTURES, REPO_ROOT, SKILL_SCRIPTS, ProjectCase, audit, audit_fixture, lines_of
-
+from _audit_support import FIXTURES, REPO_ROOT, ProjectCase, audit, audit_fixture, lines_of
+from fastapi_audit.remediation import REMEDIATIONS  # noqa: E402
 from fastapi_audit.report import compare_reports  # noqa: E402  (SKILL_SCRIPTS is on sys.path via _audit_support)
 from fastapi_audit.rules.transactions import classify_commit_loop  # noqa: E402
-from fastapi_audit.remediation import REMEDIATIONS  # noqa: E402
 
 
 def _load_precision():

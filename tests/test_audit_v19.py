@@ -16,13 +16,11 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from _audit_support import FIXTURES, REPO_ROOT, ProjectCase, audit, audit_fixture, lines_of
-
+from _audit_support import FIXTURES, REPO_ROOT, ProjectCase, audit_fixture
 from fastapi_audit.remediate import RECIPE_META, RECIPES, Authorization, RemediationCase, RemediationError, RunOptions, recipe_for, run_remediation  # noqa: E402
 from fastapi_audit.remediate import pipeline as pl  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, LocalProcessExecutor, select_executor  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, ExecutionPolicy, Workspace, command_allowed, digest_tree, interpret_run, run_command  # noqa: E402
-from fastapi_audit.remediate.runners import ADAPTERS, Evidence, PytestJUnitAdapter, UnittestJsonAdapter, adapter_for, assess  # noqa: E402
 from fastapi_audit.remediate.model import (  # noqa: E402
     OUTCOME_FAILED,
     OUTCOME_INFRASTRUCTURE_ERROR,
@@ -48,6 +46,7 @@ from fastapi_audit.remediate.model import (  # noqa: E402
 )
 from fastapi_audit.remediate.patches import Blocked, apply_edits, propose  # noqa: E402
 from fastapi_audit.remediate.render import render_markdown, render_text  # noqa: E402
+from fastapi_audit.remediate.runners import ADAPTERS, Evidence, PytestJUnitAdapter, UnittestJsonAdapter, adapter_for, assess  # noqa: E402
 
 FIXTURE = FIXTURES / "remediation19"
 REMEDIATE_SHIM = REPO_ROOT / "scripts" / "audit_remediate.py"
@@ -102,7 +101,7 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(case["verification"]["before_audit"]["target_present"])
             self.assertFalse(case["verification"]["after_audit"]["target_present"])
             self.assertEqual(case["regressions"], [])
-            self.assertTrue(any("no test executed" in l for l in case["limitations"]))
+            self.assertTrue(any("no test executed" in item for item in case["limitations"]))
             self.assertEqual([i["satisfied"] for i in case["invariants"] if i["checked_by"] in ("audit", "parse")], [True, True, True])
             self.assertTrue(all(i["satisfied"] is None for i in case["invariants"] if i["checked_by"] == "not_checked"))
 
@@ -154,7 +153,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(case["candidate_id"], case["patch"]["candidate_id"])
             self.assertEqual(case["base_sha256"], case["patch"]["original_sha256"])
             self.assertEqual([h["to"] for h in case["history"]], [STATE_PATCHED, STATE_VERIFIED])
-            self.assertTrue(any("does not provide: network isolation" in l for l in case["limitations"]))
+            self.assertTrue(any("does not provide: network isolation" in item for item in case["limitations"]))
 
     def test_without_linked_reproducers_the_suite_alone_is_inconclusive(self) -> None:
         run = run_remediation(str(FIXTURE), fixture_options(links={}))
@@ -458,7 +457,7 @@ async def import_items_b(session: AsyncSession, items: list) -> None:
         self.assertEqual(uncovered["flipped_tests"], [])
         self.assertEqual(sorted(covered["shared_with"]), [uncovered["fingerprint"]])
         self.assertEqual(sorted(uncovered["shared_with"]), [covered["fingerprint"]])
-        self.assertTrue(any("shared with" in l for l in uncovered["limitations"]))
+        self.assertTrue(any("shared with" in item for item in uncovered["limitations"]))
         self.assertEqual(run["combined"]["cases"], [covered["fingerprint"]])  # composed from the verified candidate only
         # the fixture's other defects are still present (only this rule was selected), so the regression suite of
         # the corrected code does not pass: the composition is inconclusive and says which tests failed
@@ -496,7 +495,7 @@ async def import_items_b(session: AsyncSession, items: list) -> None:
         self.assertEqual(run["combined"]["state"], "inconclusive")
         self.assertIn("regression suite did not pass", run["combined"]["cause"])
         self.assertIn("test_summary_control_is_untouched", run["combined"]["cause"])
-        self.assertTrue(all(any("composition inconclusive" in l for l in c["limitations"]) for c in run["cases"]))
+        self.assertTrue(all(any("composition inconclusive" in item for item in c["limitations"]) for c in run["cases"]))
         self._restore_all()
         self._restore = []
 
@@ -582,7 +581,7 @@ async def import_items_b(session: AsyncSession, items: list) -> None:
         run = run_remediation(str(self.root), RunOptions(select_rules={"SA_ASYNC_SESSION_NOT_AWAITED"}, include_tests=True))
         self.assertEqual(sorted(c["file"] for c in run["cases"]), ["shop/service.py", "tests/test_helper.py"])
         helper = next(c for c in run["cases"] if c["file"] == "tests/test_helper.py")
-        self.assertTrue(any("test code" in l for l in helper["limitations"]))
+        self.assertTrue(any("test code" in item for item in helper["limitations"]))
 
     def test_the_run_fails_loudly_if_the_project_changes_underneath(self) -> None:
         real = pl.digest_tree

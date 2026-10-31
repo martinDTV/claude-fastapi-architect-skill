@@ -6,7 +6,7 @@ from __future__ import annotations
 import ast
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-from ..kinds import CLIENT_KINDS, SESSION_KINDS, SESSION_LIKE_NAMES, function_kinds, function_kinds_ex, receiver_kind, receiver_name
+from ..kinds import CLIENT_KINDS, SESSION_KINDS, SESSION_LIKE_NAMES, function_kinds_ex, receiver_kind, receiver_name
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, dotted_name, iter_scope_nodes
 from . import FileContext

@@ -8,7 +8,6 @@ of the v1.9 trust model says so, and nothing in the target directory is overwrit
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi_audit.model import TOOL_VERSION

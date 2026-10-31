@@ -36,9 +36,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
-from .kinds import SESSION_KINDS, TYPE_KINDS
 from .summaries import CallSite, ClassRecord, FunctionRecord
 
 if TYPE_CHECKING:  # pragma: no cover

@@ -14,7 +14,7 @@ import ast
 from typing import Dict, List, Optional, Set
 
 from ..model import ENV_APPLICATION, Finding, new_finding
-from ..resolver import FunctionInfo, dotted_name, iter_scope_nodes
+from ..resolver import FunctionInfo
 from . import FileContext
 from .async_rules import iter_function_calls
 

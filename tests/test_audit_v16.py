@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 import time
 import unittest
@@ -127,7 +126,7 @@ class ResolutionTests(unittest.TestCase):
     def test_callbacks_resolve_only_when_every_caller_agrees(self) -> None:
         unique = {v for _l, v in self.site("app/modules/accounts/callbacks.py", 16)}
         self.assertIn(("project", "app.modules.accounts.callbacks.slow"), unique)
-        loc = [l for l, _v in self.site("app/modules/accounts/callbacks.py", 20)][0]
+        loc = [line for line, _v in self.site("app/modules/accounts/callbacks.py", 20)][0]
         self.assertEqual(self.graph.site_targets[loc], ("ambiguous", None))
         self.assertEqual(self.graph.site_candidates[loc], ["app.modules.accounts.callbacks.fast", "app.modules.accounts.callbacks.slow"])
         self.assertEqual(self.graph.edge_info("app/modules/accounts/callbacks.py", 16, 11)[0], "callback")
@@ -139,7 +138,7 @@ class ResolutionTests(unittest.TestCase):
         send = self.site("app/modules/accounts/service.py", 46)
         self.assertIn(("project", "app.modules.notify.email.EmailNotifier.send"), {v for _l, v in send})
         self.assertEqual(self.graph.edge_info("app/modules/accounts/service.py", 46, 8)[1], "inferred")
-        through = [l for l, _v in self.site("app/modules/accounts/service.py", 43)][0]
+        through = [line for line, _v in self.site("app/modules/accounts/service.py", 43)][0]
         self.assertEqual(self.graph.site_targets[through][0], "ambiguous")
         self.assertEqual(self.inter["uncertainty"]["interfaces"], 2)
         self.assertEqual(self.inter["uncertainty"]["ambiguous_sites"], 2)

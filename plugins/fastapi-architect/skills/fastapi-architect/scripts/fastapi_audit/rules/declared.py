@@ -118,7 +118,7 @@ def _module_aliases(ctx: FileContext, module: str) -> List[str]:
 
 
 def _commit_layers(ctx: FileContext, declared: Dict[str, Any], out: List[Finding]) -> None:
-    layers = [str(l) for l in declared.get("commit_layers", []) if isinstance(l, str)]
+    layers = [str(layer) for layer in declared.get("commit_layers", []) if isinstance(layer, str)]
     if not layers or ctx.facts is None or ctx.environment != ENV_APPLICATION:
         return
     layer = ctx.facts.layer_of(ctx.relpath)

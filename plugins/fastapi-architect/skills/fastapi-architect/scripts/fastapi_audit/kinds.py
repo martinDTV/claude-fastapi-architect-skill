@@ -9,9 +9,9 @@ annotation, a constructor call, or a call to a factory bound at module level
 from __future__ import annotations
 
 import ast
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
-from .resolver import FunctionInfo, annotation_to_dotted, dotted_name, iter_scope_nodes
+from .resolver import FunctionInfo, annotation_to_dotted, dotted_name
 
 if TYPE_CHECKING:  # pragma: no cover
     from .facts import ProjectFacts

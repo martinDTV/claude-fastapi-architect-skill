@@ -4,13 +4,21 @@ context handed to background work. All three lean on the function summaries."""
 from __future__ import annotations
 
 import ast
+import re as _re
 from typing import List, Optional, Set, Tuple
 
+from ..kinds import CLIENT_KINDS as _CLIENT_KINDS
+from ..kinds import KIND_CLIENT as _KIND_CLIENT
 from ..kinds import SESSION_KINDS, function_kinds_ex
+from ..kinds import receiver_kind as _receiver_kind
+from ..kinds import receiver_name as _receiver_name
 from ..model import ENV_APPLICATION, Finding, new_finding
 from ..resolver import FunctionInfo, dotted_name
+from ..resolver import annotation_to_dotted as _annotation_to_dotted
+from ..resolver import iter_scope_nodes as _iter_scope_nodes
 from . import FileContext
 from .async_rules import iter_function_calls
+from .transactions import _reachable_network  # v1.6 rules below reuse the transaction reachability
 
 CATEGORY = "reliability"
 SPAWNERS = frozenset({"asyncio.create_task", "asyncio.ensure_future"})
@@ -270,11 +278,6 @@ def run(ctx: FileContext) -> List[Finding]:
 # v1.6: dropped task references, unbounded retries, HTTP calls without timeout, dual writes
 # --------------------------------------------------------------------------- #
 
-import re as _re
-
-from ..kinds import CLIENT_KINDS as _CLIENT_KINDS, KIND_CLIENT as _KIND_CLIENT, receiver_kind as _receiver_kind, receiver_name as _receiver_name
-from ..resolver import annotation_to_dotted as _annotation_to_dotted, iter_scope_nodes as _iter_scope_nodes
-from .transactions import _reachable_network
 
 TASK_SPAWNERS = frozenset({"asyncio.create_task", "asyncio.ensure_future"})
 REQUESTS_CALLS = frozenset({f"requests.{v}" for v in ("get", "post", "put", "patch", "delete", "head", "options", "request")})

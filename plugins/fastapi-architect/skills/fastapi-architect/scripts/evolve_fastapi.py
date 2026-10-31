@@ -41,7 +41,7 @@ from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_
 from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.evolution import EvolutionError, EvolveOptions, render_text, run_evolution, to_json  # noqa: E402
-from fastapi_design.journal import load_operation, pending_operations, recover, unreadable_operations  # noqa: E402
+from fastapi_design.journal import pending_operations, recover, unreadable_operations  # noqa: E402
 
 PROG = "evolve_fastapi"
 OK_STATES = ("planned", "noop", "audit_clean", "verified")

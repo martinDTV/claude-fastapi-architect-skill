@@ -8,14 +8,12 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from ..kinds import (
     ASYNC_SESSION_COROUTINES,
-    CLIENT_KINDS,
     ENGINE_FACTORIES,
     KIND_ASYNC_SESSION,
     KIND_SESSION,
     SESSION_KINDS,
     SESSION_LIKE_NAMES,
     SYNC_SESSION_IO,
-    function_kinds,
     function_kinds_ex,
     kind_of_call,
     receiver_kind,

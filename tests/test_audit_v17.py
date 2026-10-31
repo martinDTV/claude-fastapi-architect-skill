@@ -10,7 +10,7 @@ import json
 import sys
 import unittest
 
-from _audit_support import FIXTURES, REPO_ROOT, SKILL_SCRIPTS, ProjectCase, audit, audit_fixture, by_rule, lines_of
+from _audit_support import FIXTURES, REPO_ROOT, ProjectCase, audit, audit_fixture, by_rule, lines_of
 
 
 def _load_precision():

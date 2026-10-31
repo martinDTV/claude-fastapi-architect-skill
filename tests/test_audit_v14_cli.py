@@ -5,13 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
-from _audit_support import FIXTURES, REPO_ROOT, ProjectCase, audit, audit_fixture
+from _audit_support import FIXTURES, ProjectCase, audit, audit_fixture
 
 
 def _snapshot(root: Path):
