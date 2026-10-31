@@ -91,8 +91,16 @@ assert design_shim.is_file() and 'design_fastapi.py' in design_shim.read_text(en
 compile(design_tool.read_text(encoding='utf-8'),str(design_tool),'exec')
 for spec_name in ('inventory-service.json','orders-platform.json'):
     spec_doc=json.loads((base.parent.parent/'examples/specs'/spec_name).read_text(encoding='utf-8'))
-    assert spec_doc.get('schema')=='fastapi-architect/spec/1.0', f'examples/specs/{spec_name}: unexpected schema'
+    assert spec_doc.get('schema') in ('fastapi-architect/spec/1.0','fastapi-architect/spec/1.1'), f'examples/specs/{spec_name}: unexpected schema'
 assert (base.parent.parent/'examples/generated/inventory-service/.fastapi-architect/generation.json').is_file(), 'Missing generated example manifest'
+for snapshot in ('inventory-service','orders-platform'):
+    assert (base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').is_file(), f'Missing generated example manifest: {snapshot}'
+assert (base.parent.parent/'examples/generated/orders-platform/alembic.ini').is_file() and list((base.parent.parent/'examples/generated/orders-platform/migrations/versions').glob('*_initial_schema.py')), 'Missing Alembic environment in the PostgreSQL example'
+assert (base.parent.parent/'examples/generated/README.md').is_file() and (base.parent.parent/'examples/generated/VERIFICATION.md').is_file(), 'Missing README/VERIFICATION of the generated examples'
+assert (root/'tests/fixtures/regressions_v20/route_composition/.audit-fastapi.json').is_file(), 'Missing v2.0 route-composition regression fixture'
+assert (root/'tests/test_design_v20_postgresql.py').is_file() and (root/'tests/_pg_support.py').is_file(), 'Missing the opt-in PostgreSQL verification of generated backends'
+assert (root/'docs/guides/generated-postgresql-projects.md').is_file(), 'Missing docs/guides/generated-postgresql-projects.md'
+assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
 assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file(), 'Missing v2.0 test modules'

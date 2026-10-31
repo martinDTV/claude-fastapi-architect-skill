@@ -1,6 +1,6 @@
 # FastAPI Architect v2.0.0 — Architecture & Engineering Foundations
 
-**Status: first increment, implemented and validated locally; pending human review; not published.**
+**Status: increments 1 and 2 implemented and validated locally; pending human review; not published.**
 
 v2.0 turns FastAPI Architect from an auditor and remediator into a system that can also **design and build**
 professional backends, reusing the audit engine (v1.3–v1.8) and the remediation trust model (v1.9) instead of
@@ -83,6 +83,74 @@ them. Nothing cloud-native or distributed is started.
   identical on truth16, truth17 dev and acceptance, truth18 dev and acceptance (holdout not re-scored);
   calibration projects unchanged (plataforma-citas-medicas 52 → 52, agentforge-notify 15 → 15 findings).
 
+## Increment 2: Persistence & Contract Hardening
+
+### PostgreSQL and Alembic (generator)
+
+- `core/db.py`: declarative base with a naming convention (`pk_`, `uq_`, `fk_`, `ix_`), async engine, request-scoped
+  session that rolls back on any error. Services own the unit of work: repositories only stage changes, the service
+  flushes and commits once per use case and turns an `IntegrityError` into a 409 `application/problem+json` after
+  rolling back.
+- Models: `UniqueConstraint(tenant_id, id)` and `ForeignKeyConstraint`s from declared `references`, composite
+  `(tenant_id, <fk>)` between tenant tables, indexes on tenant and foreign-key columns.
+- Alembic: `alembic.ini` (credential-free fallback URL), `migrations/env.py` (async engine, URL from
+  `<PKG>_DATABASE_URL`, every model registered, `compare_type=True`), `script.py.mako`, and
+  `migrations/versions/<rev>_initial_schema.py` generated from the contract in dependency order with explicit
+  constraint names; the revision id is derived from the contract digest. `create_all` is never called.
+- Generated suite: `migrated` refuses a non-empty database, runs `alembic upgrade head`, truncates after each test
+  and downgrades at the end; `test_migrations.py` asserts one head, an empty `compare_metadata`, constraints by
+  name and repeatable up/down; parents are created through their own API (`create_<entity>` helpers imported
+  across test modules); 409 with no row persisted for a missing reference; 409 for a cross-tenant reference.
+- `pyproject.toml` pins `sqlalchemy[asyncio]`, `asyncpg`, `alembic`; `.env.example` and settings carry placeholders
+  only; the generated code passes its own ruff configuration (E, F, I, B, UP, ASYNC at 120 columns).
+
+### Contract 1.1 and tenant guarantees
+
+- `fastapi-architect/spec/1.1` (1.0 documents still accepted): `references`/`on_delete` on uuid fields (the target
+  must be in the same module or in a declared `depends_on`; `set_null` needs `required: false`) and
+  `security.multi_tenant.binding` (`none` | `api_key_registry`; the latter needs `authentication: api_key`).
+- `api_key_registry`: `settings.api_keys` maps each key to one tenant; `require_api_key` authenticates in constant
+  time against every key; `require_tenant_member` resolves the tenant path parameter and refuses any other tenant
+  with 403; routers take the bound principal, never a bare `tenant_id`. The auditor sees the membership dependency
+  on every tenant route (`authorization_visible`).
+- A multi-tenant contract without a binding validates but is **refused** for generation (`generation_refused`
+  explains why); `--validate-only` still reports.
+- Report `guarantees` block: requested design, declared strategy, implemented strategy
+  (`shared_schema_application_scoping`), principal-tenant binding, storage isolation, `row_level_security: false`,
+  `schema_or_database_per_tenant: false`, authentication, resource authorization (not generated), persistence
+  (migrations, `create_all_used: false`, 409 on constraint violation), execution (copy, process hygiene) and
+  `not_claimed`. Negative controls in `tests/test_design_v20.py` (`GuaranteesTests`, `Schema11Tests`).
+
+### Route composition (auditor)
+
+- `facts.py` records `APIRouter(prefix=...)`, `include_router(..., prefix=...)` and applications bound to
+  `FastAPI(...)` (module level or inside factories) and composes effective mount prefixes to a bounded fixpoint;
+  `contracts.py` adds `effective_paths` and `path_resolution` (`resolved`, `ambiguous`, `unresolved`,
+  `unmounted`) to every route contract; `public_routes` and `route_auth_required` match effective paths as well
+  as router-local ones (every mount must match; nothing is matched for unresolved routers). Messages and
+  fingerprints are unchanged. Regression fixture `tests/fixtures/regressions_v20/route_composition` (nested
+  prefixes, a router mounted twice, a dynamic prefix, an app route). Corpora and calibration projects identical
+  before and after (`scripts/audit_precision.py --against HEAD`; holdout not re-scored).
+- Generated projects declare full public paths again: `/health` and `/api/v1/*` when there is no authentication.
+
+### Verification in a copy
+
+- `run_generated_tests` now runs in `Workspace.create(target)` (a copy without `.git`, environments or caches), as
+  the executor's guarantees state, and reports `workspace.python_files_changed_by_the_run`. The opt-in
+  `tests/test_design_v20_postgresql.py` (`FA_DESIGN_PG=1`, `tests/_pg_support.py` throwaway cluster) generates
+  `orders-platform`, runs its suite with `uv run --group dev pytest` through the trust model with `DATABASE_URL`,
+  `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` passed through, asserts the evidence (39 tests executed, 0 failed, 0
+  skipped, nonce matched, copy unchanged, database left with `alembic_version` only), and runs a negative control
+  (a mutated model makes `test_migrated_schema_matches_the_models` fail). Evidence and versions:
+  `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+### Examples and docs
+
+- `examples/generated/orders-platform/` is committed next to `inventory-service/` (both asserted equal to a fresh
+  generation); `examples/generated/README.md` and `VERIFICATION.md`; `docs/guides/generated-postgresql-projects.md`;
+  `references/design-contracts.md` (schema 1.1, guarantees matrix, limits), `docs/architecture/design-engine-v2.md`
+  (increment 2 record), structure validator extended.
+
 ## Compatibility
 
 - 59 rules, report schema 1.7, JSON/SARIF outputs, fingerprints, suppressions, declared contracts, the opt-in loop
@@ -92,34 +160,38 @@ them. Nothing cloud-native or distributed is started.
 
 ## Tests and validations
 
-- New: `tests/test_design_v20.py` (54 tests: validation positives and negatives with JSON paths, advisor rules
+- `tests/test_design_v20.py` (67 tests: validation positives and negatives with JSON paths, advisor rules
   including microservices only when explicit, blueprint determinism and layouts, generator safety and idempotency,
   pipeline and trust-model denials, the generated tests executed through the trust model when fastapi/httpx/pytest
-  are importable, report renderings, snapshot equality, CLI exit codes) and `tests/test_audit_v20.py` (5 tests).
-- Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (6 + 9 contracts) and
-  `tests/fixtures/regressions_v20/nested_routers`.
+  are importable, report renderings, snapshot equality for both examples, CLI exit codes; increment 2: schema 1.1,
+  tenant binding refusal, Alembic and foreign keys, guarantees, ruff on the generated projects when ruff or uvx is
+  available), `tests/test_audit_v20.py` (12 tests: router propagation and route composition) and the opt-in
+  `tests/test_design_v20_postgresql.py` (2 tests, `FA_DESIGN_PG=1`).
+- Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (7 + 11 contracts),
+  `tests/fixtures/regressions_v20/{nested_routers,route_composition}`.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`
   (extended with the v2.0 artefacts), `claude plugin validate`, `git diff --check`: see the increment report.
 
-## Known limits (this increment)
+## Known limits (after increment 2)
 
-- No Alembic environment or migration for PostgreSQL contracts; generated PostgreSQL tests skip without
-  `DATABASE_URL` and were not executed against PostgreSQL in this increment (no claim is made).
-- No OAuth2/JWT or session authentication, authorization policies, tenant membership binding, outbox/inbox,
-  workers, Docker/CI files, end-to-end tests or deployable splitting for `microservices`.
-- The auditor matches `public_routes` against router-local paths; prefix composition through `include_router` is a
-  pending auditor improvement, and the generated declarations account for it (`/*` when there is no
-  authentication).
+- Only the initial migration is generated; later migrations are the author's (`alembic revision --autogenerate`
+  works on the generated metadata). `uv.lock` is not generated (resolution needs the index).
+- Tenant isolation is application scoping plus composite foreign keys: no row-level security, no schema or
+  database per tenant, no resource-level authorization. OAuth2/JWT and session authentication are refused.
+- Generated PostgreSQL suites other than `orders-platform` are generated and linted but not executed by the
+  plugin's tests; the opt-in verification needs local PostgreSQL binaries and uv.
 - The local executor is process hygiene, not a sandbox; generated code runs with the operator's privileges when
-  authorised.
+  authorised, and `uv run` reaches the network when the cache misses.
+- Route composition follows string-constant prefixes through `include_router`; prefixes built at runtime are
+  reported `unresolved`, and `root_path`/mounted sub-applications are not composed.
 
 ## Roadmap for the next v2.0 increments
 
-1. Alembic environment and first migration from the generated models; opt-in PostgreSQL run of a generated project
-   under the `tenant-ledger` discipline.
-2. Extending an existing project from a contract (read the current layout, add a module, preserve everything).
-3. Authentication beyond API keys (OAuth2/JWT with the references' guidance) and tenant membership binding that
-   satisfies the auditor's `SEC_TENANT_NOT_BOUND_TO_PRINCIPAL` question.
-4. Prefix composition in the auditor and full-path `public_routes`.
-5. Operations files from `assets/` (Dockerfile, CI, pre-commit) and the reliability patterns (outbox, workers)
+1. Extending an existing project from a contract (read the current layout, add a module, preserve everything).
+2. Authentication beyond API keys (OAuth2/JWT with the references' guidance) and resource-level authorization
+   policies as declared decisions.
+3. Row-level security as an opt-in strategy implementation (policies, session tenant context, the tenant-ledger
+   discipline) so `shared_schema_rls` can be reported as implemented.
+4. Operations files from `assets/` (Dockerfile, CI, pre-commit) and the reliability patterns (outbox, workers)
    as opt-in generation guarded by decisions in the contract.
+5. Sub-application mounts and `root_path` in the auditor's route composition.

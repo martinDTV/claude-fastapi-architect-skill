@@ -1,6 +1,6 @@
 # Design engine (v2.0): architecture record
 
-Status: first increment, implemented and tested locally; not published.
+Status: increments 1 and 2 implemented and tested locally; not published.
 
 ## Decision
 
@@ -88,3 +88,39 @@ of being copied: it is not a foreign project, and its digest is compared before 
 - Extending an existing (non-generated) project from a contract; the writer already supports adding files to a
   non-empty target, the blueprint does not yet read an existing layout.
 - Docker, CI and pre-commit files from `assets/`, workers and outbox from the references.
+
+## Increment 2: persistence and contract hardening
+
+**PostgreSQL is a real target, not a stub.** A PostgreSQL contract now gets a declarative base with a naming
+convention, an Alembic environment and an initial migration generated from the contract (revision id derived from
+the contract digest), composite foreign keys between tenant tables, a request-scoped session that rolls back on
+errors, services that own the unit of work (flush + commit) and turn constraint violations into 409, and a test
+suite that only accepts an empty database, migrates it, truncates between tests, checks `compare_metadata` and
+repeats up/down. The decision to keep flushes out of repositories came from the first PostgreSQL run: an
+`IntegrityError` raised by a flush inside `add()` escaped the service's handler and surfaced as a 500.
+
+**The contract says what the generator cannot guarantee.** Schema 1.1 adds `references`/`on_delete` (foreign
+keys that must follow the module dependency direction) and `security.multi_tenant.binding`. Only
+`api_key_registry` is implemented (each key bound to one tenant, a dependency resolves the tenant path parameter
+and refuses others with 403). A multi-tenant contract without a binding validates but is refused for generation:
+a route that accepts any `tenant_id` from any authenticated caller is not authorization. The report's
+`guarantees` block separates requested design, declared strategy, implemented strategy
+(`shared_schema_application_scoping`), authentication, principal binding, resource authorization (not
+generated) and storage isolation, and lists what is not claimed (RLS, schema/database per tenant, resource
+authorization, OAuth2/sessions, network or filesystem isolation of executed tests).
+
+**The auditor composes routes.** Route contracts carry `effective_paths` and `path_resolution` (resolved,
+ambiguous, unresolved, unmounted) composed through `APIRouter(prefix=...)`, `include_router(..., prefix=...)` and
+applications created in factories. `public_routes` and `route_auth_required` match effective paths as well as
+router-local ones; a router mounted twice is public only if every mount is declared; a non-constant prefix yields
+`unresolved` and nothing is invented. Fingerprints are untouched because messages keep the handler's own path.
+The generated projects therefore declare full public paths again (`/health`, `/api/v1/*`). Corpora and the two
+calibration projects score identically before and after.
+
+**Verification runs in a copy.** The first increment used the generated target as the workspace project; that
+contradicted the executor's own guarantee ("runs in a copy of the project") and would have let `uv run` write a
+virtual environment and a lock file into the committed snapshot. `run_generated_tests` now copies the target
+(`Workspace.create`) and reports the copy's Python digest before and after. The opt-in PostgreSQL test
+(`FA_DESIGN_PG=1`) creates a throwaway cluster, runs the generated suite through the trust model with
+`DATABASE_URL`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` passed through, and includes a negative control that
+mutates a model and expects the drift test to fail. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
