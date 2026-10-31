@@ -70,7 +70,7 @@ def expand_contract(project: Path, **extra) -> Dict[str, Any]:
     return doc
 
 
-def evidence_for(manifest: Dict[str, Any], *, generated_at: Optional[datetime] = None, pending_rows: int = 0, state: str = "complete", application_version: Optional[str] = "manifest", current: Optional[List[str]] = None, index_valid: bool = True) -> Dict[str, Any]:
+def evidence_for(manifest: Dict[str, Any], *, generated_at: Optional[datetime] = None, pending_rows: int = 0, state: str = "complete", application_version: Optional[str] = "manifest", current: Optional[List[str]] = None, index_valid: bool = True, index_present: bool = True) -> Dict[str, Any]:
     head = manifest["migrations"][-1]["revision"]
     operations = {}
     for change in manifest["phased_changes"]:
@@ -84,7 +84,7 @@ def evidence_for(manifest: Dict[str, Any], *, generated_at: Optional[datetime] =
         "database": {"name": "test", "user": "fa_owner", "server_version": "PostgreSQL 16", "bypasses_rls": True},
         "alembic": {"current": current if current is not None else [head], "matches_expected_head": True},
         "operations": operations,
-        "indexes": [{"name": i["name"], "table": i["table"], "present": True, "valid": index_valid} for i in manifest["concurrent_indexes"]],
+        "indexes": [{"name": i["name"], "table": i["table"], "present": index_present, "valid": index_valid and index_present} for i in manifest["concurrent_indexes"]],
         "problems": [],
         "ok": True,
     }
@@ -349,6 +349,7 @@ class ContractPlanningTests(ProjectCase):
             "application version not declared": (evidence_for(self.manifest, application_version=None), "contract_application_version_accredited"),
             "another application version": (evidence_for(self.manifest, application_version="0" * 64), "contract_application_version_accredited"),
             "invalid index": (evidence_for(self.manifest, index_valid=False), "contract_indexes_valid"),
+            "missing index": (evidence_for(self.manifest, index_present=False), "contract_indexes_valid"),
             "wrong schema": (dict(evidence_for(self.manifest), schema="other/1.0"), "contract_evidence_valid"),
         }
         for label, (evidence, blocker) in cases.items():
@@ -356,6 +357,9 @@ class ContractPlanningTests(ProjectCase):
                 plan = self.plan(evidence=evidence)
                 self.assertEqual(plan.state, "blocked", label)
                 self.assertTrue(any(b.startswith(blocker) for b in plan.blockers), (label, plan.blockers))
+        absent = self.plan(evidence=evidence_for(self.manifest, index_present=False))  # an index the database does not hold is missing, not invalid
+        detail = next(b for b in absent.blockers if b.startswith("contract_indexes_valid"))
+        self.assertIn("invalid: [], missing: ['ix_", detail)
         other = evidence_for(self.manifest)
         other["operations"] = {"0123456789abcdef": next(iter(other["operations"].values()))}
         plan = self.plan(evidence=other)

@@ -252,8 +252,9 @@ def contract_preconditions(change: Dict[str, Any], evidence: Optional[Dict[str, 
     accredited = bool(declared_version) and declared_version == expected_version
     out.append(("contract_application_version_accredited", accredited, f"operator declared application version {declared_version}" if accredited else f"the evidence must declare the application version that writes the column ({expected_version}); got {declared_version!r}. This is a declaration by the operator, recorded as such"))
     related = [i for i in (evidence.get("indexes") or []) if isinstance(i, dict) and i.get("table") == change.get("table")]
-    invalid = [i.get("name") for i in related if not i.get("valid")]
+    invalid = [i.get("name") for i in related if i.get("present") and not i.get("valid")]
     expected_names = [i.get("name") for i in indexes if i.get("table") == change.get("table")]
-    missing = [n for n in expected_names if n not in {i.get("name") for i in related}]
+    reported = {i.get("name"): i for i in related}
+    missing = [n for n in expected_names if n not in reported or not reported[n].get("present")]
     out.append(("contract_indexes_valid", not invalid and not missing, "indexes of the table valid" if not (invalid or missing) else f"invalid: {invalid}, missing: {missing}"))
     return out
