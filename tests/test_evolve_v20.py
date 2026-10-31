@@ -140,12 +140,12 @@ class EvolutionContractTests(unittest.TestCase):
         for path in (ADD_SUPPLIERS, ADD_SHIPMENTS):
             contract, errors = evolution.validate_evolution(_load(path), str(path))
             self.assertEqual(errors, [], path.name)
-            self.assertEqual(contract.schema, evolution.EVOLUTION_SCHEMA)
+            self.assertIn(contract.schema, evolution.EVOLUTION_SCHEMAS)  # the increment 3 examples are 1.0 contracts, still read
             self.assertEqual(len(contract.digest), 64)
 
     def test_invalid_contracts_are_rejected_with_paths(self) -> None:
         cases = [
-            ({"schema": "x"}, ["evolution.schema", "evolution.project", "evolution.add_modules"]),
+            ({"schema": "x"}, ["evolution.schema", "evolution.project", "nothing to do"]),
             ({"schema": evolution.EVOLUTION_SCHEMA, "project": {"path": "p", "bogus": 1}, "add_modules": [{"name": "Bad-Name"}], "extra": 1}, ["evolution.project.bogus", "add_modules[0].name", "evolution.extra"]),
             ({"schema": evolution.EVOLUTION_SCHEMA, "project": {"path": "p", "expected_spec_digest": "zz"}, "add_modules": [{"name": "ok"}], "invariants": ["made_up"], "files": {"allow_modify": ["../etc/passwd"], "preserve": "README.md"}}, ["expected_spec_digest", "evolution.invariants", "allow_modify", "files.preserve"]),
         ]
@@ -462,7 +462,7 @@ class CliTests(EvolveCase):
         self.assertEqual(self.run_cli("apply", str(contract), "--test-command", "pytest")[0], 2)  # without --authorize-execution
         code, out, err = self.run_cli("apply", str(contract))
         self.assertEqual(code, 0, err)
-        self.assertIn("applied: applied (11 files)", out)
+        self.assertIn("applied: applied (11 files", out)
         self.assertTrue((project / "tests" / "test_suppliers.py").is_file())
         code, out, _ = self.run_cli("apply", str(contract))
         self.assertEqual(code, 0)

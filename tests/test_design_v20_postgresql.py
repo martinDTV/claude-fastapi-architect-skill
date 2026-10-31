@@ -217,3 +217,120 @@ class EvolvedPostgresBackendTests(unittest.TestCase):
         if EVIDENCE_DIR:
             Path(EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
             (Path(EVIDENCE_DIR) / name).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+
+@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the column migrations against a throwaway cluster")
+@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
+class ColumnMigrationPostgresTests(unittest.TestCase):
+    """Increment 4, scenario A on PostgreSQL: orders-platform gains two columns on customers (nullable phone,
+    NOT NULL tier with a server default) and an update operation on orders; the evolved suite runs on a throwaway
+    cluster through the trust model. Adversarial: the additive migration backfills existing rows through the
+    server default, and a PostgreSQL failure during the migration (a conflicting column created by hand) leaves the
+    schema at the previous revision because DDL is transactional; neither case can end verified."""
+
+    CHANGES = [{"name": "customers", "entities": [{"name": "Customer", "add_fields": [{"name": "phone", "type": "str", "max_length": 30, "required": False}, {"name": "tier", "type": "int", "required": True, "default": 1, "min_value": 0}]}]}, {"name": "orders", "entities": [{"name": "Order", "add_operations": ["update"]}]}]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cluster = ThrowawayCluster().__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.cluster.__exit__(None, None, None)
+
+    def _copy(self, name: str) -> Path:
+        import tempfile
+
+        root = Path(tempfile.mkdtemp(prefix=f"fa-inc4-pg-{name}-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        project = root / "orders"
+        shutil.copytree(REPO_ROOT / "plugins" / "fastapi-architect" / "examples" / "generated" / "orders-platform", project, ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache", ".venv"))
+        return project
+
+    def _contract(self, project: Path, name: str = "evolve.json") -> Path:
+        from fastapi_design import evolution
+
+        path = project.parent / name
+        path.write_text(json.dumps({"schema": evolution.EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": self.CHANGES}), encoding="utf-8")
+        return path
+
+    def _options(self, project: Path, url: str, apply: bool = True):
+        from fastapi_design import evolution
+
+        command = "uv run --group dev pytest -q -p no:cacheprovider"
+        for key, value in _uv_env().items():
+            os.environ[key] = value
+        os.environ["DATABASE_URL"] = url
+        return evolution.EvolveOptions(apply=apply, authorization=Authorization(execution=True, trust="fixture", scope=str(project), declared_by="tests: FA_DESIGN_PG opt-in, evolved copy"), policy=ExecutionPolicy(authorized=True, command=command, timeout_s=900, env_passthrough=tuple(DEFAULT_ENV_PASSTHROUGH) + ("DATABASE_URL", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")), test_command=command)
+
+    def _alembic(self, project: Path, url: str, *args: str) -> subprocess.CompletedProcess:
+        import subprocess
+
+        env = dict(os.environ, ORDERS_PLATFORM_DATABASE_URL=url, **_uv_env())
+        return subprocess.run(["uv", "run", "--group", "dev", "alembic", *args], cwd=project, env=env, capture_output=True, text=True)
+
+    def test_column_evolution_is_verified_on_postgresql(self) -> None:
+        from fastapi_design import evolution
+        from fastapi_design.discovery import discover
+
+        project = self._copy("verify")
+        url = self.cluster.create_database("orders_columns")
+        report = evolution.run_evolution(str(self._contract(project)), self._options(project, url))
+        self._save("orders-platform-columns-postgresql.json", report)
+        self.assertEqual(report["state"], "verified", report["verification"]["reasons"] if report.get("verification") else report["plan"]["blockers"])
+        run = report["verification"]["tests"]["run"]
+        self.assertEqual(run["counts"]["failed"], 0)
+        self.assertEqual(run["counts"]["skipped"], 0)
+        passed = run["evidence"]["tests"]["passed"]
+        for name in ("test_update_order", "test_create_customer", "test_migrated_schema_matches_the_models", "test_upgrade_and_downgrade_are_repeatable"):
+            self.assertTrue(any(p.endswith(name) for p in passed), name)
+        self.assertEqual(report["applied"]["state"], "applied")
+        model = discover(project, audit=False)
+        self.assertEqual(len(model.alembic["revisions"]), 2)
+        self.assertEqual(model.alembic["historical_modified"], [])
+        self.assertEqual(self.cluster.psql("SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = 'public'", db="orders_columns"), "alembic_version")
+
+    def test_server_default_backfills_existing_rows_and_downgrade_removes_the_columns(self) -> None:
+        from fastapi_design import evolution
+
+        project = self._copy("backfill")
+        url = self.cluster.create_database("orders_backfill")
+        self.assertEqual(self._alembic(project, url, "upgrade", "head").returncode, 0)
+        self.cluster.psql("INSERT INTO customers (id, tenant_id, email, display_name, active) VALUES ('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'a@example.org', 'A', true)", db="orders_backfill")
+        report = evolution.run_evolution(str(self._contract(project)), self._options(project, url, apply=False) if False else evolution.EvolveOptions(apply=True, verify=False))
+        self.assertEqual(report["applied"]["state"], "applied", report["plan"]["blockers"])
+        upgrade = self._alembic(project, url, "upgrade", "head")
+        self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+        self.assertEqual(self.cluster.psql("SELECT tier, phone IS NULL FROM customers", db="orders_backfill"), "1|t")  # backfilled by the server default, nullable column empty
+        self.assertEqual(self.cluster.psql("SELECT is_nullable FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'tier'", db="orders_backfill"), "NO")
+        downgrade = self._alembic(project, url, "downgrade", "-1")
+        self.assertEqual(downgrade.returncode, 0, downgrade.stderr)
+        self.assertEqual(self.cluster.psql("SELECT count(*) FROM information_schema.columns WHERE table_name = 'customers' AND column_name IN ('tier', 'phone')", db="orders_backfill"), "0")
+        self.assertEqual(self.cluster.psql("SELECT count(*) FROM customers", db="orders_backfill"), "1")  # existing data survives the rollback of the additive revision
+        self._save("orders-platform-backfill-postgresql.json", {"upgrade": upgrade.stderr[-2000:], "downgrade": downgrade.stderr[-2000:]})
+
+    def test_postgresql_failure_during_the_migration_leaves_the_previous_revision(self) -> None:
+        from fastapi_design import evolution
+
+        project = self._copy("conflict")
+        url = self.cluster.create_database("orders_conflict")
+        self.assertEqual(self._alembic(project, url, "upgrade", "head").returncode, 0)
+        head_before = self.cluster.psql("SELECT version_num FROM alembic_version", db="orders_conflict")
+        self.cluster.psql("ALTER TABLE customers ADD COLUMN tier text", db="orders_conflict")  # a conflicting column created by hand
+        report = evolution.run_evolution(str(self._contract(project)), evolution.EvolveOptions(apply=True, verify=False))
+        self.assertEqual(report["applied"]["state"], "applied")
+        upgrade = self._alembic(project, url, "upgrade", "head")
+        self.assertNotEqual(upgrade.returncode, 0)
+        self.assertIn("already exists", upgrade.stderr)
+        self.assertEqual(self.cluster.psql("SELECT version_num FROM alembic_version", db="orders_conflict"), head_before)  # transactional DDL: nothing of the revision landed
+        self.assertEqual(self.cluster.psql("SELECT count(*) FROM information_schema.columns WHERE table_name = 'customers' AND column_name = 'phone'", db="orders_conflict"), "0")
+        # the generated suite refuses a non-empty database, so the verification can only end rejected, never verified
+        result = evolution.run_evolution(str(self._contract(project, "again.json")), self._options(project, url, apply=True))
+        self.assertIn(result["state"], ("noop", "rejected", "inconclusive"))
+        self.assertNotEqual(result["state"], "verified")
+        self._save("orders-platform-migration-failure-postgresql.json", {"upgrade_stderr": upgrade.stderr[-3000:], "state_after": result["state"]})
+
+    def _save(self, name: str, report: dict) -> None:
+        if EVIDENCE_DIR:
+            Path(EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
+            (Path(EVIDENCE_DIR) / name).write_text(json.dumps(report, indent=2, sort_keys=True, default=str), encoding="utf-8")
