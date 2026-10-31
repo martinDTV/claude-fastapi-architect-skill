@@ -1,0 +1,11 @@
+{
+  "schema": "fastapi-architect/evolution/1.1",
+  "project": {"path": "handmade_shop"},
+  "modify_modules": [
+    {
+      "name": "items",
+      "add_endpoints": [{"method": "GET", "path": "/stats", "name": "items_stats", "summary": "Number of items", "response": {"module": "items", "schema_version": 2}}],
+      "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": false}]
+    }
+  ]
+}

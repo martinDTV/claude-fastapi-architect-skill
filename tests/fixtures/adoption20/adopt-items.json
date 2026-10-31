@@ -1,0 +1,8 @@
+{
+  "schema": "fastapi-architect/adoption/1.0",
+  "project": {"path": "handmade_shop"},
+  "modules": [
+    {"name": "items", "router": {"file": "app/routers/items.py", "name": "router"}, "files": ["app/routers/items.py", "app/schemas.py"]}
+  ],
+  "notes": "scenario B: only the items module is adopted; users and everything else stay protected"
+}

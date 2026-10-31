@@ -39,7 +39,7 @@ from .spec import Spec, canonical_digest, validate_spec
 PYDANTIC_MODEL_BASES = {"pydantic.BaseModel", "pydantic.main.BaseModel"}
 PYDANTIC_SETTINGS_BASES = {"pydantic_settings.BaseSettings", "pydantic.BaseSettings", "pydantic_settings.main.BaseSettings"}
 DECLARATIVE_BASES = {"sqlalchemy.orm.DeclarativeBase", "sqlalchemy.orm.decl_api.DeclarativeBase", "sqlalchemy.ext.declarative.declarative_base", "sqlalchemy.orm.declarative_base"}
-OWNERSHIP = ("managed_unchanged", "managed_modified", "unmanaged", "missing_managed", "unknown")
+OWNERSHIP = ("managed_unchanged", "managed_modified", "unmanaged", "missing_managed", "adopted_unchanged", "adopted_modified", "adopted_missing", "unadopted", "unknown")
 
 
 @dataclass
@@ -67,14 +67,23 @@ class ProjectModel:
     alembic: Optional[Dict[str, Any]] = None
     declared_contracts: Optional[Dict[str, Any]] = None
     audit_summary: Optional[Dict[str, Any]] = None
+    adoption: Optional[Dict[str, Any]] = None  # .fastapi-architect/adoption.json of a hand-written project (increment 4)
     uncertainties: List[str] = field(default_factory=list)
 
     @property
     def is_generated(self) -> bool:
         return self.manifest is not None
 
+    @property
+    def is_adopted(self) -> bool:
+        return self.adoption is not None
+
     def ownership_of(self, relpath: str) -> str:
-        return self.ownership.get(relpath, "unknown" if self.manifest is None else "unmanaged")
+        if self.manifest is not None:
+            return self.ownership.get(relpath, "unmanaged")
+        if self.adoption is not None:
+            return self.ownership.get(relpath, "unadopted")
+        return self.ownership.get(relpath, "unknown")
 
     def to_dict(self) -> Dict[str, Any]:
         counts: Dict[str, int] = {}
@@ -103,6 +112,7 @@ class ProjectModel:
             "alembic": self.alembic,
             "declared_contracts": self.declared_contracts,
             "audit_summary": self.audit_summary,
+            "adoption": {"modules": {name: {"router": data.get("router"), "files": sorted(data.get("files", {})), "routes": len(data.get("routes", []))} for name, data in self.adoption.get("modules", {}).items()}, "history": self.adoption.get("history", [])} if self.adoption else None,
             "uncertainties": list(self.uncertainties),
         }
 
@@ -124,6 +134,21 @@ def _read_manifest(root: Path) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     if not isinstance(manifest.get("files"), dict):
         return None, [f"{MANIFEST} has no file table; the project is treated as not generated"]
     return manifest, []
+
+
+def _read_adoption(root: Path, notes: List[str]) -> Optional[Dict[str, Any]]:
+    path = root / ".fastapi-architect" / "adoption.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        notes.append(f".fastapi-architect/adoption.json is not readable JSON ({exc}); the adoption is ignored")
+        return None
+    if not isinstance(data, dict) or data.get("schema") != "fastapi-architect/adoption/1.0" or not isinstance(data.get("modules"), dict):
+        notes.append(".fastapi-architect/adoption.json has an unknown schema; the adoption is ignored")
+        return None
+    return data
 
 
 def _package_and_source_root(root: Path, manifest: Optional[Dict[str, Any]], notes: List[str]) -> Tuple[Optional[str], str]:
@@ -296,6 +321,9 @@ def discover(project_root: str, *, audit: bool = True) -> ProjectModel:
                     on_disk.setdefault(rel, _sha(path.read_bytes()))
                 except OSError:
                     notes.append(f"{rel} could not be read")
+    adoption_path = root / ".fastapi-architect" / "adoption.json"
+    if adoption_path.is_file():
+        on_disk[".fastapi-architect/adoption.json"] = _sha(adoption_path.read_bytes())
     model.digests = dict(sorted(on_disk.items()))
     for rel, digest in on_disk.items():
         if manifest is None:
@@ -310,7 +338,21 @@ def discover(project_root: str, *, audit: bool = True) -> ProjectModel:
         for rel in manifest["files"]:
             if rel not in on_disk:
                 model.ownership[rel] = "missing_managed"
-    if manifest is None:
+    adoption = None if manifest is not None else _read_adoption(root, notes)
+    model.adoption = adoption
+    if adoption is not None:
+        adopted: Dict[str, str] = {}
+        for data in adoption.get("modules", {}).values():
+            adopted.update({str(k): str(v) for k, v in (data.get("files") or {}).items()})
+        for rel in list(model.ownership):
+            if rel in adopted:
+                model.ownership[rel] = "adopted_unchanged" if adopted[rel] == on_disk.get(rel) else "adopted_modified"
+            else:
+                model.ownership[rel] = "unadopted"
+        for rel in adopted:
+            if rel not in on_disk:
+                model.ownership[rel] = "adopted_missing"
+    elif manifest is None:
         notes.append("no generation manifest: file ownership is unknown for every file (nothing can be told apart from a manual file)")
 
     model.package, model.source_root = _package_and_source_root(root, manifest, notes)

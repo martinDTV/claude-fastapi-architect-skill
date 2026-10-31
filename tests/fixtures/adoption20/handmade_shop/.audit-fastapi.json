@@ -1,0 +1,1 @@
+{"public_routes": ["/health", "/api/items", "/api/items/*", "/api/users", "/api/users/*"], "x-note": "a public demo API: every route is declared public so the auditor reports no exposure findings"}
