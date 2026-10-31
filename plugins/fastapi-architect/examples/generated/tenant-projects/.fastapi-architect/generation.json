@@ -1,0 +1,222 @@
+{
+  "files": {
+    ".audit-fastapi.json": "db9e7c18d6d7cfbc6ecc9005b768c8c45d9d6814fa40535c28e14e09f667e0c5",
+    ".env.example": "5866b97dc9efae0ab1fe233f496f9933e0e1079ccd65e93462330184518b86b2",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
+    "README.md": "556d72e5a3afab274c3d798875f50666e3f0eb30655e62b4d960fb2864c2f019",
+    "alembic.ini": "080684a2f891ff6c89990b03d45feab93ac1dae1f544cbddef54420af0f5b39f",
+    "migrations/env.py": "46b2c5be92416d73f310fa82fe9ffe44cf65a15e9cb88f2ed9879f9334137fa6",
+    "migrations/script.py.mako": "2cd523749515d0c0c53a6873ca3bb098d8db35b75d6ad080e8f629561a5c5623",
+    "migrations/versions/2b11be23cf88_initial_schema.py": "805bbb66831ff0c67632d2271518d9f55563a4c9caffd5c93d4cb1aac76319cb",
+    "pyproject.toml": "d7e418960e0198698483c855dac3c1b1514a6e6ee62558fd6f11950a0b9816d7",
+    "src/tenant_projects/__init__.py": "a6a054f99b42ecc7ab20b35a87581adb539a46bd613b9982046b191428afc8c6",
+    "src/tenant_projects/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/tenant_projects/api/router.py": "58f1ebd1bfa15d3ee9362ffe72d7f4fdb45b15dc2436b5ed2462221e344629f1",
+    "src/tenant_projects/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/tenant_projects/core/authz.py": "152ea8c6b0972d8028f53ee20c0cac46e9ee56d62994aeb1b8be5171adb9ce3f",
+    "src/tenant_projects/core/config.py": "c238fbf7103d3a70c58c530f62023ab4ad1a4580a2a08faf274031022fd12a43",
+    "src/tenant_projects/core/db.py": "bc164c5258697809924db628838ab6dcb1ccec4bb647be0797edf1c8e5539053",
+    "src/tenant_projects/core/errors.py": "11d6475cfaeca833702657f0708788e6d8044255b1879b6dc4c6078901a81993",
+    "src/tenant_projects/core/security.py": "089d50f077655c9b65a448477c74368ba3cea944475f7fabec1e4af785d0afc7",
+    "src/tenant_projects/main.py": "3848a84461d96169559822690f2d0c5905be274becd5a1098a04a89f3c5ff43e",
+    "src/tenant_projects/modules/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/tenant_projects/modules/projects/__init__.py": "a0917a11b9c40ff274f4785610524ec55de0159e4fc81f8d7bc8a7cd35dc61fb",
+    "src/tenant_projects/modules/projects/dependencies.py": "4d9138377770452de77246b1864b7d262d5122cb30ed0a8250b0fbfdc3b7cb20",
+    "src/tenant_projects/modules/projects/models.py": "d67c275ea8b06ed81b32018afa349c2d5326d8e4a967cecab64312f8a8a0f931",
+    "src/tenant_projects/modules/projects/repository.py": "0c3a7d3619bc5ada132a085aacea5ff59ee7e62ef4115fbf3a27ed8783a41a63",
+    "src/tenant_projects/modules/projects/router.py": "b9400d7842a01ad62e2c2989091231f829e37e3e09dd7dc76f932d41a108fbd1",
+    "src/tenant_projects/modules/projects/schemas.py": "239793d6369ee8f5bd054869b88767c8ca60bb3f13b0b4a37da55170dbfb8a7a",
+    "src/tenant_projects/modules/projects/service.py": "990df7a690e3556c7cbf209123cb93608d7a87a58589b0c75ffff400247173f3",
+    "src/tenant_projects/modules/tasks/__init__.py": "00109ad2b6897bffb1b5894ec8fde576e5a4eab3ceb22ddb4d996a83e68283b8",
+    "src/tenant_projects/modules/tasks/dependencies.py": "c6d58fff3637c645874443ee3d9f4598d1e8640a91a78b1341d5188e3a142aeb",
+    "src/tenant_projects/modules/tasks/models.py": "f15d0832c530b88c94374d2808874cb8d1dbcf49891768ca2721209512add094",
+    "src/tenant_projects/modules/tasks/repository.py": "a2fe95c803da7a20a2c27eddfbd84f0d597aa565cb395197216e02963d170da9",
+    "src/tenant_projects/modules/tasks/router.py": "bcd2945c8579de126b90a254827004ffed7d2a0b56dae80aeafdf5a16841a93c",
+    "src/tenant_projects/modules/tasks/schemas.py": "d4edc25619bd99bc47c5eea96959ae694e255eb57461889538f974641a6aca59",
+    "src/tenant_projects/modules/tasks/service.py": "283cf1e1a03b1038ef1bc17e06e5c4af463d314bf439e099136a3a5240e52780",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/conftest.py": "68e047ec279e238497466c39e15893d4492ee43fc1a66ee998d43f9a97d0753a",
+    "tests/test_migrations.py": "4d7c72c28c9e5888ed33680321574784eaf02476d96bf1d261853bb1a63a2051",
+    "tests/test_projects.py": "7ae1609bb4fe08fac6e7a1427f77d647ce0afd3eca6b254c488456bf28b41c93",
+    "tests/test_rls.py": "fd5526a851c02ab1ba3c9c84b365d07514ebb3a9074bc425f00aaa68dbc7173f",
+    "tests/test_tasks.py": "6093c6838b89ee58c46352a4a0ec7cc04ed0094e42c7be282540e19b423d6385"
+  },
+  "history": [
+    {
+      "modules": [
+        "projects",
+        "tasks"
+      ],
+      "operation": "generate",
+      "spec_digest": "90251d20a00e4a7f6229af351851af8d7c11a7951ceea0699b331d89d54e80e3"
+    }
+  ],
+  "migrations": [
+    {
+      "down_revision": null,
+      "file": "migrations/versions/2b11be23cf88_initial_schema.py",
+      "revision": "2b11be23cf88",
+      "row_level_security": true,
+      "tables": [
+        "projects",
+        "tasks"
+      ]
+    }
+  ],
+  "package": "tenant_projects",
+  "schema": "fastapi-architect/generation/1.2",
+  "security": {
+    "authentication": "api_key",
+    "authorization_declared": null,
+    "authorization_model": "roles_and_ownership",
+    "identity": "per_caller",
+    "row_level_security": true,
+    "tenant_binding": "api_key_registry",
+    "tenant_strategy_declared": "shared_schema_rls",
+    "tenant_strategy_implemented": "shared_schema_rls"
+  },
+  "spec": {
+    "digest": "90251d20a00e4a7f6229af351851af8d7c11a7951ceea0699b331d89d54e80e3",
+    "name": "tenant-projects",
+    "schema": "fastapi-architect/spec/1.2"
+  },
+  "spec_document": {
+    "decisions": [
+      {
+        "id": "ADR-1",
+        "rationale": "One schema keeps operations simple; the database enforces the tenant boundary for every query the application role runs, in addition to the application scoping and the composite foreign keys.",
+        "status": "accepted",
+        "title": "Row-level security is the storage boundary between organisations"
+      },
+      {
+        "id": "ADR-2",
+        "rationale": "Roles are credentials; the migration verifies that the role exists and cannot bypass RLS, it never creates it with a default password.",
+        "status": "accepted",
+        "title": "The application role is provisioned outside the migrations"
+      }
+    ],
+    "description": "Projects and tasks of several organisations on one PostgreSQL database, isolated by row-level security.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Projects of each organisation.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "max_length": 120,
+                  "name": "name",
+                  "type": "str"
+                },
+                {
+                  "min_value": 0,
+                  "name": "budget",
+                  "type": "decimal"
+                },
+                {
+                  "name": "starts_on",
+                  "type": "date"
+                }
+              ],
+              "name": "Project"
+            }
+          ],
+          "name": "projects"
+        },
+        {
+          "depends_on": [
+            "projects"
+          ],
+          "description": "Tasks inside a project, owned by the member who created them.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "name": "project_id",
+                  "on_delete": "cascade",
+                  "references": "projects.Project",
+                  "type": "uuid"
+                },
+                {
+                  "max_length": 200,
+                  "name": "title",
+                  "type": "str"
+                },
+                {
+                  "default": false,
+                  "name": "done",
+                  "type": "bool"
+                }
+              ],
+              "name": "Task",
+              "owned": true
+            }
+          ],
+          "name": "tasks"
+        }
+      ]
+    },
+    "name": "tenant-projects",
+    "nonfunctional": {
+      "auditability": false,
+      "availability": "99.9%",
+      "consistency": "strong",
+      "latency_p95_ms": 250
+    },
+    "package": "tenant_projects",
+    "persistence": {
+      "kind": "postgresql",
+      "migrations": true
+    },
+    "schema": "fastapi-architect/spec/1.2",
+    "scope": {
+      "data_volume": "medium",
+      "expected_rps": 200,
+      "size": "medium",
+      "team_size": 4
+    },
+    "security": {
+      "authentication": "api_key",
+      "authorization": {
+        "model": "roles_and_ownership",
+        "operations": {
+          "delete": [
+            "admin"
+          ]
+        },
+        "ownership": {
+          "admin_roles": [
+            "admin"
+          ],
+          "visibility": "tenant"
+        },
+        "roles": [
+          "admin",
+          "member"
+        ]
+      },
+      "multi_tenant": {
+        "binding": "api_key_registry",
+        "enabled": true,
+        "rls": {
+          "app_role": "tenant_projects_app",
+          "context_key": "app.tenant_id"
+        },
+        "strategy": "shared_schema_rls",
+        "tenant_param": "tenant_id"
+      }
+    },
+    "testing": {
+      "coverage_target": 85,
+      "levels": [
+        "unit",
+        "integration"
+      ]
+    }
+  },
+  "style": "modular_monolith",
+  "tool": {
+    "name": "fastapi-architect design",
+    "version": "2.0.0"
+  }
+}

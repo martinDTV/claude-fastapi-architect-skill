@@ -1,0 +1,26 @@
+{
+  "contracts": {
+    "commit_layers": [
+      "service"
+    ],
+    "forbidden_imports": [
+      {
+        "from": "tenant_projects.modules.projects",
+        "to": "tenant_projects.modules.tasks"
+      }
+    ],
+    "mutation_authorization_required": [
+      "/api/*"
+    ],
+    "route_auth_required": [
+      "/api/*"
+    ]
+  },
+  "public_routes": [
+    "/health"
+  ],
+  "tenant_params": [
+    "tenant_id"
+  ],
+  "x-generated-by": "fastapi-architect design (v2.0): declarations of the design, reviewed by the auditor"
+}

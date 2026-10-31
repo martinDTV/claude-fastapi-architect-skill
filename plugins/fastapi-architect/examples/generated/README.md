@@ -8,13 +8,16 @@ regenerate (`--overwrite` is required to replace a differing file).
 | Example | Contract | Style | Persistence | Security | Verified |
 |---|---|---|---|---|---|
 | [`inventory-service/`](inventory-service/README.md) | `../specs/inventory-service.json` (small warehouse catalogue, one module) | layered | in-memory | API key (shared) | audited clean; 9 generated tests passed through the trust model (`tests/test_design_v20.py`, when fastapi is importable) |
-| [`orders-platform/`](orders-platform/README.md) | `../specs/orders-platform.json` (multi-tenant B2B order intake, three modules, two integrations) | hexagonal | PostgreSQL + Alembic | API keys bound to tenants (`api_key_registry`) | audited (one informational finding); 39 generated tests passed on a throwaway PostgreSQL 16 through the trust model, drift negative control failed as expected: [`VERIFICATION.md`](VERIFICATION.md) |
+| [`orders-platform/`](orders-platform/README.md) | `../specs/orders-platform.json` (multi-tenant B2B order intake, three modules, two integrations; schema 1.1, so its declared `shared_schema_rls` stays application scoping) | hexagonal | PostgreSQL + Alembic | API keys bound to tenants (`api_key_registry`, grants) | audited (one informational finding); 45 generated tests passed on a throwaway PostgreSQL 16 through the trust model, drift negative control failed as expected: [`VERIFICATION.md`](VERIFICATION.md) |
+| [`team-notes/`](team-notes/README.md) | `../specs/team-notes.json` (shared notes of a workspace; schema 1.2) | layered | in-memory | OIDC bearer tokens, tenant from the verified `workspace_id` claim (`principal_claim`), `roles_and_ownership` | audited clean, every protected route with visible authorization; 54 generated tests passed through the trust model (`tests/test_design_v20_security.py`, when PyJWT and cryptography are importable) |
+| [`tenant-projects/`](tenant-projects/README.md) | `../specs/tenant-projects.json` (projects and tasks of several organisations; schema 1.2) | modular monolith | PostgreSQL + Alembic + **row-level security** | API-key grants (`api_key_registry`), `roles_and_ownership` | audited (two informational findings); 51 generated tests passed on a throwaway PostgreSQL 16 **as the restricted role** `fa_app` (12 RLS demonstrations, concurrency, 503 control); a BYPASSRLS role refused by the migration; evolution adds a protected table (64 tests): [`VERIFICATION.md`](VERIFICATION.md) |
 
-Each generated project carries `.fastapi-architect/generation.json` (schema 1.1: contract document and digest,
-tool version, sha256 of every file, migration chain, operation history; no timestamps) and an `.audit-fastapi.json`
+Each generated project carries `.fastapi-architect/generation.json` (schema 1.2: contract document and digest,
+tool version, sha256 of every file, migration chain, operation history, the implemented security model; no timestamps) and an `.audit-fastapi.json`
 that declares the design for the auditor. The manifest is what lets `scripts/evolve_fastapi.py` tell managed files
 from manual ones; the evolution contracts in `../evolutions/` add a module to each example (increment 3) and change an existing
-module of each (increment 4: `inventory-add-product-fields.json`, `orders-add-customer-columns.json`); see
+module of each (increment 4: `inventory-add-product-fields.json`, `orders-add-customer-columns.json`) and add a
+protected table to the row-level-security example (increment 5: `tenant-projects-add-milestones.json`); see
 [`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in

@@ -1,0 +1,134 @@
+{
+  "schema": "fastapi-architect/spec/1.2",
+  "name": "team-notes",
+  "package": "team_notes",
+  "description": "Shared notes of a workspace: every member reads, authors edit their own, admins moderate.",
+  "scope": {
+    "size": "small",
+    "team_size": 3,
+    "expected_rps": 20,
+    "data_volume": "small"
+  },
+  "functional": {
+    "modules": [
+      {
+        "name": "notes",
+        "description": "Notes written by the members of a workspace and the tags that classify them.",
+        "entities": [
+          {
+            "name": "Note",
+            "owned": true,
+            "fields": [
+              {
+                "name": "title",
+                "type": "str",
+                "max_length": 120
+              },
+              {
+                "name": "body",
+                "type": "str",
+                "max_length": 4000
+              },
+              {
+                "name": "pinned",
+                "type": "bool",
+                "default": false
+              }
+            ]
+          },
+          {
+            "name": "Tag",
+            "fields": [
+              {
+                "name": "label",
+                "type": "str",
+                "max_length": 40
+              }
+            ],
+            "operations": [
+              "create",
+              "get",
+              "list",
+              "delete"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "persistence": {
+    "kind": "memory"
+  },
+  "security": {
+    "authentication": "oauth2_jwt",
+    "oidc": {
+      "issuer": "https://login.example.com/",
+      "audience": "team-notes-api",
+      "algorithms": [
+        "RS256"
+      ],
+      "jwks_url": "https://login.example.com/.well-known/jwks.json",
+      "leeway_s": 30,
+      "claims": {
+        "subject": "sub",
+        "tenant": "workspace_id",
+        "roles": "roles"
+      }
+    },
+    "authorization": {
+      "model": "roles_and_ownership",
+      "roles": [
+        "admin",
+        "editor",
+        "viewer"
+      ],
+      "operations": {
+        "create": [
+          "admin",
+          "editor"
+        ],
+        "update": [
+          "admin",
+          "editor"
+        ],
+        "delete": [
+          "admin",
+          "editor"
+        ]
+      },
+      "ownership": {
+        "visibility": "tenant",
+        "admin_roles": [
+          "admin"
+        ]
+      }
+    },
+    "multi_tenant": {
+      "enabled": true,
+      "strategy": "shared_schema_application_scoping",
+      "tenant_param": "workspace_id",
+      "binding": "principal_claim"
+    },
+    "audit": {
+      "authorization_decisions": true
+    }
+  },
+  "testing": {
+    "levels": [
+      "unit",
+      "integration"
+    ],
+    "coverage_target": 85
+  },
+  "decisions": [
+    {
+      "id": "ADR-1",
+      "title": "Identity comes from the corporate OIDC provider; the service issues no credentials",
+      "status": "accepted",
+      "rationale": "The workspace claim of the verified token binds the caller to its workspace; the service validates tokens and never stores passwords, sessions or refresh tokens."
+    }
+  ],
+  "open_questions": [
+    "Should pinned notes be editable by viewers with a dedicated role?"
+  ]
+}

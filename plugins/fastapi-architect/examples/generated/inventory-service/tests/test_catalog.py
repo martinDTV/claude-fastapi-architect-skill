@@ -54,6 +54,11 @@ def test_get_product_returns_the_created_one_and_404_for_unknown(client, headers
     assert missing.json()["status"] == 404
 
 
+def test_get_product_with_a_malformed_id_is_422(client, headers):
+    url = PRODUCT_URL
+    assert client.get(f"{url}/not-an-id", headers=headers).status_code == 422
+
+
 def test_list_products_paginates(client, headers):
     url = PRODUCT_URL
     payload = payload_for_product(client, headers)

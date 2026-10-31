@@ -109,16 +109,15 @@ models (`compare_metadata` is empty), exercises up/down, and downgrades at the e
 
 ## Tenants and API keys
 
-`ORDERS_PLATFORM_API_KEYS` is a JSON object mapping each API key to the tenant it belongs to. A request to
-`/api/v1/tenants/{tenant_id}/...` is accepted only when the key presented in `X-API-Key` is bound to that tenant
-(403 otherwise); every repository call is scoped by that tenant id. This is authentication plus tenant membership.
-It is **not** resource-level authorization and it is **not** row-level security: the generated isolation is
-application scoping plus composite foreign keys between tenant tables.
+`ORDERS_PLATFORM_API_KEYS` is a JSON object mapping each API key to its grant: `{"tenant_id": ..., "subject": ..., "roles": [...]}`
+(a bare tenant id is still accepted). A request to `/api/v1/tenants/{tenant_id}/...` is accepted only when the key
+presented in `X-API-Key` is bound to that tenant (403 otherwise); every repository call is scoped by that tenant id.
+This is authentication plus tenant membership; the storage isolation is application scoping plus composite foreign keys between tenant tables.
 
 ## Pending decisions
 
 - auditability is required: an append-only audit trail or event log needs a decision; not generated
-- authorization 'resource' needs a policy decision (role model or resource ownership); only authentication is generated
+- authorization 'resource' is a declaration of schema 1.1: it needs the schema 1.2 policy object (model, roles, operations, ownership) to be generated; only authentication is generated
 - decision ADR-2: Payment provider selection
 - open question: Do invoices need to be immutable once issued?
-- tenant strategy 'shared_schema_rls' is declared: row-level security policies and the session tenant context are not generated; until they are, the isolation is application scoping only (references/authz-multitenancy.md, tenant-ledger example)
+- tenant strategy 'shared_schema_rls' is declared in a 1.0/1.1 contract: row-level security policies and the session tenant context are not generated for that schema; until the contract moves to schema 1.2 (a reviewed change with new tests), the isolation is application scoping only (references/authz-multitenancy.md)

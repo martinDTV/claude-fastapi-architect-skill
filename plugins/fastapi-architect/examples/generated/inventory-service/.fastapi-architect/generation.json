@@ -11,7 +11,7 @@
     "src/inventory_service/api/router.py": "c8e9066b8a66804d62aafea4edb0e4576a54501ca02f8c5f5914968145edec5b",
     "src/inventory_service/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/inventory_service/core/config.py": "38d8b1f91ea8af4269462225ad8c81daca46d876662e899278aed7159ea801b5",
-    "src/inventory_service/core/errors.py": "690f7f032b7aaeee37ef1d87714ee02ce640e075081274edda13004e5b6220ca",
+    "src/inventory_service/core/errors.py": "a47bf9f9299223787ede53bcb5875292dc8f75f7fcf19fc79aad76fbd0db0174",
     "src/inventory_service/core/security.py": "c3c363679953724beefa2b831baac17defe12f60ee052b41ac7e60c4a0885d14",
     "src/inventory_service/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/inventory_service/dependencies/catalog.py": "55dd0b76e08599eae4876d791297dc29caaab531e89f82fef7a5e9ace32b8f07",
@@ -26,7 +26,7 @@
     "src/inventory_service/services/catalog.py": "ff3b931c3a4b23712b486e34b9109cf95be4718df2f4f5713201fed256b5e498",
     "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "tests/conftest.py": "8a48ada2f07b7be7bc6d57fed0273d6a72e7ef7beab231031c39c7091c01bdb8",
-    "tests/test_catalog.py": "4fea98030320ed6a2c07ded87a10e41cb3fbbecb5b16571244facc337a97bf53"
+    "tests/test_catalog.py": "8b73feca571aeab817d70b9c09dfceb24ace8032ae123b1a8734e5f36beaf128"
   },
   "history": [
     {
@@ -39,7 +39,17 @@
   ],
   "migrations": [],
   "package": "inventory_service",
-  "schema": "fastapi-architect/generation/1.1",
+  "schema": "fastapi-architect/generation/1.2",
+  "security": {
+    "authentication": "api_key",
+    "authorization_declared": null,
+    "authorization_model": "none",
+    "identity": "shared_credential",
+    "row_level_security": false,
+    "tenant_binding": null,
+    "tenant_strategy_declared": null,
+    "tenant_strategy_implemented": null
+  },
   "spec": {
     "digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c",
     "name": "inventory-service",

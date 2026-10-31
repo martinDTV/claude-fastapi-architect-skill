@@ -211,3 +211,87 @@ cleanly afterwards.
 | `plan` inventory modify_modules | 0.42 s | 35 MB |
 | `apply` inventory modify_modules with 9 tests | 0.95 s | 80 MB |
 | `recover` (rollback of an interrupted 6-file operation) | 0.08 s | 30 MB |
+
+# Increment 5: identity, authorization and row-level security
+
+Run of 2026-10-31 on the same machine (macOS, PostgreSQL 16.10 from Homebrew in a throwaway cluster under `/tmp`,
+uv 0.11.28 resolving from the local cache, Python 3.13 for the generated projects), through
+`tests/test_design_v20_postgresql.py` (`FA_DESIGN_PG=1`, all nine tests) and `tests/test_design_v20_security.py`.
+Reports were written with `FA_DESIGN_PG_EVIDENCE`; the numbers below come from them.
+
+## Vertical slice 1: `team-notes` (`../specs/team-notes.json`, OIDC + `principal_claim` + `roles_and_ownership`, in memory)
+
+`tests/test_design_v20_security.py::AuthorizationSliceTests` generates the project and runs its suite through the
+trust model (`fixture` profile, `LocalProcessExecutor`, copy of the project, pytest-junit evidence bound to the run):
+**54 passed, 0 failed, 0 skipped**; the project is byte-identical afterwards; the audit reports 0 findings and
+`authorization_unknown: 0`. Among the executed tests: legitimate access, another member reading per policy,
+another member refused on update and delete (403, row unchanged), an admin updating another member's note,
+`limited` refused on create/update/delete (403), another tenant refused on the tenant path (403), another tenant's
+id presented under the caller's tenant (404, row untouched), nonexistent (404) and malformed (422) ids, `owner_id`
+rejected from the client (422), missing or invalid bearer token (401 with `WWW-Authenticate: Bearer`), altered
+claims with the original signature, expired and not-yet-valid tokens, wrong audience and issuer, HS256 with the
+public key as secret, `alg: none`, unknown and missing `kid`, another key under the same `kid`, malformed tokens,
+missing required claims, malformed roles, a token without a usable tenant claim (401), a member of another tenant
+(403, not 401), a static JWKS refused outside the test environment, an http JWKS URL refused, an unreachable
+provider answered 503. The single-tenant, owner-scoped `journal` fixture (`tests/fixtures/design20/specs/valid/
+oidc_owner_scoped.json`, ES256) passes its suite the same way (another member cannot see a colleague's entry:
+404; owner-scoped listing; an admin sees and updates it).
+
+## Vertical slice 2: `tenant-projects` (`../specs/tenant-projects.json`, API-key grants + `roles_and_ownership` + `shared_schema_rls`)
+
+`RowLevelSecurityBackendTests`: the cluster gets two extra roles, `fa_app` (`LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB
+NOCREATEROLE NOINHERIT`) and `fa_bypass` (`LOGIN BYPASSRLS`). The application runs as `fa_app` (`DATABASE_URL`);
+migrations and truncation run as the owner (`TENANT_PROJECTS_MIGRATIONS_DATABASE_URL`).
+
+| Test | Result |
+|---|---|
+| `test_generated_rls_backend_passes_its_suite_through_the_application_role` | generated suite **51 passed, 0 failed, 0 skipped** as `fa_app`; audit: two informational findings (`MIG_RAW_SQL` for the policy statements, `ARCH_IMPORT_LINTER_PRESENT`), nothing above `info`; project unchanged; only `alembic_version` left after the final downgrade; design run 9.4 s wall, 124 MB max RSS of the children (12.0 s / 124 MB in the first run) |
+| `test_migration_refuses_a_role_that_bypasses_rls_and_a_missing_role` | `alembic upgrade head` with `TENANT_PROJECTS_APP_ROLE=fa_bypass` fails with "would bypass row-level security", with `fa_missing` fails with "does not exist"; in both cases no table and no `alembic_version` row remain; with `fa_app` it succeeds, `pg_policies` has one policy per tenant table and `relrowsecurity AND relforcerowsecurity` is true for both |
+| `test_evolution_protects_the_new_table_and_the_suite_still_passes` | `add_modules: milestones` (`../evolutions/tenant-projects-add-milestones.json`): state `verified`, additive revision with `_protect("milestones")` and `FORCE ROW LEVEL SECURITY`, `tests/test_rls.py` regenerated with the new table, risks name the protection; evolved suite **64 passed, 0 skipped** as `fa_app` |
+
+The twelve demonstrations of `tests/test_rls.py`, all passed through the restricted role: (1) every tenant table has
+RLS enabled and forced and one policy whose `USING` and `WITH CHECK` read the context key; (2) the role is not a
+superuser, cannot bypass RLS, cannot create roles or databases; (3) without context the owner sees two rows and the
+role sees none; (4) without context an insert is rejected by the policy; (5) with the context of tenant A only A's
+row is visible, with B's only B's; (6) with the context of A a row of B cannot be inserted, A's rows cannot be moved
+to B, and B's row is neither updated nor deleted (0 rows); (7) the context set in a transaction is gone after
+commit and after rollback and absent on the next checkout of the same pooled connection (`pool_size=1`); (8) an
+insert followed by rollback leaves the owner's count unchanged, the same insert committed adds one; (9) an invalid
+context fails the query (`invalid input syntax for type uuid`) and an empty one matches nothing; (10) the role
+cannot disable or un-force RLS, drop the policy, truncate the table or grant itself `BYPASSRLS`; (11) 24 concurrent
+requests alternating two tenants through the ASGI application (anyio task group, httpx ASGI transport, the real
+pool) each see exactly their tenant's rows; (12) an application pointed at a closed port answers 503
+`application/problem+json`, not 401 or 404. The module tests add the cross-tenant reference (409 through the
+composite foreign key), the foreign id under the caller's tenant (404), ownership across members and admins and
+the role needed to delete.
+
+## The earlier examples after the regeneration
+
+The blueprint changes of this increment (API keys as grants, fixed test identities, 404 probes for foreign ids,
+malformed-id checks) regenerated the two older snapshots. The same nine-test opt-in run re-verified them on the
+throwaway cluster: `orders-platform` 45 generated tests passed (39 in increment 2), the drift negative control
+failed as expected, `orders-platform` + `shipments` 58 (50 in increment 3), `orders-platform` + customer columns 46
+(40 in increment 4), the backfill and migration-failure controls unchanged. `inventory-service` passes its 10
+generated tests through the trust model in the unit suite. The orders contract is still schema 1.1: its declared
+`shared_schema_rls` stays application scoping, its manifest records `tenant_strategy_implemented:
+shared_schema_application_scoping`, and an evolution plan names it in the risks.
+
+## Cost (one run each, indicative)
+
+| Step | Wall time | Max RSS |
+|---|---|---|
+| `tests/test_design_v20_security.py` (27 tests, two generated suites through the trust model) | 4.3 s | n/a (in-process) |
+| `RowLevelSecurityBackendTests` (3 tests, three `uv sync` + three generated suites on PostgreSQL) | 29.8 s | 124 MB (children, design run) |
+| whole opt-in module (9 tests) | 68.7 s | n/a |
+| full unit suite, Python 3.13 / 3.9 (532 tests) | 49.4 s / 68.9 s | n/a |
+
+## What this does not show
+
+- The migrations owner on the throwaway cluster is the bootstrap superuser (`fa_owner`): FORCE is verified through
+  the catalog flags and through the restricted role, not through a non-superuser owner.
+- The OIDC provider is simulated by a key pair generated per test session and a static JWKS accepted only in the
+  test environment; no network fetch of a JWKS is exercised (the https requirement, the cache and the refresh
+  policy are code-reviewed and unit-asserted, not run against a provider).
+- Concurrency covers 24 interleaved requests on one process; it is not a load test.
+- Everything executed ran through the local executor (process hygiene, not a sandbox), authorised explicitly by
+  the test that generated the project.

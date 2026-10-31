@@ -2,7 +2,7 @@
 
 import uuid
 
-OTHER_TENANT = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+from tests.conftest import TENANT_B, credentials
 
 PAYLOAD_CUSTOMER = {"email": "sample", "display_name": "sample", "active": True}
 
@@ -59,6 +59,11 @@ def test_get_customer_returns_the_created_one_and_404_for_unknown(client, header
     assert missing.json()["status"] == 404
 
 
+def test_get_customer_with_a_malformed_id_is_422(client, headers, tenant):
+    url = customer_url(tenant)
+    assert client.get(f"{url}/not-an-id", headers=headers).status_code == 422
+
+
 def test_list_customers_paginates(client, headers, tenant):
     url = customer_url(tenant)
     payload = payload_for_customer(client, headers, tenant)
@@ -95,19 +100,30 @@ def test_customer_routes_require_the_api_key(client, headers, tenant):
     assert client.post(url, json=payload, headers={"X-API-Key": "wrong"}).status_code == 401
 
 
-def test_customer_routes_refuse_another_tenant_for_the_same_key(client, headers, tenant):
+def test_customer_routes_refuse_another_tenant_for_the_same_principal(client, headers, tenant):
     payload = payload_for_customer(client, headers, tenant)
-    assert client.post(customer_url(OTHER_TENANT), json=payload, headers=headers).status_code == 403
-    assert client.get(customer_url(OTHER_TENANT), headers=headers).status_code == 403
+    assert client.post(customer_url(TENANT_B), json=payload, headers=headers).status_code == 403
+    assert client.get(customer_url(TENANT_B), headers=headers).status_code == 403
 
 
 def test_customers_of_one_tenant_are_invisible_to_another(client, headers, tenant):
     url = customer_url(tenant)
     payload = payload_for_customer(client, headers, tenant)
     assert client.post(url, json=payload, headers=headers).status_code == 201
-    other = client.get(customer_url(OTHER_TENANT), headers={"X-API-Key": "key-b"})
+    other = client.get(customer_url(TENANT_B), headers=credentials("carol"))
     assert other.status_code == 200
     assert other.json() == []
+
+
+def test_customer_of_another_tenant_is_not_found_through_the_callers_tenant(client, headers, tenant):
+    url = customer_url(tenant)
+    foreign = create_customer(client, credentials("carol"), TENANT_B)
+    foreign_url = f"{url}/{foreign['id']}"  # a valid id of another tenant, presented under the caller's tenant
+    assert client.get(foreign_url, headers=headers).status_code == 404
+    assert client.patch(foreign_url, json={"email": "uuuuuu"}, headers=headers).status_code == 404
+    assert client.delete(foreign_url, headers=headers).status_code == 404
+    still_there = client.get(f"{customer_url(TENANT_B)}/{foreign['id']}", headers=credentials("carol"))
+    assert still_there.status_code == 200  # untouched
 
 
 def test_health_is_public(client):

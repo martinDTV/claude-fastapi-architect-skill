@@ -1,0 +1,134 @@
+{
+  "schema": "fastapi-architect/spec/1.2",
+  "name": "tenant-projects",
+  "package": "tenant_projects",
+  "description": "Projects and tasks of several organisations on one PostgreSQL database, isolated by row-level security.",
+  "scope": {
+    "size": "medium",
+    "team_size": 4,
+    "expected_rps": 200,
+    "data_volume": "medium"
+  },
+  "functional": {
+    "modules": [
+      {
+        "name": "projects",
+        "description": "Projects of each organisation.",
+        "entities": [
+          {
+            "name": "Project",
+            "fields": [
+              {
+                "name": "name",
+                "type": "str",
+                "max_length": 120
+              },
+              {
+                "name": "budget",
+                "type": "decimal",
+                "min_value": 0
+              },
+              {
+                "name": "starts_on",
+                "type": "date"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "tasks",
+        "description": "Tasks inside a project, owned by the member who created them.",
+        "depends_on": [
+          "projects"
+        ],
+        "entities": [
+          {
+            "name": "Task",
+            "owned": true,
+            "fields": [
+              {
+                "name": "project_id",
+                "type": "uuid",
+                "references": "projects.Project",
+                "on_delete": "cascade"
+              },
+              {
+                "name": "title",
+                "type": "str",
+                "max_length": 200
+              },
+              {
+                "name": "done",
+                "type": "bool",
+                "default": false
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "nonfunctional": {
+    "availability": "99.9%",
+    "latency_p95_ms": 250,
+    "consistency": "strong",
+    "auditability": false
+  },
+  "persistence": {
+    "kind": "postgresql",
+    "migrations": true
+  },
+  "security": {
+    "authentication": "api_key",
+    "authorization": {
+      "model": "roles_and_ownership",
+      "roles": [
+        "admin",
+        "member"
+      ],
+      "operations": {
+        "delete": [
+          "admin"
+        ]
+      },
+      "ownership": {
+        "visibility": "tenant",
+        "admin_roles": [
+          "admin"
+        ]
+      }
+    },
+    "multi_tenant": {
+      "enabled": true,
+      "strategy": "shared_schema_rls",
+      "tenant_param": "tenant_id",
+      "binding": "api_key_registry",
+      "rls": {
+        "app_role": "tenant_projects_app",
+        "context_key": "app.tenant_id"
+      }
+    }
+  },
+  "testing": {
+    "levels": [
+      "unit",
+      "integration"
+    ],
+    "coverage_target": 85
+  },
+  "decisions": [
+    {
+      "id": "ADR-1",
+      "title": "Row-level security is the storage boundary between organisations",
+      "status": "accepted",
+      "rationale": "One schema keeps operations simple; the database enforces the tenant boundary for every query the application role runs, in addition to the application scoping and the composite foreign keys."
+    },
+    {
+      "id": "ADR-2",
+      "title": "The application role is provisioned outside the migrations",
+      "status": "accepted",
+      "rationale": "Roles are credentials; the migration verifies that the role exists and cannot bypass RLS, it never creates it with a default password."
+    }
+  ]
+}

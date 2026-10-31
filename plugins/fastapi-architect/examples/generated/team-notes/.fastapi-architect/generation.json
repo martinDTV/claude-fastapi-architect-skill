@@ -1,0 +1,199 @@
+{
+  "files": {
+    ".audit-fastapi.json": "cf20265bcfd25b9421cb451fe7c045c7f91c924e48866086a49fda9cb4753b56",
+    ".env.example": "60f9a5d3e4552162b437051469d684361e28c143c5081905a3f6ed33bfa6e4df",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
+    "README.md": "adc793bbcb677a1e38b9504e0d4005061dcf2438cf2b74d7409d499c55fd9429",
+    "pyproject.toml": "707fc13ce6b84981557b37806e6f02291d62ae83b3bd73e773b7d0446ce3d400",
+    "src/team_notes/__init__.py": "9f8069f44a1e182cf1060c128e8a16fa568b2f2125ca5945c47729c13b18adfc",
+    "src/team_notes/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/api/notes.py": "f59dec67cf5256352353a702ac66fe8c59f392457ff569875884b022449af01c",
+    "src/team_notes/api/router.py": "c166d67a5f9f356cc73f004e4b8de59c45d5defe989a56e5696e4b18d859b3b8",
+    "src/team_notes/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/core/authz.py": "49dd7cf344d9b5676ec7fc26c64d8d5591e2bbe83cb5b81b5fcd94e94ad627c6",
+    "src/team_notes/core/config.py": "51ca01db14bb183d9b9ff5458590a6bed5c904247f6e2f140b433c0ad9e0e48d",
+    "src/team_notes/core/errors.py": "a47bf9f9299223787ede53bcb5875292dc8f75f7fcf19fc79aad76fbd0db0174",
+    "src/team_notes/core/security.py": "03e699bfdb137aeda6ee42a28591f8bcebd3df9c3d0479b15f462a6a57720942",
+    "src/team_notes/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/dependencies/notes.py": "560a2daa63196c7d2c57cae571bf2664667bbd06613c09687d305beca8c08155",
+    "src/team_notes/main.py": "adcd5af6bc1175b3ce593888b3c37a430615bff354193ea598bed5fe9eb6844f",
+    "src/team_notes/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/models/notes.py": "27c07c56d9fb3079f28c0f42ad9e87c768cd66a79178c2200e33830d6ba8645e",
+    "src/team_notes/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/repositories/notes.py": "b127aa7d0d5d8d33f4cdd7e3dbfacc81ca7927c30873f0add9c05581929fd0f8",
+    "src/team_notes/schemas/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/schemas/notes.py": "94fdce098a01e986d802c5ec14551a88b20f2fe2a6802641b11fe60231921338",
+    "src/team_notes/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/team_notes/services/notes.py": "96c5511b5662550445250cabbc54737cf80dd1743f30b0499868590a15c49e76",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/conftest.py": "633bfab85555bbe6eee361c40ec49ecb4545e0424b2ab8f021ed8631cafb512c",
+    "tests/test_auth.py": "8faafaeb47454b7bb26550ce90c60ffcdbd89b8ba95ab966c18ab4cfa2a10659",
+    "tests/test_notes.py": "22dd39f4c73b8b25bf8eaa2e72cc3cca3949fe56e7d7dd9e0d3247bfc6d4e7c7"
+  },
+  "history": [
+    {
+      "modules": [
+        "notes"
+      ],
+      "operation": "generate",
+      "spec_digest": "b6d1af62ff919334d89a854636e2216e0a35118dba1152682f7639f7c8a374f9"
+    }
+  ],
+  "migrations": [],
+  "package": "team_notes",
+  "schema": "fastapi-architect/generation/1.2",
+  "security": {
+    "authentication": "oauth2_jwt",
+    "authorization_declared": null,
+    "authorization_model": "roles_and_ownership",
+    "identity": "per_caller",
+    "row_level_security": false,
+    "tenant_binding": "principal_claim",
+    "tenant_strategy_declared": "shared_schema_application_scoping",
+    "tenant_strategy_implemented": "shared_schema_application_scoping"
+  },
+  "spec": {
+    "digest": "b6d1af62ff919334d89a854636e2216e0a35118dba1152682f7639f7c8a374f9",
+    "name": "team-notes",
+    "schema": "fastapi-architect/spec/1.2"
+  },
+  "spec_document": {
+    "decisions": [
+      {
+        "id": "ADR-1",
+        "rationale": "The workspace claim of the verified token binds the caller to its workspace; the service validates tokens and never stores passwords, sessions or refresh tokens.",
+        "status": "accepted",
+        "title": "Identity comes from the corporate OIDC provider; the service issues no credentials"
+      }
+    ],
+    "description": "Shared notes of a workspace: every member reads, authors edit their own, admins moderate.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Notes written by the members of a workspace and the tags that classify them.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "max_length": 120,
+                  "name": "title",
+                  "type": "str"
+                },
+                {
+                  "max_length": 4000,
+                  "name": "body",
+                  "type": "str"
+                },
+                {
+                  "default": false,
+                  "name": "pinned",
+                  "type": "bool"
+                }
+              ],
+              "name": "Note",
+              "owned": true
+            },
+            {
+              "fields": [
+                {
+                  "max_length": 40,
+                  "name": "label",
+                  "type": "str"
+                }
+              ],
+              "name": "Tag",
+              "operations": [
+                "create",
+                "get",
+                "list",
+                "delete"
+              ]
+            }
+          ],
+          "name": "notes"
+        }
+      ]
+    },
+    "name": "team-notes",
+    "open_questions": [
+      "Should pinned notes be editable by viewers with a dedicated role?"
+    ],
+    "package": "team_notes",
+    "persistence": {
+      "kind": "memory"
+    },
+    "schema": "fastapi-architect/spec/1.2",
+    "scope": {
+      "data_volume": "small",
+      "expected_rps": 20,
+      "size": "small",
+      "team_size": 3
+    },
+    "security": {
+      "audit": {
+        "authorization_decisions": true
+      },
+      "authentication": "oauth2_jwt",
+      "authorization": {
+        "model": "roles_and_ownership",
+        "operations": {
+          "create": [
+            "admin",
+            "editor"
+          ],
+          "delete": [
+            "admin",
+            "editor"
+          ],
+          "update": [
+            "admin",
+            "editor"
+          ]
+        },
+        "ownership": {
+          "admin_roles": [
+            "admin"
+          ],
+          "visibility": "tenant"
+        },
+        "roles": [
+          "admin",
+          "editor",
+          "viewer"
+        ]
+      },
+      "multi_tenant": {
+        "binding": "principal_claim",
+        "enabled": true,
+        "strategy": "shared_schema_application_scoping",
+        "tenant_param": "workspace_id"
+      },
+      "oidc": {
+        "algorithms": [
+          "RS256"
+        ],
+        "audience": "team-notes-api",
+        "claims": {
+          "roles": "roles",
+          "subject": "sub",
+          "tenant": "workspace_id"
+        },
+        "issuer": "https://login.example.com/",
+        "jwks_url": "https://login.example.com/.well-known/jwks.json",
+        "leeway_s": 30
+      }
+    },
+    "testing": {
+      "coverage_target": 85,
+      "levels": [
+        "unit",
+        "integration"
+      ]
+    }
+  },
+  "style": "layered",
+  "tool": {
+    "name": "fastapi-architect design",
+    "version": "2.0.0"
+  }
+}

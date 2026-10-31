@@ -1,4 +1,6 @@
-"""Alembic environment: async engine, URL from ORDERS_PLATFORM_DATABASE_URL, metadata of every generated model."""
+"""Alembic environment: async engine, URL from ORDERS_PLATFORM_DATABASE_URL,
+metadata of every generated model.
+"""
 
 import asyncio
 import os

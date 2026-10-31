@@ -1,0 +1,17 @@
+{
+  "contracts": {
+    "mutation_authorization_required": [
+      "/api/*"
+    ],
+    "route_auth_required": [
+      "/api/*"
+    ]
+  },
+  "public_routes": [
+    "/health"
+  ],
+  "tenant_params": [
+    "workspace_id"
+  ],
+  "x-generated-by": "fastapi-architect design (v2.0): declarations of the design, reviewed by the auditor"
+}

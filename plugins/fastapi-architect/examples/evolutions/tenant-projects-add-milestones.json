@@ -1,0 +1,42 @@
+{
+  "schema": "fastapi-architect/evolution/1.1",
+  "project": {
+    "path": "../generated/tenant-projects",
+    "package": "tenant_projects"
+  },
+  "add_modules": [
+    {
+      "name": "milestones",
+      "description": "Milestones of a project.",
+      "depends_on": [
+        "projects"
+      ],
+      "entities": [
+        {
+          "name": "Milestone",
+          "fields": [
+            {
+              "name": "project_id",
+              "type": "uuid",
+              "references": "projects.Project"
+            },
+            {
+              "name": "title",
+              "type": "str",
+              "max_length": 120
+            },
+            {
+              "name": "due_on",
+              "type": "date"
+            }
+          ],
+          "operations": [
+            "create",
+            "get",
+            "list"
+          ]
+        }
+      ]
+    }
+  ]
+}

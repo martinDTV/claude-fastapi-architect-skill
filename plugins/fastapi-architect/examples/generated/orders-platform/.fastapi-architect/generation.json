@@ -1,11 +1,11 @@
 {
   "files": {
     ".audit-fastapi.json": "332951001a6e6eaac17b432b1d5bf91ec93e7be220ab42cce6e5d1ade8d2d15d",
-    ".env.example": "315589f1281784fa4bed89a2978a2682d85b15e9eb1863121e9c12023cbc178a",
+    ".env.example": "db4e4a0650717fda2f50d3216dba6ea57402741bf81e00bdcb195315e6ab40e6",
     ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
-    "README.md": "2bc5f1870f355cfea64a9c0cedc47943bd175c325f5da724333789e16fcdd700",
+    "README.md": "5436cbe77c73acee233f2ecf9c947607568c53e97f3a5a12722312be0009de04",
     "alembic.ini": "144140ca67ff0fafb128a3ad2ce1ab6c1611f6f55dbe853683e47e1d775d65fc",
-    "migrations/env.py": "cb8723925ac6245a503afa7a58981f980ba2be85a2934dea1c9b050a942c644d",
+    "migrations/env.py": "e96eb3645d9ab2da0225c8bfe568bf1c77a38e6ddc9141c984eb2d1363e6a954",
     "migrations/script.py.mako": "2cd523749515d0c0c53a6873ca3bb098d8db35b75d6ad080e8f629561a5c5623",
     "migrations/versions/9dab920675b3_initial_schema.py": "8aa0420d336f1b3499f9098becbbfbb5722e4cc66e184563bbecd2d79f0fe1fc",
     "pyproject.toml": "3d856b86a2fd6139a42c4117d22d9e29f291b387449750a9be1ba6545fd8995a",
@@ -13,10 +13,10 @@
     "src/orders_platform/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/orders_platform/api/router.py": "dd350a867bfb44b071dc971a8d53be8299081867efe3db7cf1dfe5bcec987988",
     "src/orders_platform/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "src/orders_platform/core/config.py": "bf5435b81efdc1c5b738154af7f4f3587315d2bd021bd09d5fd01c7b332c8343",
+    "src/orders_platform/core/config.py": "b5d27997285958eb390ada895a5ebdba90663ddeefac6978bb75f6fbaa69c1fe",
     "src/orders_platform/core/db.py": "f337509e4880130355222fe1a833c5aa283e665f9605b7889ae8bff40c929e0f",
-    "src/orders_platform/core/errors.py": "690f7f032b7aaeee37ef1d87714ee02ce640e075081274edda13004e5b6220ca",
-    "src/orders_platform/core/security.py": "94efa616dd5fba3d12f69bc0f5a60d439090c8f67e456d31a27f34a6a93fed7d",
+    "src/orders_platform/core/errors.py": "11d6475cfaeca833702657f0708788e6d8044255b1879b6dc4c6078901a81993",
+    "src/orders_platform/core/security.py": "3503b6e3c02063f4ae35db2e9a1a3fc3e09a1008a66a9887f5d25c5af36037d9",
     "src/orders_platform/main.py": "be9804931653590eabe9d84171260eef86c99549c40e7678606442c2582eb278",
     "src/orders_platform/modules/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/orders_platform/modules/billing/__init__.py": "b61dbf4dfbe1532b64a21f3250b021b626e91b8f41185ddcdfd4b78354e6d0e2",
@@ -47,11 +47,11 @@
     "src/orders_platform/modules/orders/schemas.py": "2367bfdb8f27957d986ba8e46537570aa66af812e28ca310b5bbef457a4c23b4",
     "src/orders_platform/modules/orders/service.py": "f37da8de482b0d32d5338d567e6f8aae3ef732e9a191c1a5745f878316745d13",
     "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "tests/conftest.py": "2e8b36527a92ac2befb81c365a66d02ef1e034b093a3908e8e306ee6f35824ff",
-    "tests/test_billing.py": "20eeb717f88f95dc31f62b17bf871c71714787912ae390970bdaddf73e3df3e7",
-    "tests/test_customers.py": "275beef2952607046640bff3e901bd02cdc98fefeff95ad04fa49997d25b269b",
+    "tests/conftest.py": "b206693e5325f881eda95507633dd9dcc55327562e8541e85f8d5962c53455b6",
+    "tests/test_billing.py": "78781f6881dad681905b6cd353fa7828e14f23879c8b4868076f8454106fd6a4",
+    "tests/test_customers.py": "102edb3d2bd130581845eddf3e71ff451ddea84ca38211566d51d83e7d64e9b1",
     "tests/test_migrations.py": "2d9e1cd155782703c9a962bf4a8184c1f1302f72aeb81d9e5ba734bdf29125dc",
-    "tests/test_orders.py": "8d9caad0f589408d46883a1cb99d6194a230ccad34c2f0f04250dc451eb56a81"
+    "tests/test_orders.py": "9fd75b72d5a1ea994eccd5c3c8cbba4e9e9c5a70ad71879873a005889fa59908"
   },
   "history": [
     {
@@ -69,6 +69,7 @@
       "down_revision": null,
       "file": "migrations/versions/9dab920675b3_initial_schema.py",
       "revision": "9dab920675b3",
+      "row_level_security": false,
       "tables": [
         "customers",
         "orders",
@@ -77,7 +78,17 @@
     }
   ],
   "package": "orders_platform",
-  "schema": "fastapi-architect/generation/1.1",
+  "schema": "fastapi-architect/generation/1.2",
+  "security": {
+    "authentication": "api_key",
+    "authorization_declared": "resource",
+    "authorization_model": "none",
+    "identity": "per_caller",
+    "row_level_security": false,
+    "tenant_binding": "api_key_registry",
+    "tenant_strategy_declared": "shared_schema_rls",
+    "tenant_strategy_implemented": "shared_schema_application_scoping"
+  },
   "spec": {
     "digest": "f16d2acd4f57a1d3cf434931dc094ef044ec3fb78d0c6c8ada0c07eb2aeb843c",
     "name": "orders-platform",
