@@ -10,7 +10,7 @@
     "src/team_notes/api/notes.py": "f59dec67cf5256352353a702ac66fe8c59f392457ff569875884b022449af01c",
     "src/team_notes/api/router.py": "c166d67a5f9f356cc73f004e4b8de59c45d5defe989a56e5696e4b18d859b3b8",
     "src/team_notes/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "src/team_notes/core/authz.py": "49dd7cf344d9b5676ec7fc26c64d8d5591e2bbe83cb5b81b5fcd94e94ad627c6",
+    "src/team_notes/core/authz.py": "c70d468c94af0f4b85818e41aa5a73ecf1c20f3e533c8a5a11d99e2c4996ac26",
     "src/team_notes/core/config.py": "0acfc86ed3ca25b2a430835202ae8a9261d0f924084bc788dea36e991389b879",
     "src/team_notes/core/errors.py": "a47bf9f9299223787ede53bcb5875292dc8f75f7fcf19fc79aad76fbd0db0174",
     "src/team_notes/core/security.py": "105c18906ca27dc5895d7afd2d67e23a1c11dbe2b1bf28754c2eb1be4d177922",

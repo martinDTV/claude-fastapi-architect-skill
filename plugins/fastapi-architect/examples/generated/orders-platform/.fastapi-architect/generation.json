@@ -47,7 +47,7 @@
     "src/orders_platform/modules/orders/schemas.py": "2367bfdb8f27957d986ba8e46537570aa66af812e28ca310b5bbef457a4c23b4",
     "src/orders_platform/modules/orders/service.py": "f37da8de482b0d32d5338d567e6f8aae3ef732e9a191c1a5745f878316745d13",
     "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "tests/conftest.py": "b206693e5325f881eda95507633dd9dcc55327562e8541e85f8d5962c53455b6",
+    "tests/conftest.py": "4d9aa0e174d76bc4ade88c7c977e0082e16bbe1311344cf8061ee6ee92c4faef",
     "tests/test_billing.py": "78781f6881dad681905b6cd353fa7828e14f23879c8b4868076f8454106fd6a4",
     "tests/test_customers.py": "102edb3d2bd130581845eddf3e71ff451ddea84ca38211566d51d83e7d64e9b1",
     "tests/test_migrations.py": "2d9e1cd155782703c9a962bf4a8184c1f1302f72aeb81d9e5ba734bdf29125dc",

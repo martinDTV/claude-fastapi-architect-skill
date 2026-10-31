@@ -1,8 +1,8 @@
 """Authorization policy declared by the contract (model roles_and_ownership): per-operation roles checked by a route
-dependency before the use case runs, ownership of tasks.Task checked by the service against the row it loaded and by
-the repository query that loaded it. The router never decides; it only carries the principal. A denial is 403; a
-resource outside the caller's visibility is 404 because the query does not return it, so existence is not revealed
-across owners or tenants.
+dependency before the use case runs, ownership of the entities declared owned checked by the service against the row
+it loaded and by the repository query that loaded it. The router never decides; it only carries the principal. A
+denial is 403; a resource outside the caller's visibility is 404 because the query does not return it, so existence
+is not revealed across owners or tenants.
 """
 
 from collections.abc import Callable

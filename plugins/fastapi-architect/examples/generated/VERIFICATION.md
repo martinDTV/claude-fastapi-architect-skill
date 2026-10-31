@@ -365,3 +365,26 @@ negative controls (BYPASSRLS and missing roles refused by the migration) and the
 - The RLS boundary tests demonstrate what the mechanism cannot stop; they do not claim an injection is impossible
   in the generated code (every generated statement is parameterised, and that is a property of the code, not a
   guarantee against future code).
+
+# Acceptance of v2.0.0 (`tests/test_acceptance_v20.py`)
+
+Run of 2026-10-31, same environment. One scenario per persistence kind, each on the plugin's own example contract,
+each chaining requirements → reasoned architecture → generation → audit → tests through the trust model → evolution
+with a new **owned** module → verification → compatibility.
+
+| Step | `team-notes` (in memory, OIDC + claim binding + roles and ownership) | `tenant-projects` (PostgreSQL 16 as `fa_app`, grants + roles and ownership + RLS) |
+|---|---|---|
+| Architecture | `layered`, deterministic, with rejected alternatives | `modular_monolith` |
+| Generated suite | 71 passed, 0 skipped; audit 0 findings | 53 passed, 0 skipped; two informational findings |
+| Evolution | `boards` (owned): planned, verified, applied; `core/security.py`, `core/authz.py` untouched | `milestones` (owned, with update): planned, verified, applied; additive revision with `_protect("milestones")` and `owner_id`; two revisions, one head, historical file byte-identical |
+| Evolved suite | 93 passed, 0 skipped; every test that passed before still passes | 72 passed, 0 skipped; same property |
+| Routes | 10 → 15 | 11 → 15 |
+| Manifest | history generate → evolve; every file `managed_unchanged`; `security` record equal to the guarantees | same; `row_level_security: true` |
+| Repeat of the same contract | `noop` | not repeated (database re-used for the whole cycle; it ends with `alembic_version` only) |
+| Wall time | 21.5 s | 41.7 s |
+
+Defects the scenario found before passing (both fixed in the blueprint, snapshots regenerated): the policy module
+named the owned entities in its docstring and an evolution adding an owned module was blocked for needing to
+regenerate a non-integration file; the generated PostgreSQL conftest refused a database holding only the empty
+`alembic_version` table left by its own downgrade, so a second suite on the same disposable database failed before
+testing.

@@ -91,7 +91,7 @@ def owner_url() -> str:
 def migrated(owner_url: str):
     """Only an empty database is accepted: the suite migrates, truncates and downgrades it as the owner; the
     application never connects as the owner."""
-    existing = run(table_names(owner_url))
+    existing = [t for t in run(table_names(owner_url)) if t != "alembic_version"]  # a downgrade leaves it empty
     if existing:
         pytest.fail(f"TENANT_PROJECTS_MIGRATIONS_DATABASE_URL must be an empty database; found tables: {existing}")
     result = alembic(owner_url, "upgrade", "head")

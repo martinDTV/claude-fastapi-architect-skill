@@ -81,7 +81,7 @@ def database_url() -> str:
 @pytest.fixture(scope="session")
 def migrated(database_url: str):
     """Only an empty database is accepted: the suite migrates, truncates and downgrades it."""
-    existing = run(table_names(database_url))
+    existing = [t for t in run(table_names(database_url)) if t != "alembic_version"]  # a downgrade leaves it empty
     if existing:
         pytest.fail(f"DATABASE_URL must point at an empty database; found tables: {existing}")
     result = alembic(database_url, "upgrade", "head")
