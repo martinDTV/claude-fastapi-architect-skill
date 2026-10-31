@@ -1,8 +1,11 @@
 """FastAPI Architect v2.0, first increment: contract validation, architecture advice, blueprint, safe generation,
 verification through the audit engine and the v1.9 trust model, report contracts and the CLI.
 
-Fixtures: ``tests/fixtures/design20/specs/valid`` (every one validates and generates) and ``invalid`` (every one is
-rejected; the ``x-expect`` annotation lists substrings that must appear in the error list, with their JSON paths).
+Fixtures: ``tests/fixtures/design20/specs/valid`` (every one validates; all but the ones the generator refuses on
+purpose generate) and ``invalid`` (every one is rejected; the ``x-expect`` annotation lists substrings that must appear
+in the error list, with their JSON paths). Increment 2 adds schema 1.1 (``references``/``on_delete`` on uuid fields and
+``security.multi_tenant.binding``), Alembic and foreign keys for PostgreSQL contracts, the api_key_registry tenant
+binding with its negative controls, the guarantees block of the report, and the orders-platform snapshot.
 Nothing in a generated project is executed unless the test says so explicitly through an ``Authorization``; the
 one test that runs generated tests uses the ``fixture`` trust profile on a project this suite just generated and is
 skipped when fastapi or pytest are not importable by the current interpreter.
@@ -37,6 +40,7 @@ EXAMPLES = REPO_ROOT / "plugins" / "fastapi-architect" / "examples"
 INVENTORY = EXAMPLES / "specs" / "inventory-service.json"
 ORDERS = EXAMPLES / "specs" / "orders-platform.json"
 SNAPSHOT = EXAMPLES / "generated" / "inventory-service"
+SNAPSHOT_ORDERS = EXAMPLES / "generated" / "orders-platform"
 ROOT_CLI = REPO_ROOT / "scripts" / "design_fastapi.py"
 SKILL_CLI = SKILL_SCRIPTS / "design_fastapi.py"
 
@@ -73,7 +77,7 @@ class SpecValidationTests(unittest.TestCase):
                 spec, errors = design.validate_spec(_load(path), str(path))
                 self.assertEqual(errors, [])
                 self.assertIsNotNone(spec)
-                self.assertEqual(spec.schema, design.SPEC_SCHEMA)
+                self.assertIn(spec.schema, design.SPEC_SCHEMAS)
                 self.assertEqual(len(spec.digest), 64)
 
     def test_every_invalid_fixture_is_rejected_with_json_paths(self) -> None:
@@ -168,7 +172,8 @@ class AdvisorTests(unittest.TestCase):
     def test_three_modules_or_medium_scope_lead_to_a_modular_monolith(self) -> None:
         rec = self.rec(SPECS / "valid" / "tenant_modular.json")
         self.assertEqual(rec.style, "modular_monolith")
-        self.assertTrue(any("membership" in p for p in rec.pending))
+        self.assertTrue(any("api_key_registry" in n for n in rec.security_notes))
+        self.assertTrue(any("row-level security" in p for p in rec.pending))  # shared_schema_rls is declared, RLS is not generated
 
     def test_microservices_only_when_independent_deployment_is_stated_and_justified(self) -> None:
         spec = design.load_spec(str(SPECS / "valid" / "microservices.json"))
@@ -277,7 +282,7 @@ class BlueprintTests(unittest.TestCase):
     def test_audit_configuration_declares_the_design(self) -> None:
         _, public = self.blueprint(SPECS / "valid" / "postgres_layered.json")
         cfg = json.loads(public.files[".audit-fastapi.json"])
-        self.assertEqual(cfg["public_routes"], ["/*"])
+        self.assertEqual(cfg["public_routes"], ["/health", "/api/v1/*"])
         self.assertEqual(cfg["contracts"]["commit_layers"], ["service"])
         self.assertNotIn("route_auth_required", cfg["contracts"])
         _, tenant = self.blueprint(SPECS / "valid" / "tenant_modular.json")
@@ -290,9 +295,18 @@ class BlueprintTests(unittest.TestCase):
 
     def test_tenant_scoping_reaches_routes_repositories_and_tests(self) -> None:
         _, bp = self.blueprint(SPECS / "valid" / "tenant_modular.json")
-        self.assertIn('@router.post("/tenants/{clinic_id}/appointments"', bp.files["src/clinic/modules/appointments/router.py"])
+        router = bp.files["src/clinic/modules/appointments/router.py"]
+        self.assertIn('@router.post("/tenants/{clinic_id}/appointments"', router)
+        self.assertIn("principal: TenantPrincipalDep", router)
+        self.assertNotIn("clinic_id: UUID", router)  # the tenant comes from the bound principal, never from a bare path parameter
+        self.assertIn("service.create(principal.tenant_id, payload)", router)
         self.assertIn("item.clinic_id == clinic_id", bp.files["src/clinic/modules/appointments/repository.py"])
         self.assertIn("def appointment_url(tenant: uuid.UUID)", bp.files["tests/test_appointments.py"])
+        self.assertIn("test_appointment_routes_refuse_another_tenant_for_the_same_key", bp.files["tests/test_appointments.py"])
+        self.assertIn("test_appointments_of_one_tenant_are_invisible_to_another", bp.files["tests/test_appointments.py"])
+        security = bp.files["src/clinic/core/security.py"]
+        self.assertIn("def require_tenant_member(clinic_id: UUID, principal: Principal)", security)
+        self.assertIn("HTTP_403_FORBIDDEN", security)
 
     def test_security_module_only_with_api_key_and_db_module_only_with_postgresql(self) -> None:
         _, memory_public = self.blueprint(SPECS / "valid" / "minimal.json")
@@ -535,21 +549,181 @@ class PipelineTests(TempDirCase):
 
 
 class SnapshotTests(TempDirCase):
-    def test_committed_example_equals_a_fresh_generation(self) -> None:
-        self.assertTrue(SNAPSHOT.is_dir(), f"missing committed example at {SNAPSHOT}")
-        spec = design.load_spec(str(INVENTORY))
-        bp = design.build(spec, design.recommend(spec))
-        result = design.generate(spec, bp, self.target(), tool_version=TOOL_VERSION)
-        fresh = {str(p.relative_to(result.target)): p.read_text(encoding="utf-8") for p in Path(result.target).rglob("*") if p.is_file()}
-        committed = {str(p.relative_to(SNAPSHOT)): p.read_text(encoding="utf-8") for p in SNAPSHOT.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
-        self.assertEqual(sorted(committed), sorted(fresh))
-        for rel in fresh:
-            self.assertEqual(committed[rel], fresh[rel], f"{rel} differs from a fresh generation")
-        self.assertEqual(set(design.verify_manifest(str(SNAPSHOT))["status"].values()), {"identical"})
+    SNAPSHOTS = ((INVENTORY, SNAPSHOT), (ORDERS, SNAPSHOT_ORDERS))
 
-    def test_committed_example_audits_clean(self) -> None:
-        audit = design.audit_generated(str(SNAPSHOT))
-        self.assertEqual(audit["findings_total"], 0, audit["findings"])
+    def test_committed_examples_equal_a_fresh_generation(self) -> None:
+        for spec_path, snapshot in self.SNAPSHOTS:
+            with self.subTest(example=snapshot.name):
+                self.assertTrue(snapshot.is_dir(), f"missing committed example at {snapshot}")
+                spec = design.load_spec(str(spec_path))
+                bp = design.build(spec, design.recommend(spec))
+                result = design.generate(spec, bp, self.target(snapshot.name), tool_version=TOOL_VERSION)
+                fresh = {str(p.relative_to(result.target)): p.read_text(encoding="utf-8") for p in Path(result.target).rglob("*") if p.is_file()}
+                committed = {str(p.relative_to(snapshot)): p.read_text(encoding="utf-8") for p in snapshot.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+                self.assertEqual(sorted(committed), sorted(fresh))
+                for rel in fresh:
+                    self.assertEqual(committed[rel], fresh[rel], f"{rel} differs from a fresh generation")
+                self.assertEqual(set(design.verify_manifest(str(snapshot))["status"].values()), {"identical"})
+
+    def test_committed_examples_audit_clean(self) -> None:
+        self.assertEqual(design.audit_generated(str(SNAPSHOT))["findings_total"], 0)
+        orders = design.audit_generated(str(SNAPSHOT_ORDERS))
+        self.assertEqual([f["rule"] for f in orders["findings"]], ["ARCH_IMPORT_LINTER_PRESENT"])
+        self.assertEqual(orders["contracts"]["unauthenticated_not_public"], 0)
+        self.assertEqual(orders["contracts"]["authorization_visible"], 11)  # the tenant membership dependency is visible on every tenant route
+
+
+# --------------------------------------------------------------------------- #
+# increment 2: schema 1.1, PostgreSQL + Alembic, tenant binding, guarantees
+# --------------------------------------------------------------------------- #
+
+
+class Schema11Tests(unittest.TestCase):
+    def test_both_schema_ids_are_accepted_and_recorded(self) -> None:
+        old = design.load_spec(str(INVENTORY))
+        new = design.load_spec(str(ORDERS))
+        self.assertEqual(old.schema, "fastapi-architect/spec/1.0")
+        self.assertEqual(new.schema, "fastapi-architect/spec/1.1")
+        self.assertEqual(design.SPEC_SCHEMA, "fastapi-architect/spec/1.1")
+
+    def test_references_are_normalised_and_follow_the_dependency_direction(self) -> None:
+        spec = design.load_spec(str(ORDERS))
+        orders = next(m for m in spec.modules if m.name == "orders")
+        customer_id = next(f for f in orders.entities[0].fields if f.name == "customer_id")
+        self.assertEqual(customer_id.references, "customers.Customer")
+        self.assertEqual(customer_id.on_delete, "restrict")
+        self.assertIn("references", json.dumps(spec.to_dict()))
+        doc = _load(ORDERS)
+        customers = next(m for m in doc["functional"]["modules"] if m["name"] == "customers")
+        customers["entities"][0]["fields"].append({"name": "order_id", "type": "uuid", "references": "orders.Order"})  # against the dependency direction
+        _, errors = design.validate_spec(doc)
+        self.assertTrue(any("references follow the dependency direction" in e for e in errors), errors)
+
+    def test_tenant_binding_rules(self) -> None:
+        doc = _load(SPECS / "valid" / "tenant_unbound.json")
+        spec, errors = design.validate_spec(doc)
+        self.assertEqual(errors, [])
+        self.assertEqual(spec.security["multi_tenant"]["binding"], "none")
+        self.assertEqual(spec.provenance["spec.security.multi_tenant.binding"], "assumed")
+        self.assertIn("principal-tenant binding", design.generation_refusal(spec))
+        doc["security"]["multi_tenant"]["binding"] = "api_key_registry"
+        bound, errors = design.validate_spec(doc)
+        self.assertEqual(errors, [])
+        self.assertIsNone(design.generation_refusal(bound))
+
+
+class PostgresGenerationTests(TempDirCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.spec = design.load_spec(str(ORDERS))
+        self.bp = design.build(self.spec, design.recommend(self.spec))
+
+    def test_alembic_environment_and_a_deterministic_initial_migration_are_generated(self) -> None:
+        from fastapi_design.blueprint import initial_revision
+
+        revision = initial_revision(self.spec)
+        self.assertEqual(len(revision), 12)
+        migration = f"migrations/versions/{revision}_initial_schema.py"
+        for rel in ("alembic.ini", "migrations/env.py", "migrations/script.py.mako", migration, "tests/test_migrations.py", "src/orders_platform/core/db.py"):
+            self.assertIn(rel, self.bp.files, rel)
+        text = self.bp.files[migration]
+        self.assertIn(f'revision = "{revision}"', text)
+        self.assertIn("down_revision = None", text)
+        self.assertLess(text.index('op.create_table(\n        "customers"'), text.index('op.create_table(\n        "orders"'))  # referenced tables first
+        self.assertLess(text.index('op.create_table(\n        "orders"'), text.index('op.create_table(\n        "invoices"'))
+        self.assertIn('sa.UniqueConstraint("tenant_id", "id", name="uq_orders_tenant_id_id")', text)
+        self.assertIn('name="fk_orders_tenant_id_customer_id_customers"', text)
+        self.assertIn('["tenant_id", "customer_id"]', text)  # composite foreign key: a row cannot reference another tenant's row
+        self.assertNotIn("create_all(", "".join(v for k, v in self.bp.files.items() if k.endswith(".py")))  # tables come from migrations only
+        self.assertNotIn("Create Date: 20", text)  # no clock-dependent content
+        again = design.build(self.spec, design.recommend(self.spec)).files[migration]
+        self.assertEqual(text, again)
+
+    def test_models_carry_the_same_constraints_as_the_migration(self) -> None:
+        models = self.bp.files["src/orders_platform/modules/orders/models.py"]
+        self.assertIn('UniqueConstraint("tenant_id", "id", name="uq_orders_tenant_id_id")', models)
+        self.assertIn('name="fk_orders_tenant_id_customer_id_customers"', models)
+        self.assertIn("naming_convention=NAMING_CONVENTION", self.bp.files["src/orders_platform/core/db.py"])
+        self.assertIn("await session.rollback()", self.bp.files["src/orders_platform/core/db.py"])
+
+    def test_services_turn_constraint_violations_into_409_after_rollback(self) -> None:
+        service = self.bp.files["src/orders_platform/modules/orders/service.py"]
+        self.assertIn("except IntegrityError", service)
+        self.assertIn("await self._session.rollback()", service)
+        self.assertIn("raise ConflictError(detail) from exc", service)
+        tests = self.bp.files["tests/test_orders.py"]
+        self.assertIn("test_create_order_with_unknown_customer_id_is_a_conflict_and_leaves_no_row", tests)
+        self.assertIn("from tests.test_customers import create_customer", tests)
+        self.assertIn("test_create_order_cannot_reference_a_customer_id_of_another_tenant", tests)
+
+    def test_generated_suite_only_runs_on_an_empty_database_and_restores_it(self) -> None:
+        conftest = self.bp.files["tests/conftest.py"]
+        self.assertIn('pytest.fail(f"DATABASE_URL must point at an empty database', conftest)
+        self.assertIn('alembic(database_url, "upgrade", "head")', conftest)
+        self.assertIn('alembic(database_url, "downgrade", "base")', conftest)
+        self.assertIn("TRUNCATE TABLE", conftest)
+        migrations = self.bp.files["tests/test_migrations.py"]
+        self.assertIn("compare_metadata", migrations)
+        self.assertIn("test_upgrade_and_downgrade_are_repeatable", migrations)
+
+    def test_no_credentials_are_generated(self) -> None:
+        for rel, text in self.bp.files.items():
+            if rel.endswith((".py", ".ini", ".toml", ".example", ".md")):
+                self.assertNotIn("orders_platform:orders_platform@", text, rel)
+        self.assertIn("USER:PASSWORD@localhost", self.bp.files[".env.example"])
+        self.assertIn("replace-with-a-generated-key", self.bp.files[".env.example"])
+
+    def test_pyproject_pins_the_persistence_stack(self) -> None:
+        pyproject = self.bp.files["pyproject.toml"]
+        for dep in ('"sqlalchemy[asyncio]>=2.0.36,<2.1"', '"asyncpg>=0.30,<0.31"', '"alembic>=1.13,<2"'):
+            self.assertIn(dep, pyproject)
+
+
+class GuaranteesTests(TempDirCase):
+    def test_report_states_what_is_and_is_not_guaranteed(self) -> None:
+        report = design.run_design(str(ORDERS), design.DesignOptions(validate_only=True))
+        g = report["guarantees"]
+        mt = g["multi_tenant"]
+        self.assertTrue(mt["requested"])
+        self.assertEqual(mt["strategy_declared"], "shared_schema_rls")
+        self.assertEqual(mt["strategy_implemented"], "shared_schema_application_scoping")
+        self.assertFalse(mt["row_level_security"])
+        self.assertFalse(mt["schema_or_database_per_tenant"])
+        self.assertIn("enforced", mt["principal_tenant_binding"])
+        self.assertTrue(g["authentication"].startswith("api_key_registry"))
+        self.assertTrue(g["resource_authorization"].startswith("not generated"))
+        self.assertFalse(g["persistence"]["create_all_used"])
+        self.assertIn("row-level security", g["not_claimed"])
+        md = design.render_markdown(report)
+        self.assertIn("## Guarantees and limits", md)
+        self.assertIn("row-level security: False", md)
+
+    def test_unbound_tenant_contract_is_refused_and_never_called_secure(self) -> None:
+        path = SPECS / "valid" / "tenant_unbound.json"
+        report = design.run_design(str(path), design.DesignOptions(validate_only=True))
+        self.assertIn("principal-tenant binding", report["generation_refused"])
+        self.assertEqual(report["guarantees"]["multi_tenant"]["principal_tenant_binding"], "none")
+        with self.assertRaises(design.DesignError):
+            design.run_design(str(path), design.DesignOptions(target=self.target()))
+        self.assertFalse(Path(self.target()).exists())
+
+    def test_declared_rls_is_never_reported_as_implemented(self) -> None:
+        for path in (ORDERS, SPECS / "valid" / "tenant_modular.json", SPECS / "valid" / "tenant_unbound.json"):
+            spec = design.load_spec(str(path))
+            g = design.security_guarantees(spec)
+            self.assertNotEqual(g["multi_tenant"]["strategy_implemented"], "shared_schema_rls")
+            self.assertFalse(g["multi_tenant"]["row_level_security"])
+
+    @unittest.skipUnless(shutil.which("ruff") or shutil.which("uvx"), "ruff is not available")
+    def test_generated_projects_pass_their_own_ruff_configuration(self) -> None:
+        for spec_path in (INVENTORY, ORDERS, SPECS / "valid" / "tenant_modular.json", SPECS / "valid" / "postgres_layered.json"):
+            spec = design.load_spec(str(spec_path))
+            bp = design.build(spec, design.recommend(spec))
+            target = self.target(spec_path.stem)
+            design.generate(spec, bp, target, tool_version=TOOL_VERSION)
+            command = [shutil.which("ruff"), "check", "."] if shutil.which("ruff") else [shutil.which("uvx"), "ruff", "check", "."]
+            proc = subprocess.run(command, cwd=target, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, f"{spec_path.name}:\n{proc.stdout}{proc.stderr}")
 
 
 # --------------------------------------------------------------------------- #
