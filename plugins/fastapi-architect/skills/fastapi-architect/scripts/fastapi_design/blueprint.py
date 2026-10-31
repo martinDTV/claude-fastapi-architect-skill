@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .advisor import STYLE_HEXAGONAL, STYLE_LAYERED, Recommendation
 from .spec import EntitySpec, FieldSpec, IntegrationSpec, ModuleSpec, Spec
@@ -47,12 +47,24 @@ LINE = 120
 
 
 @dataclass
+class Lineage:
+    """Migration history of a project that is being evolved: the chain already on disk is kept verbatim and a new,
+    additive revision is appended for the tables that do not exist yet."""
+
+    head: str
+    files: List[str]  # relative paths of the existing migration files (never regenerated)
+    tables: List[str]  # tables created by the existing chain
+    revisions: List[Dict[str, object]] = field(default_factory=list)  # manifest entries of the existing chain
+
+
+@dataclass
 class Blueprint:
     style: str
     package: str
     files: Dict[str, str]
     layout: List[str] = field(default_factory=list)  # tree lines for the report
     notes: List[str] = field(default_factory=list)
+    migrations: List[Dict[str, object]] = field(default_factory=list)  # [{revision, down_revision, file, tables}] in chain order
 
     def to_dict(self) -> Dict[str, object]:
         return {"style": self.style, "package": self.package, "files": sorted(self.files), "layout": list(self.layout), "notes": list(self.notes)}
@@ -804,6 +816,11 @@ def initial_revision(spec: Spec) -> str:
     return hashlib.sha1(("initial|" + spec.digest).encode("utf-8")).hexdigest()[:12]
 
 
+def delta_revision(lineage: Lineage, spec: Spec) -> str:
+    """Deterministic revision id of an additive migration: derived from the current head and the evolved contract."""
+    return hashlib.sha1((f"delta|{lineage.head}|" + spec.digest).encode("utf-8")).hexdigest()[:12]
+
+
 def _fk_constraint(table: str, f: FieldSpec, referred: str, tenant: str, sa: str, indent: str) -> List[str]:
     """``ForeignKeyConstraint`` for a reference, composite over the tenant id between tenant tables."""
     cols = [tenant, f.name] if tenant else [f.name]
@@ -814,14 +831,19 @@ def _fk_constraint(table: str, f: FieldSpec, referred: str, tenant: str, sa: str
     return lines
 
 
-def _migration(spec: Spec) -> str:
+def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
+    """The initial migration (every table), or, with a lineage, the additive migration of the tables the existing
+    chain does not create yet (``down_revision`` = current head; existing files are never touched)."""
     tenant = _tenant(spec)
     index = _entity_index(spec)
-    revision = initial_revision(spec)
+    revision = delta_revision(lineage, spec) if lineage else initial_revision(spec)
+    existing = set(lineage.tables) if lineage else set()
     up: List[str] = []
     down: List[str] = []
     for _m, e in _ordered_entities(spec):
         table = e.plural
+        if table in existing:
+            continue
         cols = ['        sa.Column("id", sa.Uuid(), nullable=False),']
         if tenant:
             cols.append(f'        sa.Column("{tenant}", sa.Uuid(), nullable=False),')
@@ -845,11 +867,13 @@ def _migration(spec: Spec) -> str:
         if tenant:
             drop.insert(0, f'    op.drop_index("ix_{table}_{tenant}", table_name="{table}")')
         down = drop + down
+    new_tables = [e.plural for _m, e in _ordered_entities(spec) if e.plural not in existing]
+    title = f"Initial schema of {spec.name}" if not lineage else f"Add {', '.join(new_tables)} to {spec.name}"
     lines = [
-        f'"""Initial schema of {spec.name}: generated from the architecture contract (digest {spec.digest[:12]}).',
+        f'"""{title}: generated from the architecture contract (digest {spec.digest[:12]}).',
         "",
         f"Revision ID: {revision}",
-        "Revises: none (initial)",
+        f"Revises: {lineage.head if lineage else 'none (initial)'}",
         "Create Date: derived from the contract, not from the clock (reproducible)",
         '"""',
         "",
@@ -857,7 +881,7 @@ def _migration(spec: Spec) -> str:
         "from alembic import op",
         "",
         f'revision = "{revision}"',
-        "down_revision = None",
+        f"down_revision = {json.dumps(lineage.head) if lineage else 'None'}",
         "branch_labels = None",
         "depends_on = None",
         "",
@@ -1419,10 +1443,18 @@ def _group(pairs: Sequence[Tuple[str, str]]) -> List[Tuple[str, List[Tuple[str, 
     return sorted(out.items())
 
 
-def _migration_tests(spec: Spec) -> str:
+def migration_file(spec: Spec, lineage: Optional[Lineage] = None) -> str:
+    if lineage is None:
+        return f"migrations/versions/{initial_revision(spec)}_initial_schema.py"
+    new_tables = [e.plural for _m, e in _ordered_entities(spec) if e.plural not in set(lineage.tables)]
+    slug = "add_" + "_".join(new_tables) if new_tables else "noop"
+    return f"migrations/versions/{delta_revision(lineage, spec)}_{slug[:60]}.py"
+
+
+def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None) -> str:
     tenant = _tenant(spec)
     index = _entity_index(spec)
-    revision = initial_revision(spec)
+    revision = delta_revision(lineage, spec) if lineage else initial_revision(spec)
     tables = sorted(e.plural for _m, e in _ordered_entities(spec))
     fks = []
     for _m, e in _ordered_entities(spec):
@@ -1571,12 +1603,14 @@ Settings come from environment variables prefixed `{prefix}_` (see `.env.example
 # --------------------------------------------------------------------------- #
 
 
-def build(spec: Spec, rec: Recommendation) -> Blueprint:
+def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None) -> Blueprint:
+    """``lineage`` (evolution): keep the existing migration chain and append one additive revision."""
     layout = Layout(spec, rec)
     pkg = spec.package
     pg = spec.persistence["kind"] == "postgresql"
     files: Dict[str, str] = {}
     notes: List[str] = []
+    migrations: List[Dict[str, object]] = []
     ports_by_module: Dict[str, List[IntegrationSpec]] = {m.name: _ports_for(spec, rec, m) for m in spec.modules}
     all_ports = [(m, i) for m in spec.modules for i in ports_by_module[m.name]]
 
@@ -1596,8 +1630,17 @@ def build(spec: Spec, rec: Recommendation) -> Blueprint:
         files["alembic.ini"] = _alembic_ini(spec)
         files["migrations/env.py"] = _alembic_env(spec, layout)
         files["migrations/script.py.mako"] = _alembic_mako()
-        files[f"migrations/versions/{initial_revision(spec)}_initial_schema.py"] = _migration(spec)
-        files["tests/test_migrations.py"] = _migration_tests(spec)
+        all_tables = [e.plural for _m, e in _ordered_entities(spec)]
+        if lineage is None:
+            files[migration_file(spec)] = _migration(spec)
+            migrations.append({"revision": initial_revision(spec), "down_revision": None, "file": migration_file(spec), "tables": all_tables})
+        else:
+            new_tables = [t for t in all_tables if t not in set(lineage.tables)]
+            migrations.extend(lineage.revisions)
+            if new_tables:
+                files[migration_file(spec, lineage)] = _migration(spec, lineage)
+                migrations.append({"revision": delta_revision(lineage, spec), "down_revision": lineage.head, "file": migration_file(spec, lineage), "tables": new_tables})
+        files["tests/test_migrations.py"] = _migration_tests(spec, lineage if (lineage and any(t not in set(lineage.tables) for t in all_tables)) else (lineage if lineage else None))
     files[f"src/{pkg}/api/__init__.py"] = ""
     files[f"src/{pkg}/api/router.py"] = _api_router(spec, layout)
     if not layout.by_layer:
@@ -1627,12 +1670,12 @@ def build(spec: Spec, rec: Recommendation) -> Blueprint:
     layout_lines = _tree(sorted(files) + ["README.md"])
     files["README.md"] = _readme(spec, rec, layout_lines)
     if pg:
-        notes.append(f"PostgreSQL persistence: Alembic environment and initial migration {initial_revision(spec)} generated from the contract; tables are created only by `alembic upgrade head`; the generated API tests skip unless DATABASE_URL points at an empty disposable database")
+        notes.append(f"PostgreSQL persistence: Alembic environment and migration chain {[m['revision'] for m in migrations]} generated from the contract; tables are created only by `alembic upgrade head`; the generated API tests skip unless DATABASE_URL points at an empty disposable database")
     if rec.style == STYLE_HEXAGONAL:
         notes.append("ports and adapters generated for: " + ", ".join(f"{m}:{','.join(i.name for i in ports_by_module[m])}" for m in rec.ports_modules))
     if _registry(spec):
         notes.append("multi-tenant binding api_key_registry: tenant routes resolve the tenant from the API key registry and refuse other tenants with 403; isolation is application scoping, not row-level security")
-    return Blueprint(style=rec.style, package=pkg, files=files, layout=layout_lines, notes=notes)
+    return Blueprint(style=rec.style, package=pkg, files=files, layout=layout_lines, notes=notes, migrations=migrations)
 
 
 def _tree(paths: List[str]) -> List[str]:

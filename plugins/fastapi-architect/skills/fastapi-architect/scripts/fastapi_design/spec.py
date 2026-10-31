@@ -157,6 +157,7 @@ class Spec:
     provenance: Dict[str, str]  # json path -> explicit | assumed
     digest: str  # sha256 of the canonical source document
     source: Optional[str] = None
+    document: Dict[str, Any] = field(default_factory=dict)  # the validated input, verbatim (stored in the manifest)
 
     @property
     def multi_tenant(self) -> bool:
@@ -609,6 +610,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
         nonfunctional=nonfunctional, persistence=persistence, security=security, integrations=integrations, infrastructure=infrastructure,
         architecture=architecture, decisions=decisions, components=components, testing=testing, assumptions=assumptions,
         open_questions=open_questions, provenance=v.provenance, digest=canonical_digest(document), source=source,
+        document=json.loads(json.dumps(document)),
     )
     return spec, []
 
