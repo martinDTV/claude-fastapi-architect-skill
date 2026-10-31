@@ -41,7 +41,7 @@ from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_
 from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.evolution import EvolutionError, EvolveOptions, render_text, run_evolution, to_json  # noqa: E402
-from fastapi_design.journal import load_operation, pending_operations, recover  # noqa: E402
+from fastapi_design.journal import load_operation, pending_operations, recover, unreadable_operations  # noqa: E402
 
 PROG = "evolve_fastapi"
 OK_STATES = ("planned", "noop", "audit_clean", "verified")
@@ -135,8 +135,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if args.op:
                     ops = [op for op in ops if op.op_id == args.op]
                 reports = [recover(os.path.abspath(args.project), op, strategy="forward" if args.forward else "rollback").to_dict() for op in ops]
-                payload_obj = {"project": os.path.abspath(args.project), "recovered": reports}
-                text = ("no pending operation\n" if not reports else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
+                unreadable = [u for u in unreadable_operations(os.path.abspath(args.project)) if not args.op or u["op_id"] == args.op]
+                payload_obj = {"project": os.path.abspath(args.project), "recovered": reports, "unreadable": unreadable}
+                text = ("no pending operation\n" if not reports and not unreadable else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
+                text += "".join(f"operation {u['op_id']}: needs_attention; {u['reason']} ({u['staged_files']} staged file(s) kept under {os.path.dirname(u['path'])}); inspect by hand, nothing was touched\n" for u in unreadable)
         except (AdoptionError,) as exc:
             sys.stderr.write(f"{PROG}: adoption refused ({exc.source}):\n")
             for error in exc.errors:
@@ -150,7 +152,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             with open(args.output, "w", encoding="utf-8") as handle:
                 handle.write(payload)
         sys.stdout.write(payload if args.format == "json" else text)
-        if args.command == "recover" and any(r["state"] == "needs_attention" for r in payload_obj["recovered"]):
+        if args.command == "recover" and (any(r["state"] == "needs_attention" for r in payload_obj["recovered"]) or payload_obj.get("unreadable")):
             return 1
         return 0
 

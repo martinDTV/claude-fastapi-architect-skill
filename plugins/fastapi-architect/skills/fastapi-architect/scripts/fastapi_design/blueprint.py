@@ -1003,12 +1003,13 @@ def _authz_module(spec: Spec) -> str:
     for op, roles in authz["operations"].items():
         ops_lines.append(f'    "{op}": frozenset({{{", ".join(json.dumps(r) for r in roles)}}}),')
     admin = ", ".join(json.dumps(r) for r in _roles_admin(spec))
-    owned = ", ".join(f"{m.name}.{e.name}" for m, e in spec.owned_entities()) or "no entity"
+    # the policy module names no entity: adding an owned module later must not regenerate it (it is not an integration point)
     lines = _header(
         f"Authorization policy declared by the contract (model {spec.authz_model}): per-operation roles checked by a route dependency "
-        f"before the use case runs, ownership of {owned} checked by the service against the row it loaded and by the repository "
-        "query that loaded it. The router never decides; it only carries the principal. A denial is 403; a resource outside the "
-        "caller's visibility is 404 because the query does not return it, so existence is not revealed across owners or tenants.",
+        "before the use case runs, ownership of the entities declared owned checked by the service against the row it loaded and "
+        "by the repository query that loaded it. The router never decides; it only carries the principal. A denial is 403; a "
+        "resource outside the caller's visibility is 404 because the query does not return it, so existence is not revealed "
+        "across owners or tenants.",
         stdlib=["from collections.abc import Callable", "from typing import Annotated"] + (["import logging"] if audit else []),
         third_party=["from fastapi import Depends"],
         local=[f"from {spec.package}.core.errors import ForbiddenError", f"from {spec.package}.core.security import Principal, {dep}"],
@@ -2207,7 +2208,7 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
                 "def migrated(owner_url: str):",
                 '    """Only an empty database is accepted: the suite migrates, truncates and downgrades it as the owner; the',
                 '    application never connects as the owner."""',
-                "    existing = run(table_names(owner_url))",
+                "    existing = [t for t in run(table_names(owner_url)) if t != \"alembic_version\"]  # a downgrade leaves it empty",
                 "    if existing:",
                 f'        pytest.fail(f"{prefix}_MIGRATIONS_DATABASE_URL must be an empty database; found tables: {{existing}}")',
                 '    result = alembic(owner_url, "upgrade", "head")',
@@ -2222,7 +2223,7 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
                 '@pytest.fixture(scope="session")',
                 "def migrated(database_url: str):",
                 '    """Only an empty database is accepted: the suite migrates, truncates and downgrades it."""',
-                "    existing = run(table_names(database_url))",
+                "    existing = [t for t in run(table_names(database_url)) if t != \"alembic_version\"]  # a downgrade leaves it empty",
                 "    if existing:",
                 '        pytest.fail(f"DATABASE_URL must point at an empty database; found tables: {existing}")',
                 '    result = alembic(database_url, "upgrade", "head")',

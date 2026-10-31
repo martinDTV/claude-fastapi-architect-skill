@@ -257,6 +257,38 @@ def pending_operations(target: Path) -> List[Operation]:
     return out
 
 
+def unreadable_operations(target: Path) -> List[Dict[str, str]]:
+    """Operation directories whose journal cannot be read (missing, truncated, not JSON, another schema): an
+    interrupted write may hide behind each of them, so they block new plans and are reported for a human to inspect;
+    nothing here guesses what happened or deletes anything (v2.0 acceptance)."""
+    ops = Path(target).resolve() / OPS_DIR
+    if not ops.is_dir():
+        return []
+    out: List[Dict[str, str]] = []
+    for child in sorted(ops.iterdir()):
+        if not child.is_dir():
+            continue
+        path = child / JOURNAL
+        if not path.is_file():
+            reason = "journal.json is missing"
+        else:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                reason = f"journal.json is unreadable ({type(exc).__name__})"
+            else:
+                if not isinstance(data, dict):
+                    reason = "journal.json is not an object"
+                elif data.get("schema") != JOURNAL_SCHEMA or "op_id" not in data:
+                    reason = f"journal.json has schema {data.get('schema')!r} or no op_id"
+                else:
+                    reason = ""
+        if reason:
+            staged = sum(1 for p in (child / "new").rglob("*") if p.is_file()) if (child / "new").is_dir() else 0
+            out.append({"op_id": child.name, "path": str(path), "reason": reason, "staged_files": str(staged)})
+    return out
+
+
 def classify(target: Path, op: Operation) -> Dict[str, str]:
     """``path -> published | pending | conflict`` by current content."""
     target = Path(target).resolve()

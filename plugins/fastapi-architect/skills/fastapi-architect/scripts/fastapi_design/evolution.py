@@ -49,7 +49,7 @@ from .advisor import recommend
 from .blueprint import Layout, Lineage, added_columns, build
 from .discovery import ProjectModel, discover
 from .generator import MANIFEST, GenerationError, WriteError, build_manifest, safe_join
-from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, write_recoverable
+from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
 from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
 from .verify import run_generated_tests
@@ -534,6 +534,11 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     pending = pending_operations(project)
     if pending:
         block("no_pending_operation", "an interrupted operation exists (" + ", ".join(f"{op.op_id} {op.state}" for op in pending) + "); run `evolve_fastapi.py recover` before planning")
+        plan.state = STATE_BLOCKED
+        return plan
+    unreadable = unreadable_operations(project)
+    if unreadable:
+        block("no_unreadable_operation", "an operation directory has no readable journal (" + ", ".join(f"{u['op_id']}: {u['reason']}" for u in unreadable) + "); inspect .fastapi-architect/ops before planning: the staged files and backups are kept, nothing is guessed")
         plan.state = STATE_BLOCKED
         return plan
     model = discover(str(project))

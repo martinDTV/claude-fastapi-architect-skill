@@ -26,12 +26,12 @@ from .spec import SPEC_SCHEMA, SPEC_SCHEMAS, Spec, SpecError, load_spec, validat
 from .adoption import ADOPTION_SCHEMA, AdoptionContract, AdoptionError, adopt, load_adoption_contract, propose_adoption
 from .discovery import ProjectModel, discover
 from .evolution import EVOLUTION_SCHEMA, EvolutionContract, EvolutionError, EvolutionPlan, EvolveOptions, load_evolution, plan_evolution, run_evolution
-from .journal import FaultInjector, Operation, pending_operations, recover, write_recoverable
+from .journal import FaultInjector, Operation, pending_operations, recover, unreadable_operations, write_recoverable
 from .transforms import StructuralEdit, TransformError, ensure_import, insert_class_field, insert_function
 from .verify import audit_generated, run_generated_tests
 
 __all__ = [
-    "ADOPTION_SCHEMA", "AdoptionContract", "AdoptionError", "FaultInjector", "Operation", "StructuralEdit", "TransformError", "adopt", "ensure_import", "insert_class_field", "insert_function", "load_adoption_contract", "pending_operations", "propose_adoption", "recover", "write_recoverable",
+    "ADOPTION_SCHEMA", "AdoptionContract", "AdoptionError", "FaultInjector", "Operation", "StructuralEdit", "TransformError", "adopt", "ensure_import", "insert_class_field", "insert_function", "load_adoption_contract", "pending_operations", "propose_adoption", "recover", "unreadable_operations", "write_recoverable",
     "EVOLUTION_SCHEMA", "EvolutionContract", "EvolutionError", "EvolutionPlan", "EvolveOptions", "ProjectModel", "discover", "load_evolution", "plan_evolution", "run_evolution",
     "Blueprint", "DesignError", "DesignOptions", "GenerationError", "GenerationResult", "MANIFEST", "MANIFEST_SCHEMA", "REPORT_SCHEMA",
     "Recommendation", "SPEC_SCHEMA", "SPEC_SCHEMAS", "Spec", "SpecError", "audit_generated", "build", "generate", "generation_refusal", "load_spec",
