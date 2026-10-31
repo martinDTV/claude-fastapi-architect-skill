@@ -81,6 +81,18 @@ python3 scripts/design_fastapi.py plugins/fastapi-architect/examples/specs/order
 with `DATABASE_URL` set to an empty database you own. Without `--authorize-execution` nothing is executed and the
 report says so.
 
+## Row-level security projects (schema 1.2, `strategy: shared_schema_rls`)
+
+A contract that asks for row-level security gets two database roles and two URLs: the application connects as a
+restricted role (`<PKG>_DATABASE_URL`, name in `<PKG>_APP_ROLE`, created by you with `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOINHERIT`), migrations and the test truncation run as the owner
+(`<PKG>_MIGRATIONS_DATABASE_URL`). The migration that creates each tenant table also grants row privileges to the
+application role, enables and forces row-level security and creates the tenant policy, after checking on the live
+connection that the role exists and cannot bypass RLS. The generated suite needs both URLs on the same empty
+database, and `tests/test_rls.py` proves the isolation through the restricted role. The walkthrough, the status
+codes and the opt-in verification (`RowLevelSecurityBackendTests`) are in
+[`identity-authorization-and-rls.md`](identity-authorization-and-rls.md).
+
 ## Limits
 
 - One initial migration is generated; later migrations are yours (`uv run alembic revision --autogenerate` works

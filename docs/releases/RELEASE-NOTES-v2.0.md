@@ -1,6 +1,6 @@
 # FastAPI Architect v2.0.0 — Architecture & Engineering Foundations
 
-**Status: increments 1 to 4 implemented and validated locally; pending human review; not published.**
+**Status: increments 1 to 5 implemented and validated locally; pending human review; not published.**
 
 v2.0 turns FastAPI Architect from an auditor and remediator into a system that can also **design and build**
 professional backends, reusing the audit engine (v1.3–v1.8) and the remediation trust model (v1.9) instead of
@@ -297,6 +297,85 @@ them. Nothing cloud-native or distributed is started.
   `docs/guides/evolving-generated-projects.md`, the increment 4 section of `docs/architecture/design-engine-v2.md`,
   `examples/generated/VERIFICATION.md`, structure validator extended.
 
+## Increment 5: Identity, Authorization & Tenant Isolation
+
+### Security design contract (`fastapi-architect/spec/1.2`; 1.1 and 1.0 still accepted)
+
+- `security.oidc` (issuer, audience, asymmetric `algorithms`, `jwks_url`, `leeway_s`, `jwks_cache_s`, `claims`
+  subject/tenant/roles), the authorization object (`model` none/roles/ownership/roles_and_ownership, `roles`,
+  `operations` operation -> roles, `ownership` visibility tenant/owner + `admin_roles`), `owned` entities (the
+  generated `owner_id`), the tenant strategy `shared_schema_application_scoping` (the 1.2 default), the
+  `principal_claim` binding, `multi_tenant.rls` (`app_role`, `context_key`) and `security.audit`.
+- Every impossible or unsupported combination is a contract error with its JSON path (RLS on memory or without a
+  binding, `principal_claim` with API keys, roles on a shared API key, `HS*`/`none`, http issuer or JWKS, owned
+  entities without an ownership model and vice versa, undeclared roles, 1.2 keys in 1.0/1.1 documents). A 1.0/1.1
+  document keeps its meaning: the `authorization` string stays a declaration and a declared `shared_schema_rls`
+  stays application scoping; the engine never upgrades a contract behind its author's back.
+- The `guarantees` block now states `identity`, `authorization_model`, `audit_logging`, the RLS context scope and
+  the infrastructure-failure answer; `not_claimed` is computed from what was built.
+
+### Authenticated identity (`core/security.py`)
+
+- `oauth2_jwt` is generated: `JwksSource` (https only, cache bounded by `jwks_cache_s`, one refresh per unknown key
+  id and never more often than every 30 s, static JWKS only when `ENVIRONMENT=test`), `verify_token` (algorithm
+  allow-list checked before any key lookup, signature, `iss`, `aud`, `exp`/`nbf`/`iat`, required claims) and a
+  `Principal` built from verified claims only; an unreachable provider is 503, not 401. PyJWT with cryptography is the
+  only new generated dependency. No refresh tokens, sessions or token issuance.
+- API keys become grants (`tenant_id`, `subject`, `roles`); a bare tenant id is still read. A shared API key stays
+  what it is: no caller identity, so no policy can be declared on it.
+
+### Resource authorization (`core/authz.py`)
+
+- Per-operation roles in route dependencies (`CanCreate`, `CanGet`, `CanList`, `CanUpdate`, `CanDelete`: 403 before
+  the use case runs); ownership in the service (`ensure_owner`) and in the repository query (`read_scope`): visibility
+  `tenant` reads tenant-wide and lets only the owner or an admin modify (403), visibility `owner` scopes reads too
+  (404). Routers only carry the principal; `owner_id` is never taken from the client (422). Denials are logged on
+  request. Status codes are kept apart: 401 credential, 403 denied, 404 not visible, 422 malformed, 503
+  infrastructure.
+
+### Row-level security (`strategy: shared_schema_rls`, PostgreSQL, opt-in)
+
+- Every tenant table is protected in the migration that creates it: `GRANT` row privileges to the application role,
+  `ENABLE` + `FORCE ROW LEVEL SECURITY`, one `USING`/`WITH CHECK` policy on
+  `NULLIF(current_setting('<context_key>', true), '')::uuid`. The migration verifies on the live connection that the
+  role exists and is neither superuser nor `BYPASSRLS` and refuses otherwise (transactional DDL: no table left
+  behind); roles are provisioning, never created with a default password.
+- Two URLs: `<PKG>_DATABASE_URL` (the application role) and `<PKG>_MIGRATIONS_DATABASE_URL` (the owner).
+  `get_tenant_session` sets the context with `set_config(..., true)` for the request transaction only; no
+  session-level `SET`; commit, rollback and pool return clear it. Evolution adds the protection to new tables in
+  the additive revision; `security`/`persistence` are not evolution operations; a 1.0/1.1 project that declared
+  RLS keeps application scoping and the plan says so.
+- The generated `tests/test_rls.py` proves the isolation through the restricted role with raw SQL (policies,
+  role, no context, cross-tenant writes, context after commit/rollback/pool reuse, rollback residue, invalid
+  context, the role trying to lift the protection, 24 concurrent requests of two tenants, 503 on an unreachable
+  database).
+
+### Verified
+
+- Vertical slice 1, `examples/specs/team-notes.json` (OIDC + `principal_claim` + `roles_and_ownership`, in memory):
+  54 generated tests through the trust model (legitimate access, other member per policy, other tenant 403 and
+  404, nonexistent, forbidden operation, invalid and tampered tokens, modification without permission, admin
+  override, the OIDC negative controls); audited with zero findings and every protected route showing its
+  authorization. The single-tenant owner-scoped `journal` fixture (ES256, visibility `owner`) passes its suite too.
+- Vertical slice 2, `examples/specs/tenant-projects.json` (API-key grants + `roles_and_ownership` + RLS): 51
+  generated tests on a throwaway PostgreSQL 16 as the restricted role `fa_app` (12 RLS demonstrations, concurrency,
+  ownership, roles, cross-tenant references); a `BYPASSRLS` role and a missing role make the migration refuse with
+  no table behind; the evolution that adds `milestones` protects the new table and passes 64 tests. Evidence and
+  costs: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+- Auditor integration: both generated projects audit with nothing above `info` and `authorization_unknown: 0`;
+  negative controls: a route stripped of its policy and principal is reported through
+  `CONTRACT_MUTATION_AUTHZ_REQUIRED` (the generated declared contract), a session-level `SET` through
+  `SEC_RLS_SET_NOT_LOCAL`; no auditor rule or regex changed, corpora untouched.
+
+### Tests, examples, docs
+
+- `tests/test_design_v20_security.py` (27 tests), `tests/test_design_v20_postgresql.py` + 3 opt-in tests
+  (`RowLevelSecurityBackendTests`), fixtures `oidc_owner_scoped.json`, `rls_claim_binding.json` and four invalid
+  `security12_*.json` contracts; snapshots `examples/generated/team-notes` and `tenant-projects` (byte-equal to a
+  fresh generation, audited); `examples/evolutions/tenant-projects-add-milestones.json`; manifest 1.2 with the
+  `security` record. Docs: `references/design-contracts.md` section 8, `docs/guides/identity-authorization-and-rls.md`,
+  the architecture record, this file.
+
 ## Compatibility
 
 - 59 rules, report schema 1.7, JSON/SARIF outputs, fingerprints, suppressions, declared contracts, the opt-in loop
@@ -309,16 +388,19 @@ them. Nothing cloud-native or distributed is started.
 - `tests/test_design_v20.py` (67 tests: validation positives and negatives with JSON paths, advisor rules
   including microservices only when explicit, blueprint determinism and layouts, generator safety and idempotency,
   pipeline and trust-model denials, the generated tests executed through the trust model when fastapi/httpx/pytest
-  are importable, report renderings, snapshot equality for both examples, CLI exit codes; increment 2: schema 1.1,
-  tenant binding refusal, Alembic and foreign keys, guarantees, ruff on the generated projects when ruff or uvx is
-  available), `tests/test_audit_v20.py` (12 tests: router propagation and route composition) and the opt-in
-  `tests/test_design_v20_postgresql.py` (2 tests, `FA_DESIGN_PG=1`).
-- Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (7 + 11 contracts),
-  `tests/fixtures/regressions_v20/{nested_routers,route_composition}`.
+  are importable, report renderings, snapshot equality for the four examples, CLI exit codes; increment 2: schema
+  1.1, tenant binding refusal, Alembic and foreign keys, guarantees, ruff on the generated projects when ruff or
+  uvx is available), `tests/test_audit_v20.py` (12 tests: router propagation and route composition),
+  `tests/test_evolve_v20.py` (26), `tests/test_evolve_v20_recovery.py` (17), `tests/test_evolve_v20_adoption.py`
+  (22), `tests/test_design_v20_security.py` (27) and the opt-in `tests/test_design_v20_postgresql.py` (9 tests,
+  `FA_DESIGN_PG=1`). Full suite: 532 tests on Python 3.13 (10 skipped: the opt-in PostgreSQL tests and ruff) and
+  3.9 (22 skipped: plus the generated suites, which need Python 3.12+).
+- Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (9 + 15 contracts),
+  `tests/fixtures/regressions_v20/{nested_routers,route_composition}`, `tests/fixtures/adoption20/handmade_shop`.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`
   (extended with the v2.0 artefacts), `claude plugin validate`, `git diff --check`: see the increment report.
 
-## Known limits (after increment 4)
+## Known limits (after increment 5)
 
 - Generated projects: new modules and additive changes to existing ones (nullable or defaulted fields,
   operations, dependencies); no removals, renames, type changes, new entities in an existing module, or layout
@@ -334,10 +416,13 @@ them. Nothing cloud-native or distributed is started.
 
 - Only the initial migration is generated; later migrations are the author's (`alembic revision --autogenerate`
   works on the generated metadata). `uv.lock` is not generated (resolution needs the index).
-- Tenant isolation is application scoping plus composite foreign keys: no row-level security, no schema or
-  database per tenant, no resource-level authorization. OAuth2/JWT and session authentication are refused.
-- Generated PostgreSQL suites other than `orders-platform` are generated and linted but not executed by the
-  plugin's tests; the opt-in verification needs local PostgreSQL binaries and uv.
+- Security: session authentication, refresh tokens, token issuance, public resources inside an authenticated API,
+  cross-tenant administration, schema or database per tenant are not generated; the OIDC provider is trusted for
+  the claims it signs; a project generated from a 1.0/1.1 contract keeps application scoping even if it declared
+  `shared_schema_rls` (moving to RLS is a new design, not an evolution); the throwaway-cluster verification uses the
+  bootstrap superuser as the migrations owner (FORCE is checked through the catalog flags and the restricted role).
+- Generated PostgreSQL suites other than `orders-platform` and `tenant-projects` are generated and linted but not
+  executed by the plugin's tests; the opt-in verification needs local PostgreSQL binaries and uv.
 - The local executor is process hygiene, not a sandbox; generated code runs with the operator's privileges when
   authorised, and `uv run` reaches the network when the cache misses.
 - Route composition follows string-constant prefixes through `include_router`; prefixes built at runtime are
@@ -348,10 +433,9 @@ them. Nothing cloud-native or distributed is started.
 1. Expand/contract migrations with explicit data steps (backfill scripts, NOT NULL after backfill, column renames
    through add-copy-drop), and richer transforms for adopted modules (handlers with parameters and bodies declared
    in the contract, imports of project symbols) under the same AST evidence.
-2. Authentication beyond API keys (OAuth2/JWT with the references' guidance) and resource-level authorization
-   policies as declared decisions.
-3. Row-level security as an opt-in strategy implementation (policies, session tenant context, the tenant-ledger
-   discipline) so `shared_schema_rls` can be reported as implemented.
-4. Operations files from `assets/` (Dockerfile, CI, pre-commit) and the reliability patterns (outbox, workers)
+2. Operations files from `assets/` (Dockerfile, CI, pre-commit) and the reliability patterns (outbox, workers)
    as opt-in generation guarded by decisions in the contract.
-5. Sub-application mounts and `root_path` in the auditor's route composition.
+3. Sub-application mounts and `root_path` in the auditor's route composition.
+4. Security follow-ups: a reviewed migration path from application scoping to RLS for existing projects (with
+   its own tests), background jobs with an explicit tenant context, and public read operations inside an
+   authenticated API as a declared decision.

@@ -81,6 +81,8 @@ CurrentPrincipalDep = Annotated[Principal, Depends(get_current_principal)]
 
 This assumes three extra fields in `Settings`: `oidc_issuer: str`, `oidc_audience: str` and `oidc_jwks_url: str` (replace `jwt_secret` from the base example when tokens come from an identity provider).
 
+The design engine (v2.0, increment 5) generates this module from `security.oidc` in a schema 1.2 contract, with a few additions worth copying by hand: the header algorithm is checked against the contract's asymmetric list before any key is looked up, the JWKS cache refreshes at most once per unknown `kid` and never more often than every 30 s (a forged `kid` cannot force a fetch per request), the JWKS URL must be https and a static JWKS is accepted only in the test environment, `exp`/`nbf`/`iat`/`iss`/`aud`/subject are required claims, a provider that cannot be reached is 503 rather than 401, and the generated `tests/test_auth.py` keeps the negative controls (algorithm confusion, unsigned token, altered claims, rotated key, wrong audience or issuer). See `references/design-contracts.md`, section 8.
+
 `get_current_principal` is a plain `def` because `PyJWKClient` fetches keys with a blocking HTTP call on cache miss; FastAPI runs it in the threadpool.
 
 Rules:

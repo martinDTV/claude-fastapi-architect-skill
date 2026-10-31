@@ -15,13 +15,17 @@ python3 scripts/design_fastapi.py SPEC.json --target DIR [--allow-existing] [--o
 Exit codes: `0` completed; `1` with `--strict` when the audit of the generated project reports findings or the
 tests did not pass; `2` invalid specification, refused generation or invalid arguments.
 
-## 1. Specification (`fastapi-architect/spec/1.1`; `1.0` documents are still accepted)
+## 1. Specification (`fastapi-architect/spec/1.2`; `1.1` and `1.0` documents are still accepted)
 
 Plain JSON, validated strictly like `.audit-fastapi.json`: unknown properties are errors (annotations prefixed
 `x-` are allowed), identifiers are checked, enumerations are closed, and every problem is reported with its JSON
 path. Validation collects all errors instead of stopping at the first one. Schema 1.1 (increment 2) adds
 `references`/`on_delete` on uuid fields and `security.multi_tenant.binding`; a 1.0 document is a 1.1 document
-without them.
+without them. Schema 1.2 (increment 5) adds the security design contract of section 8: `security.oidc`, the
+authorization object (`model`, `roles`, `operations`, `ownership`), `owned` entities, the tenant strategy
+`shared_schema_application_scoping` (the default of 1.2 documents), the `principal_claim` binding,
+`multi_tenant.rls` and `security.audit`. A 1.0/1.1 document keeps its meaning under the 1.2 engine: its
+`authorization` string stays a declaration and a declared `shared_schema_rls` stays application scoping (section 6).
 
 | Key | Content | Default when omitted |
 |---|---|---|
@@ -31,11 +35,11 @@ without them.
 | `description` | free text | `<name> backend` |
 | `scope` | `size` small/medium/large, `team_size`, `expected_rps`, `data_volume` | small, 2, 50, small |
 | `functional.modules[]` | `name` (identifier, not reserved), `description`, `depends_on` (other modules, acyclic), `entities[]` | required, at least one |
-| `entities[]` | `name` (CapitalizedWord), `fields[]`, `operations` ⊆ create/get/list/update/delete | all operations |
-| `fields[]` | `name` (identifier; `id`, `tenant_id`, `created_at`, `updated_at` are generated and cannot be declared), `type` str/int/float/bool/uuid/datetime/date/decimal, `required`, `max_length` (str only), `min_value`/`max_value` (numeric only), `description`, `references` (`"module.Entity"` or `"Entity"`, uuid only: a foreign key in SQL persistence; the target must be in the same module or in a declared `depends_on`), `on_delete` restrict/cascade/set_null (`set_null` needs `required: false`) | required true, on_delete restrict |
+| `entities[]` | `name` (CapitalizedWord), `fields[]`, `operations` ⊆ create/get/list/update/delete, `owned` (1.2: the row records the subject of the principal that created it in `owner_id`; needs an ownership model) | all operations, not owned |
+| `fields[]` | `name` (identifier; `id`, `tenant_id`, `owner_id`, `created_at`, `updated_at` are generated and cannot be declared), `type` str/int/float/bool/uuid/datetime/date/decimal, `required`, `max_length` (str only), `min_value`/`max_value` (numeric only), `description`, `references` (`"module.Entity"` or `"Entity"`, uuid only: a foreign key in SQL persistence; the target must be in the same module or in a declared `depends_on`), `on_delete` restrict/cascade/set_null (`set_null` needs `required: false`) | required true, on_delete restrict |
 | `nonfunctional` | `availability`, `latency_p95_ms`, `consistency` strong/eventual, `auditability`, `compliance[]` | 99.5%, 300, strong, false, [] |
 | `persistence` | `kind` memory/postgresql, `migrations` (postgresql only) | memory, false |
-| `security` | `authentication` none/api_key/oauth2_jwt/session, `authorization` none/role/resource (needs authentication), `multi_tenant` {`enabled` (needs authentication), `strategy` shared_schema_rls/schema_per_tenant/database_per_tenant, `tenant_param`, `binding` none/api_key_registry (how the authenticated principal is bound to the tenant it addresses; `api_key_registry` needs `authentication: api_key`)} | none, none, disabled / shared_schema_rls / `tenant_id` / none |
+| `security` | `authentication` none/api_key/oauth2_jwt/session; `oidc` (1.2, required with oauth2_jwt; section 8); `authorization`: the legacy string none/role/resource (a declaration, never generated) or the 1.2 object {`model` none/roles/ownership/roles_and_ownership, `roles[]`, `operations` {operation: roles}, `ownership` {`visibility` tenant/owner, `admin_roles[]`}}; `multi_tenant` {`enabled` (needs authentication), `strategy` shared_schema_application_scoping (1.2)/shared_schema_rls/schema_per_tenant/database_per_tenant, `tenant_param`, `binding` none/api_key_registry/principal_claim (how the authenticated principal is bound to the tenant it addresses; `api_key_registry` needs `authentication: api_key`, `principal_claim` needs `oauth2_jwt`), `rls` {`app_role`, `context_key`} (only with shared_schema_rls)}; `audit` {`authorization_decisions`} | none, none, disabled / shared_schema_application_scoping in 1.2 (shared_schema_rls in 1.0/1.1) / `tenant_id` / none; `<package>_app`, `app.tenant_id`; false |
 | `integrations[]` | `name`, `kind` http/queue/smtp/storage/database, `direction` outbound/inbound, `criticality` low/medium/high, `module` | outbound, medium |
 | `infrastructure` | `deployment` container/vm/serverless, `cache`, `broker`, `regions` | container, false, false, 1 |
 | `architecture` | `style_preference` layered/modular_monolith/hexagonal/microservices, `independent_deployment` | none, false |
@@ -54,7 +58,12 @@ Cross-field rules enforced: migrations need postgresql; authorization and multi-
 `max_length` only on `str`, `min_value`/`max_value` only on numeric types and consistent; module dependencies
 must exist and be acyclic; references name existing entities and follow the dependency direction; a tenant
 binding needs multi-tenancy enabled and (for `api_key_registry`) API-key authentication; an accepted decision
-must state its rationale; module and entity names are unique.
+must state its rationale; module and entity names are unique. Schema 1.2 adds the security rules of section 8:
+`oauth2_jwt` needs `oidc` (https issuer and JWKS URL, asymmetric algorithms only), `principal_claim` needs
+`oauth2_jwt`, roles and ownership need a caller identity (a shared API key has none: use `oauth2_jwt` or the
+`api_key_registry` binding), per-operation roles and admin roles must be declared roles, an ownership model needs
+at least one `owned` entity and vice versa, `shared_schema_rls` needs PostgreSQL and a binding, `rls` needs
+`shared_schema_rls`, and 1.2-only keys are rejected in 1.0/1.1 documents with the schema they need.
 
 ## 2. Recommendation (advisor)
 
@@ -86,15 +95,22 @@ timestamps, no random values, so two runs produce identical bytes. Every project
   `/health` route and every business router mounted under `/api/v1` (behind the API-key dependency when
   `authentication: api_key`, compared in constant time against a `SecretStr` setting with no default);
 - `core/config.py` (pydantic-settings, env prefix `<PKG>_`, `current_settings` dependency so tests inject their
-  own settings; no credential has a default), `core/errors.py`, `core/security.py` (api_key: one shared key, or
-  `api_key_registry`: `api_keys` maps each key to one tenant, `require_tenant_member` resolves the tenant path
-  parameter and refuses any other tenant with 403), `core/db.py` (postgresql: async engine, declarative base with
-  a naming convention, request-scoped `AsyncSession` that rolls back on errors; the **service** flushes and
-  commits once per use case and turns an `IntegrityError` into a 409 after rolling back);
-- for postgresql: `alembic.ini`, `migrations/env.py` (async, URL from `<PKG>_DATABASE_URL`, every model
-  registered), `migrations/script.py.mako`, and `migrations/versions/<rev>_initial_schema.py` generated from the
-  contract (tables in dependency order, explicit constraint names, indexes on tenant and foreign-key columns,
-  revision id derived from the contract digest); `create_all` is never called;
+  own settings; no credential has a default; `api_keys` grants and `oidc_*` settings when declared), `core/errors.py`
+  (403 `ForbiddenError`, 404, 409, 503 `UnavailableError`; on PostgreSQL an unreachable database is answered 503,
+  never 401 or 404), `core/security.py` (api_key: one shared key; `api_key_registry`: `api_keys` maps each key to a
+  grant with `tenant_id`, `subject` and `roles`, `require_tenant_member` resolves the tenant path parameter and
+  refuses any other tenant with 403; `oauth2_jwt`: the OIDC validation of section 8), `core/authz.py` (the
+  authorization policy of section 8, when `authorization.model` is not `none`), `core/db.py` (postgresql: async
+  engine, declarative base with a naming convention, request-scoped `AsyncSession` that rolls back on errors; the
+  **service** flushes and commits once per use case and turns an `IntegrityError` into a 409 after rolling back;
+  under `shared_schema_rls` also `get_tenant_session`, which sets the tenant context of the authenticated principal
+  for the current transaction only);
+- for postgresql: `alembic.ini`, `migrations/env.py` (async, URL from `<PKG>_DATABASE_URL`, or
+  `<PKG>_MIGRATIONS_DATABASE_URL` first under `shared_schema_rls`, every model registered), `migrations/script.py.mako`,
+  and `migrations/versions/<rev>_initial_schema.py` generated from the contract (tables in dependency order, explicit
+  constraint names, indexes on tenant, owner and foreign-key columns, revision id derived from the contract digest;
+  under `shared_schema_rls` every tenant table is protected in the revision that creates it: section 8); `create_all`
+  is never called;
 - per module: schemas (`extra="forbid"`, constraints from the fields), models (dataclasses in memory, SQLAlchemy 2
   mapped classes for postgresql with `tenant_id`, `UniqueConstraint(tenant_id, id)` and `ForeignKeyConstraint`s from
   the declared references, composite over the tenant id between tenant tables), repository Protocol plus the
@@ -106,23 +122,31 @@ timestamps, no random values, so two runs produce identical bytes. Every project
   the suite needs `DATABASE_URL` set to an **empty, disposable** database: it refuses a non-empty one, migrates,
   truncates after every test and downgrades at the end) and `tests/test_<module>.py` through the HTTP boundary:
   201 on create, 422 on invalid payload and on unknown properties, 200/404 on get with
-  `application/problem+json`, pagination with limits, update, delete, 401 without the API key, the port
-  notification when a port exists, 409 with no row persisted when a reference points at a missing row, and for
-  multi-tenant contracts 403 for another tenant's path, empty listings across tenants and 409 when a reference
-  points at another tenant's row; `tests/test_migrations.py` asserts one head, an empty `compare_metadata`
-  (schema drift is detected), the constraints by name and repeatable up/down;
+  `application/problem+json`, 422 on a malformed id, pagination with limits, update, delete, 401 without the API
+  key or the bearer token, the port notification when a port exists, 409 with no row persisted when a reference
+  points at a missing row, and for multi-tenant contracts 403 for another tenant's path, empty listings across
+  tenants, 404 for another tenant's id presented under the caller's tenant (the row stays untouched) and 409 when
+  a reference points at another tenant's row; with a policy, the role each operation needs (`limited` gets 403),
+  ownership across members and admins and the client's inability to set `owner_id`; `tests/test_auth.py` (OIDC)
+  and `tests/test_rls.py` (row-level security) as in section 8; `tests/test_migrations.py` asserts one head, an
+  empty `compare_metadata` (schema drift is detected), the constraints by name and repeatable up/down. The test
+  identities are fixed: `alice` (tenant A, every role), `bob` (tenant A, member roles), `admin` and `limited`
+  (tenant A, when the policy declares admin roles or a role model), `carol` (tenant B);
 - `.audit-fastapi.json` declaring the design for the auditor: `public_routes` (`/health` and `/api/v1/*` when
   there is no authentication, `/health` otherwise; full paths, since the auditor composes `include_router`
   prefixes), `tenant_params`, `contracts.forbidden_imports` between modules that do not declare a dependency,
-  `contracts.commit_layers: ["service"]` for postgresql, `contracts.route_auth_required` when authenticated;
+  `contracts.commit_layers: ["service"]` for postgresql, `contracts.route_auth_required` when authenticated,
+  `contracts.mutation_authorization_required` when a policy is declared (a generated mutation that loses its policy
+  dependency is reported through this declaration, not through a naming guess);
   `.env.example` with placeholders only, `.gitignore`, a README with the rationale, the migration commands, the
   tenant model and the pending decisions. The generated code passes its own ruff configuration (E, F, I, B, UP,
   ASYNC at 120 columns).
 
-The generator **refuses** contracts whose `authentication` is `oauth2_jwt` or `session`, and multi-tenant
-contracts whose `binding` is `none`: the contract accepts them, this increment does not generate them, and a
-route that accepts any `tenant_id` from any authenticated caller is not authorization. The refusal is reported
-(`generation_refused`) and `--validate-only` still produces the recommendation and the guarantees block.
+The generator **refuses** contracts whose `authentication` is `session`, `oauth2_jwt` contracts of schema 1.0/1.1
+(no `oidc` block: a declaration without the provider configuration), and multi-tenant contracts whose `binding`
+is `none`: the contract accepts them, the generator does not emit a non-functional stub, and a route that accepts
+any `tenant_id` from any authenticated caller is not authorization. The refusal is reported (`generation_refused`)
+and `--validate-only` still produces the recommendation and the guarantees block.
 
 **Safety rules** (each enforced and tested):
 
@@ -138,9 +162,13 @@ route that accepts any `tenant_id` from any authenticated caller is not authoriz
 | path outside the target (`..`, absolute, backslash) | refused before anything is written |
 
 Files are written atomically (temporary file + rename). `.fastapi-architect/generation.json`
-(`fastapi-architect/generation/1.0`) records the tool version, the spec name and digest, the style, the package and
-the sha256 of every generated file, without timestamps, so re-running the same contract changes nothing and
-`verify_manifest` can tell `identical`, `modified` and `missing` files apart.
+(`fastapi-architect/generation/1.2`; 1.0 and 1.1 are still read) records the tool version, the spec name and
+digest, the contract document, the style, the package, the sha256 of every generated file, the migration chain
+(each revision with `row_level_security`), the operation history and a `security` record (authentication,
+identity, authorization model and legacy declaration, tenant strategy declared and implemented, binding,
+`row_level_security`), without timestamps, so re-running the same contract changes nothing, `verify_manifest`
+can tell `identical`, `modified` and `missing` files apart, and a later evolution can never mistake a declared
+strategy for an implemented one.
 
 ## 4. Verification
 
@@ -167,7 +195,7 @@ the sha256 of every generated file, without timestamps, so re-running the same c
   "tool": {"name": "fastapi-architect design", "version": "2.0.0"},
   "spec": {"name", "schema", "digest", "source", "package", "modules", "entities", "persistence", "authentication", "multi_tenant", "explicit_paths", "assumed_paths", "document"},
   "recommendation": {"style", "rationale", "rejected", "assumptions", "pending", "signals", "ports_modules", "warnings", "persistence_notes", "security_notes", "testing_notes"},
-  "guarantees": {"multi_tenant": {"requested", "strategy_declared", "strategy_implemented", "principal_tenant_binding", "storage_isolation", "row_level_security": false, "schema_or_database_per_tenant": false}, "authentication", "resource_authorization", "persistence": {"kind", "migrations", "create_all_used": false, "constraint_violation_on_commit"}, "execution", "not_claimed"},
+  "guarantees": {"multi_tenant": {"requested", "strategy_declared", "strategy_implemented", "principal_tenant_binding", "storage_isolation", "row_level_security", "rls": {"app_role", "context_key", "context_scope"} | null, "schema_or_database_per_tenant": false}, "authentication", "identity": {"principal", "subject_source", "roles_source", "tenant_source"}, "resource_authorization", "authorization_model", "audit_logging", "persistence": {"kind", "migrations", "create_all_used": false, "constraint_violation_on_commit", "infrastructure_failure"}, "execution", "not_claimed"},
   "layout": ["tree lines"], "files": ["relative paths"], "blueprint_notes": [],
   "generation": {"target", "dry_run", "written", "unchanged", "conflicts", "manifest"} | null,
   "generation_refused": "reason" | null,
@@ -184,28 +212,118 @@ alternatives, assumptions, pending decisions, layout, generation, audit, tests).
 
 The contract keeps six things apart, and the report's `guarantees` block states each one:
 
-| Aspect | Contract | Generated (increment 2) |
+| Aspect | Contract | Generated (increments 2 and 5) |
 |---|---|---|
 | Multi-tenant design requested | `security.multi_tenant.enabled` | `tenant_id` on every entity, tenant-scoped routes and repositories |
-| Isolation strategy selected | `strategy` (shared_schema_rls, schema_per_tenant, database_per_tenant) | recorded; **implemented: `shared_schema_application_scoping`** (tenant filter on every query, composite foreign keys on PostgreSQL). RLS policies, schema or database per tenant are not generated and the report says `row_level_security: false` |
-| Authenticated identity | `authentication` | `api_key` (shared key) or `api_key_registry` (each key bound to one tenant); OAuth2/JWT and sessions are refused |
-| Principal-tenant binding | `binding` | `api_key_registry`: `require_tenant_member` compares the tenant bound to the key with the tenant path parameter (403 otherwise); `none`: generation refused |
-| Resource authorization | `authorization` | not generated; recorded as a pending decision and reported as `resource_authorization: not generated` |
-| Storage isolation | `strategy` | application scoping plus composite `(tenant_id, id)` foreign keys; a row can never reference another tenant's row; no database-level isolation |
+| Isolation strategy selected | `strategy` | 1.0/1.1 documents, and 1.2 documents with `shared_schema_application_scoping`: tenant filter on every query, composite foreign keys on PostgreSQL, `row_level_security: false`; a 1.0/1.1 `shared_schema_rls` is **declared, not implemented** (pending decision). 1.2 documents with `shared_schema_rls` on PostgreSQL: row-level security generated and tested (section 8), `row_level_security: true`. Schema or database per tenant: recorded, not generated |
+| Authenticated identity | `authentication` | `api_key` (shared key, no caller identity), `api_key_registry` (grant per key: tenant, subject, roles) or `oauth2_jwt` with `oidc` (verified token claims); sessions are refused |
+| Principal-tenant binding | `binding` | `api_key_registry`: the tenant bound to the key; `principal_claim`: the verified tenant claim of the token; both compared with the tenant path parameter by `require_tenant_member` (403 otherwise); `none`: generation refused |
+| Resource authorization | `authorization` | legacy string: not generated, pending decision; 1.2 object: per-operation roles in a route dependency and ownership in the service and the repository query (section 8), reported as `resource_authorization: <model>: ...` |
+| Storage isolation | `strategy` | application scoping plus composite `(tenant_id, id)` foreign keys; under `shared_schema_rls` also ENABLE + FORCE row-level security on every tenant table, an application role without BYPASSRLS and a transaction-local tenant context |
 
 Negative controls in the suite: a contract with `binding: none` validates, is refused for generation and never
-gets `principal_tenant_binding: enforced`; a declared `shared_schema_rls` is never reported as implemented; the
-generated tests prove the 403, the empty cross-tenant listings and the 409 on cross-tenant references.
+gets `principal_tenant_binding: enforced`; a declared `shared_schema_rls` in a 1.0/1.1 document is never reported
+as implemented and an evolution of such a project names it in its risks without upgrading it; a 1.2 contract that
+asks for RLS on in-memory persistence or without a binding is rejected; the generated tests prove the 403, the
+empty cross-tenant listings, the 404 on a foreign id and the 409 on cross-tenant references.
 
-## 7. Limits of this increment
+## 7. Limits
 
 - Generated: layered, modular monolith and hexagonal layouts; in-memory and PostgreSQL persistence with an Alembic
-  environment and the initial migration; API-key authentication (shared key or per-tenant registry); tenant
-  scoping with the registry binding; HTTP and recording adapters for ports.
-- Not generated: OAuth2/JWT or session authentication, authorization policies, row-level security, schema or
-  database per tenant, outbox/inbox, workers, Docker/CI files (see `assets/`), end-to-end tests, service
-  splitting for `microservices`, later migrations (`alembic revision --autogenerate` works on the generated
-  metadata), `uv.lock` (resolution needs the index; version ranges are explicit).
-- Verified against PostgreSQL: `orders-platform` through the opt-in test (`FA_DESIGN_PG=1`) on a throwaway
-  cluster; the evidence is in `plugins/fastapi-architect/examples/generated/VERIFICATION.md`. Other PostgreSQL
-  contracts are generated and linted but their suites are not executed by the plugin's tests.
+  environment and the initial migration; API-key authentication (shared key or per-tenant grants) and OIDC bearer
+  tokens; tenant scoping with the registry or the claim binding; per-operation roles and ownership; PostgreSQL
+  row-level security as an opt-in strategy; HTTP and recording adapters for ports.
+- Not generated: session authentication, refresh tokens or token issuance, public resources inside an
+  authenticated API, cross-tenant administration, schema or database per tenant, outbox/inbox, workers, Docker/CI
+  files (see `assets/`), end-to-end tests, service splitting for `microservices`, later migrations
+  (`alembic revision --autogenerate` works on the generated metadata), `uv.lock` (resolution needs the index;
+  version ranges are explicit).
+- Verified against PostgreSQL: `orders-platform` and `tenant-projects` through the opt-in tests (`FA_DESIGN_PG=1`)
+  on a throwaway cluster; the evidence is in `plugins/fastapi-architect/examples/generated/VERIFICATION.md`. Other
+  PostgreSQL contracts are generated and linted but their suites are not executed by the plugin's tests.
+
+## 8. Identity, authorization and tenant isolation (schema 1.2, increment 5)
+
+The security block separates five things that are often conflated, and the generator builds each one only when
+the contract makes it buildable; the report's `guarantees` block repeats what was built.
+
+**Authentication: who is calling.** `api_key` with a shared key authenticates the deployment, not a caller: no
+subject, no roles, no policy. With the `api_key_registry` binding every key is a grant `{"tenant_id", "subject",
+"roles"}` (`<PKG>_API_KEYS`; a bare tenant id is still read as a grant without subject or roles, the subject then
+being a digest of the key). `oauth2_jwt` needs `security.oidc`: `issuer` (https), `audience`, `algorithms`
+(asymmetric only: RS/PS/ES/EdDSA; `HS*` and `none` are rejected by the contract), `jwks_url` (https; default
+`<issuer>/.well-known/jwks.json`), `leeway_s` (0..300), `jwks_cache_s` (30..86400) and `claims` (`subject`, `tenant`,
+`roles`; providers may namespace them as URLs). The generated `core/security.py` accepts a token only when its
+header algorithm is in the contract's list (checked before any key lookup), the signature verifies against the
+JWKS key named by `kid` (keys cached for `jwks_cache_s`, refreshed at most once per unknown key id and never more
+often than every 30 s, fetched over https only), `iss`, `aud`, `exp`, `nbf` and `iat` hold, and the required claims
+are present; the principal is built from verified claims only. A static JWKS (`<PKG>_OIDC_JWKS_JSON`) is accepted
+only when `<PKG>_ENVIRONMENT=test`; an unreachable provider is 503, never 401. The generated `tests/test_auth.py`
+holds the negative controls: altered claims with the original signature, expired, not yet valid, wrong audience
+or issuer, HS256 with the public key as secret, `alg: none`, unknown or missing `kid`, another key under the same
+`kid`, malformed tokens, missing required claims, a malformed roles claim, a token without a usable tenant claim,
+a member of another tenant (403, not 401), the static JWKS outside the test environment, an http JWKS URL and the
+unreachable provider. Not generated: refresh tokens, sessions, token issuance, an authorization server.
+
+**Principal-tenant binding: which tenant the caller may address.** `api_key_registry` (the grant's tenant) or
+`principal_claim` (the verified tenant claim, which must be a uuid; a token without it is 401). In both cases
+`require_tenant_member` compares the bound tenant with the tenant path parameter and answers 403 otherwise, and
+every repository call is scoped by the bound tenant: possessing a `tenant_id` never authorizes anything.
+
+**Per-operation authorization: may this caller do this at all.** `authorization.model` `roles` or
+`roles_and_ownership` with `roles[]` and `operations` (operation -> roles; an operation absent from the map is
+open to every authenticated member of the tenant). `core/authz.py` exposes `CanCreate`, `CanGet`, `CanList`,
+`CanUpdate`, `CanDelete`: route dependencies that admit the principal for that operation or answer 403 before the
+use case runs. Admin roles are ordinary declared roles listed in `ownership.admin_roles`.
+
+**Per-resource authorization: may this caller act on this row.** `owned: true` entities record `owner_id` (the
+principal's subject) at creation; the client cannot set it (422). `ownership.visibility` `tenant`: every member
+reads, only the owner or an admin updates or deletes (403 otherwise). `owner`: only the owner or an admin reads,
+updates or deletes; to anyone else the row does not exist (404), because the repository query itself is
+owner-scoped (`owner=read_scope(principal)`). The service enforces it (`ensure_owner`) on the row it loaded; the
+router only carries the principal. 404 is also the answer for a foreign tenant's id presented under the caller's
+tenant (tenant-scoped query); 403 is reserved for "visible, but not yours to change" and for the wrong tenant path;
+503 is an infrastructure failure. `security.audit.authorization_decisions: true` logs every denial (subject,
+tenant, operation, resource type, reason; never a credential) through `logging.getLogger("<pkg>.authz")`.
+
+**Storage isolation: what the database itself enforces.** `shared_schema_application_scoping` (the 1.2 default)
+is the tenant filter on every query plus composite foreign keys. `shared_schema_rls` (PostgreSQL only, binding
+required) adds, in the migration that creates each tenant table: `GRANT SELECT, INSERT, UPDATE, DELETE` to the
+application role, `ENABLE` and `FORCE ROW LEVEL SECURITY`, and one policy `<table>_tenant_isolation` whose `USING`
+and `WITH CHECK` compare the tenant column with `NULLIF(current_setting('<context_key>', true), '')::uuid` (no
+context, or an empty one: no row visible or writable; an invalid one fails the query). The application role
+(`<PKG>_APP_ROLE`, default `rls.app_role`) is provisioning, not a migration: the migration verifies on the live
+connection that it exists and is neither superuser nor BYPASSRLS, and refuses otherwise (transactional DDL leaves
+no table behind). The application connects as that role (`<PKG>_DATABASE_URL`); migrations and the test
+truncation run as the owner (`<PKG>_MIGRATIONS_DATABASE_URL`). `get_tenant_session` sets the context with
+`set_config('<context_key>', <principal tenant>, true)` at the start of the request transaction, never with a
+session-level `SET`; commit, rollback and the return of a pooled connection clear it. The generated
+`tests/test_rls.py` proves it through the application role with raw SQL: policies enabled and forced on every
+tenant table, the role restricted, no rows and no inserts without context, only the caller's tenant with context,
+another tenant's rows neither inserted, moved, updated nor deleted, the context gone after commit and rollback and
+on the next checkout of the same pooled connection, a rolled-back insert leaving no row, invalid and empty
+contexts failing closed, the role unable to disable or un-force RLS, drop the policy, truncate or grant itself
+BYPASSRLS, 24 concurrent requests of two tenants through the ASGI app never mixing rows, and an unreachable
+database answered 503. An evolution that adds a module to such a project protects the new table in its additive
+revision and regenerates `tests/test_rls.py`; a 1.0/1.1 project that declared `shared_schema_rls` keeps
+application scoping and the plan says so (moving to RLS is a reviewed design change with new tests, never an
+evolution, and `security`/`persistence` are not evolution operations).
+
+**Unsupported or impossible configurations (rejected by the contract or refused by the generator):** `oauth2_jwt`
+without `oidc` (1.0/1.1), symmetric or unsigned algorithms, http issuer or JWKS URL, `principal_claim` with API
+keys, `api_key_registry` with OIDC, roles or ownership on a shared API key, owned entities without an ownership
+model or an ownership model without owned entities, undeclared roles in `operations` or `admin_roles`,
+`shared_schema_rls` on in-memory persistence or without a binding, `rls` settings with another strategy, `audit`
+without authentication, `session` authentication, multi-tenancy without a binding, schema or database per tenant,
+public resources inside an authenticated API, cross-tenant administration.
+
+**Verification procedures.** `tests/test_design_v20_security.py` validates the contract rules, the generated code,
+the guarantees, the auditor on the generated projects (zero findings above `info`, every protected route with a
+visible authorization kind, and two negative controls: a route stripped of its policy and principal is reported
+through `CONTRACT_MUTATION_AUTHZ_REQUIRED`, a session-level `SET` through `SEC_RLS_SET_NOT_LOCAL`), the evolution
+rules, and runs the generated suites of `team-notes` (OIDC + `principal_claim` + `roles_and_ownership`, in memory)
+and of the single-tenant owner-scoped `journal` fixture through the trust model when PyJWT and cryptography are
+importable. `tests/test_design_v20_postgresql.py` (`FA_DESIGN_PG=1`) runs the generated suite of `tenant-projects`
+on a throwaway PostgreSQL 16 as the restricted role `fa_app`, checks that a BYPASSRLS role and a missing role make
+the migration refuse without leaving tables behind, and evolves the project with a new module whose table is
+protected. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.

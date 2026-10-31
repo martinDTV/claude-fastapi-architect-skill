@@ -10,7 +10,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | [`plugins/fastapi-architect/skills/fastapi-architect/references/`](../plugins/fastapi-architect/skills/fastapi-architect/references/) | the 28 reference documents the skill routes to (architecture, data layer, security, auditor engine and rules, safe refactoring, design and evolution contracts, …) |
 | [`plugins/fastapi-architect/evals/README.md`](../plugins/fastapi-architect/evals/README.md) | the offline evaluation suite (`claude plugin eval` format) |
 | [`plugins/fastapi-architect/examples/tenant-ledger/`](../plugins/fastapi-architect/examples/tenant-ledger/README.md) | the verified reference implementation (README, VERIFICATION, LIMITATIONS) |
-| [`plugins/fastapi-architect/examples/specs/`](../plugins/fastapi-architect/examples/specs/), [`examples/evolutions/`](../plugins/fastapi-architect/examples/evolutions/) and [`examples/generated/`](../plugins/fastapi-architect/examples/generated/README.md) | the example architecture and evolution contracts (v2.0), the backends generated from them (`inventory-service`, `orders-platform`), and the [verification evidence](../plugins/fastapi-architect/examples/generated/VERIFICATION.md) of the PostgreSQL runs |
+| [`plugins/fastapi-architect/examples/specs/`](../plugins/fastapi-architect/examples/specs/), [`examples/evolutions/`](../plugins/fastapi-architect/examples/evolutions/) and [`examples/generated/`](../plugins/fastapi-architect/examples/generated/README.md) | the example architecture and evolution contracts (v2.0), the backends generated from them (`inventory-service`, `orders-platform`, `team-notes`, `tenant-projects`), and the [verification evidence](../plugins/fastapi-architect/examples/generated/VERIFICATION.md) of the PostgreSQL runs |
 
 ## Architecture records
 
@@ -24,12 +24,13 @@ The repository root holds the entry point (`README.md`); everything else lives h
 |---|---|
 | [`guides/generated-postgresql-projects.md`](guides/generated-postgresql-projects.md) | persistence, Alembic migrations, the generated test suite and the opt-in verification of a generated PostgreSQL backend against a throwaway cluster |
 | [`guides/evolving-generated-projects.md`](guides/evolving-generated-projects.md) | discover an existing project, write an evolution contract, preview the plan, approve and apply it with verification in a copy; changing existing modules (1.1), adopting a hand-written project, recovering an interrupted write; what the engine protects |
+| [`guides/identity-authorization-and-rls.md`](guides/identity-authorization-and-rls.md) | the five security layers of a schema 1.2 contract (OIDC or API-key grants, principal-tenant binding, per-operation roles, ownership, row-level security), what is generated for each, how to run the generated proofs with two database roles, how to read 401/403/404/503, evolving safely, limits |
 
 ## Release notes
 
 | Version | Title |
 |---|---|
-| [v2.0](releases/RELEASE-NOTES-v2.0.md) | Architecture & Engineering Foundations (first increment: design engine) |
+| [v2.0](releases/RELEASE-NOTES-v2.0.md) | Architecture & Engineering Foundations (increments 1 to 5: design engine, PostgreSQL, evolution, adoption, identity and tenant isolation) |
 | [v1.9](releases/RELEASE-NOTES-v1.9.md) | Verified Remediation & Safe Refactoring |
 | [v1.8](releases/RELEASE-NOTES-v1.8.md) | Program Analysis Precision & Verified Remediation Foundations |
 | [v1.7](releases/RELEASE-NOTES-v1.7.md) | Verified Security, Architecture Contracts & Reliability Engineering |

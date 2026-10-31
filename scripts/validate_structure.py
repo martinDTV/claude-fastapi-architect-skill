@@ -89,12 +89,15 @@ design_shim=root/'scripts/design_fastapi.py'
 assert design_tool.is_file(), f'Missing design tool: {design_tool}'
 assert design_shim.is_file() and 'design_fastapi.py' in design_shim.read_text(encoding='utf-8'), 'Root design_fastapi.py does not forward to the skill tool'
 compile(design_tool.read_text(encoding='utf-8'),str(design_tool),'exec')
-for spec_name in ('inventory-service.json','orders-platform.json'):
+for spec_name in ('inventory-service.json','orders-platform.json','team-notes.json','tenant-projects.json'):
     spec_doc=json.loads((base.parent.parent/'examples/specs'/spec_name).read_text(encoding='utf-8'))
-    assert spec_doc.get('schema') in ('fastapi-architect/spec/1.0','fastapi-architect/spec/1.1'), f'examples/specs/{spec_name}: unexpected schema'
+    assert spec_doc.get('schema') in ('fastapi-architect/spec/1.0','fastapi-architect/spec/1.1','fastapi-architect/spec/1.2'), f'examples/specs/{spec_name}: unexpected schema'
+assert json.loads((base.parent.parent/'examples/specs/tenant-projects.json').read_text(encoding='utf-8'))['security']['multi_tenant']['strategy']=='shared_schema_rls', 'tenant-projects must be the row-level-security example'
 assert (base.parent.parent/'examples/generated/inventory-service/.fastapi-architect/generation.json').is_file(), 'Missing generated example manifest'
-for snapshot in ('inventory-service','orders-platform'):
+for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects'):
     assert (base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').is_file(), f'Missing generated example manifest: {snapshot}'
+assert (base.parent.parent/'examples/generated/tenant-projects/tests/test_rls.py').is_file() and (base.parent.parent/'examples/generated/team-notes/tests/test_auth.py').is_file() and (base.parent.parent/'examples/generated/team-notes/src/team_notes/core/authz.py').is_file(), 'Missing the security artefacts of the increment 5 examples'
+assert 'FORCE ROW LEVEL SECURITY' in next((base.parent.parent/'examples/generated/tenant-projects/migrations/versions').glob('*_initial_schema.py')).read_text(encoding='utf-8'), 'tenant-projects migration does not force row-level security'
 assert (base.parent.parent/'examples/generated/orders-platform/alembic.ini').is_file() and list((base.parent.parent/'examples/generated/orders-platform/migrations/versions').glob('*_initial_schema.py')), 'Missing Alembic environment in the PostgreSQL example'
 assert (base.parent.parent/'examples/generated/README.md').is_file() and (base.parent.parent/'examples/generated/VERIFICATION.md').is_file(), 'Missing README/VERIFICATION of the generated examples'
 assert (root/'tests/fixtures/regressions_v20/route_composition/.audit-fastapi.json').is_file(), 'Missing v2.0 route-composition regression fixture'
@@ -105,7 +108,7 @@ evolve_shim=root/'scripts/evolve_fastapi.py'
 assert evolve_tool.is_file(), f'Missing evolution tool: {evolve_tool}'
 assert evolve_shim.is_file() and 'evolve_fastapi.py' in evolve_shim.read_text(encoding='utf-8'), 'Root evolve_fastapi.py does not forward to the skill tool'
 compile(evolve_tool.read_text(encoding='utf-8'),str(evolve_tool),'exec')
-for contract_name in ('inventory-add-suppliers.json','orders-add-shipments.json','inventory-add-product-fields.json','orders-add-customer-columns.json'):
+for contract_name in ('inventory-add-suppliers.json','orders-add-shipments.json','inventory-add-product-fields.json','orders-add-customer-columns.json','tenant-projects-add-milestones.json'):
     contract_doc=json.loads((base.parent.parent/'examples/evolutions'/contract_name).read_text(encoding='utf-8'))
     assert contract_doc.get('schema') in ('fastapi-architect/evolution/1.0','fastapi-architect/evolution/1.1'), f'examples/evolutions/{contract_name}: unexpected schema'
 assert (root/'tests/test_evolve_v20.py').is_file(), 'Missing tests/test_evolve_v20.py'
@@ -116,13 +119,17 @@ assert json.loads((root/'tests/fixtures/adoption20/adopt-items.json').read_text(
 assert (base/'references/evolution-contracts.md').is_file(), 'Missing references/evolution-contracts.md'
 assert (root/'docs/guides/evolving-generated-projects.md').is_file(), 'Missing docs/guides/evolving-generated-projects.md'
 assert 'guides/evolving-generated-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the evolution guide'
-for snapshot in ('inventory-service','orders-platform'):
+for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects'):
     manifest_doc=json.loads((base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').read_text(encoding='utf-8'))
-    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.1' and 'spec_document' in manifest_doc, f'{snapshot}: manifest must be 1.1 with the embedded contract'
+    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.2' and 'spec_document' in manifest_doc and 'security' in manifest_doc, f'{snapshot}: manifest must be 1.2 with the embedded contract and the security record'
 assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
-assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file(), 'Missing v2.0 test modules'
+assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file() and (root/'tests/test_design_v20_security.py').is_file(), 'Missing v2.0 test modules'
+assert (root/'tests/fixtures/design20/specs/valid/rls_claim_binding.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/security12_policy.json').is_file(), 'Missing schema 1.2 security fixtures'
+assert (root/'docs/guides/identity-authorization-and-rls.md').is_file(), 'Missing docs/guides/identity-authorization-and-rls.md'
+assert 'guides/identity-authorization-and-rls.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the identity guide'
+assert '## 8. Identity, authorization and tenant isolation' in (base/'references/design-contracts.md').read_text(encoding='utf-8'), 'references/design-contracts.md lacks the security section'
 assert (base/'references/design-contracts.md').is_file(), 'Missing references/design-contracts.md'
 assert (root/'docs/architecture/design-engine-v2.md').is_file(), 'Missing docs/architecture/design-engine-v2.md'
 assert 'architecture/design-engine-v2.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the architecture record'

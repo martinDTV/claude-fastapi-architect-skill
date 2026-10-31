@@ -205,3 +205,58 @@ gains an endpoint and an optional field, passes its own tests through the trust 
 byte-identical; a concurrent manual edit after the plan blocks the write. Fault injection: a publication
 interrupted after two of six files is rolled back to the original tree or rolled forward to the complete one; an
 interrupted recovery resumes; a file edited after the crash is reported and left alone.
+
+## Increment 5: identity, authorization and tenant isolation
+
+**Five layers, named apart, each built only when buildable.** The temptation in a generator is to accept
+`authentication: oauth2_jwt` and emit a plausible stub, or to accept `strategy: shared_schema_rls` and emit a
+policy that nobody can run. Schema 1.2 instead makes the author say enough to build each layer: an `oidc` block
+for tokens (issuer, audience, asymmetric algorithms, JWKS, claims), a binding for the tenant (a grant or a verified
+claim), a policy object for operations and ownership, `owned` on the entities that have an owner, and a strategy
+that the persistence can honour. Everything the author does not say enough about is either an error at a JSON
+path (RLS on an in-memory store, roles on a shared API key, `HS256`) or a refusal to generate (sessions, a 1.1
+`oauth2_jwt` without provider), never a stub. The `guarantees` block, the manifest's `security` record and the
+advisor's notes all come from the same normalised contract, so the report cannot claim more than the code.
+
+**Old contracts keep their old meaning.** A 1.0/1.1 document that declared `shared_schema_rls` was told, in
+increment 2, that it got application scoping and a pending decision. Under the 1.2 engine it still does: the
+default strategy depends on the schema version, `Spec.rls` requires schema 1.2, and the evolution planner names
+the declared-but-unimplemented strategy in its risks without upgrading it. `security` and `persistence` are not
+evolution operations at all. Moving a running project to RLS is a new design with its own tests; the engine
+refuses to do it as a side effect.
+
+**Identity is what the verifier proves, not what the token says.** The generated OIDC module reads nothing but
+the header before verifying the signature, checks the algorithm against the contract's list before looking up any
+key, requires `iss`/`aud`/`exp`/`nbf`/`iat`/subject, and builds the principal from the verified claims only. Key
+management is deliberately conservative: https only, a cache bounded by the contract, one refresh per unknown key
+id and never more often than every 30 s, a static JWKS only in the test environment, and 503 rather than 401 when
+the provider cannot be reached, so an outage is never mistaken for an attack. The generated negative tests
+include the classic confusions (HS256 with the public key, `alg: none`, a rotated key under the same `kid`,
+altered claims with the original signature). PyJWT with cryptography is the only new dependency; the project
+issues nothing and stores no session.
+
+**Authorization lives where the data is.** Per-operation roles are a route dependency because they need nothing
+but the principal; ownership is checked in the service against the row it loaded and, for `owner` visibility, in
+the repository query itself, because a 404 that comes from the query cannot be bypassed by a new route. The router
+only carries the principal. The three answers are kept apart on purpose: 403 when the row was visible and the
+caller may not change it, 404 when the row is not the caller's to see (another tenant, another owner, or nothing
+there), 503 when the infrastructure failed. The auditor sees the dependency and the principal flowing with the
+resource id on every generated route; the stripped-route negative control is caught through the declared contract
+the generator emits (`mutation_authorization_required`), which is more honest than a regex on names.
+
+**Row-level security the tenant-ledger way, automated.** The policy is created in the same revision as its table,
+so no table ever exists unprotected; `FORCE` makes the owner subject to it as well; the application role gets row
+privileges and nothing else, and the migration checks on the live connection that it cannot bypass RLS before
+granting anything (transactional DDL leaves nothing behind when it refuses). The context is set with
+`set_config(..., true)` from the authenticated principal inside the request transaction, never from the request
+and never at session level, so commit, rollback and the pool reset it. The generated `tests/test_rls.py` is the
+adversarial list of `references/authz-multitenancy.md` run through the restricted role, including the pooled
+connection, the rollback residue, the invalid context, the role trying to lift the protection and two tenants
+interleaved on one process. Roles are provisioning: the migration never creates one with a default password.
+
+**Verified in this increment.** `team-notes` (OIDC, claim binding, roles and ownership) passes 54 generated tests
+through the trust model and audits clean; the owner-scoped single-tenant fixture passes too. `tenant-projects`
+passes 51 generated tests on a throwaway PostgreSQL 16 as the restricted role, a `BYPASSRLS` or missing role makes
+the migration refuse with no table behind, and the evolution that adds a module protects its table and passes 64
+tests. The auditor's rules and regexes did not change; the corpora were not re-scored because nothing that scores
+them moved. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
