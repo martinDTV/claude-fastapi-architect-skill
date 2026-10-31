@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-REPORT_SCHEMA = "architecture_report/1.0"
+REPORT_SCHEMA = "architecture_report/1.1"  # 1.1 (v2.1): verification.tests.run carries an `environment` record (additive)
 
 
 def to_json(report: Dict[str, Any]) -> str:

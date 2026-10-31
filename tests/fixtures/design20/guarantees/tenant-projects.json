@@ -2,7 +2,7 @@
   "audit_logging": "not requested",
   "authentication": "api_key_registry: X-API-Key compared in constant time against a registry of grants, each bound to one tenant with a subject and roles",
   "authorization_model": "roles_and_ownership",
-  "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+  "execution": "generated tests run only through the trust model, in a copy of the project; the local executor is process hygiene, not a sandbox; the container executor (--executor container) runs them in an OCI container with restrictions verified per run",
   "identity": {
     "principal": "per API key (grant)",
     "roles_source": "settings.api_keys[key].roles",
@@ -32,8 +32,8 @@
     "strategy_implemented": "shared_schema_rls"
   },
   "not_claimed": [
-    "network or filesystem isolation of executed tests",
-    "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)",
+    "network or filesystem isolation of executed tests under the local executor (the container executor provides both, verified per run and recorded in verification.tests.run.environment)",
+    "protection against code the generated tests execute under the local executor (process hygiene, not a sandbox); under the container executor, protection against vulnerabilities of the container runtime or the kernel",
     "isolation against SQL statements executed as the application role (an injection that reaches statement level can change the tenant context; the policies protect against missing filters, not against arbitrary SQL)",
     "schema or database per tenant",
     "business rules beyond the declared policy (roles per operation and ownership are enforced; anything finer is the author's code)",

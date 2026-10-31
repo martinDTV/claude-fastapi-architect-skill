@@ -137,7 +137,7 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
                 + "; enforced in the service and the repository, the router only carries the principal"
             )
         resource_authorization = f"{spec.authz_model}: " + "; ".join(parts)
-    not_claimed = ["network or filesystem isolation of executed tests", "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)"]
+    not_claimed = ["network or filesystem isolation of executed tests under the local executor (the container executor provides both, verified per run and recorded in verification.tests.run.environment)", "protection against code the generated tests execute under the local executor (process hygiene, not a sandbox); under the container executor, protection against vulnerabilities of the container runtime or the kernel"]
     if not spec.rls:
         not_claimed.append("row-level security")
     else:
@@ -189,7 +189,7 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
             "constraint_violation_on_commit": "rolled back and answered 409 (problem+json)" if pg else "not applicable",
             "infrastructure_failure": "database unreachable is answered 503 (problem+json), distinct from 401/403/404" if pg else "not applicable",
         },
-        "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+        "execution": "generated tests run only through the trust model, in a copy of the project; the local executor is process hygiene, not a sandbox; the container executor (--executor container) runs them in an OCI container with restrictions verified per run",
         "not_claimed": not_claimed,
     }
 

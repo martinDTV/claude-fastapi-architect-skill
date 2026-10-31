@@ -2,7 +2,7 @@
   "audit_logging": "authorization denials are logged with subject, operation and resource type (no credentials)",
   "authentication": "oidc: bearer tokens of issuer https://id.example.org for audience 'journal', algorithms ES256 only (HS*/none refused), signature verified against the JWKS at https://id.example.org/.well-known/jwks.json (TLS verified, private CA only added through oidc_ca_bundle, response capped, cached 300 s, one fetch attempt per 30 s, stale keys served for at most oidc_jwks_stale_max_s), exp/nbf/iat required with 30 s leeway; provider unreachable, failing or unusable is 503, not 401; the client is verified against a local HTTPS provider in tests/test_jwks.py",
   "authorization_model": "roles_and_ownership",
-  "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+  "execution": "generated tests run only through the trust model, in a copy of the project; the local executor is process hygiene, not a sandbox; the container executor (--executor container) runs them in an OCI container with restrictions verified per run",
   "identity": {
     "principal": "per token (verified claims only)",
     "roles_source": "claim https://example.org/roles (list or space-separated)",
@@ -20,8 +20,8 @@
     "strategy_implemented": null
   },
   "not_claimed": [
-    "network or filesystem isolation of executed tests",
-    "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)",
+    "network or filesystem isolation of executed tests under the local executor (the container executor provides both, verified per run and recorded in verification.tests.run.environment)",
+    "protection against code the generated tests execute under the local executor (process hygiene, not a sandbox); under the container executor, protection against vulnerabilities of the container runtime or the kernel",
     "row-level security",
     "schema or database per tenant",
     "business rules beyond the declared policy (roles per operation and ownership are enforced; anything finer is the author's code)",

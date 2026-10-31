@@ -31,6 +31,7 @@ from typing import List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from fastapi_audit.remediate.container_cli import add_container_arguments, container_executor_from_args  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, TRUST_PROFILES, TRUST_UNTRUSTED, Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_ENV_PASSTHROUGH, ExecutionPolicy  # noqa: E402
 from fastapi_design import DesignError, DesignOptions, GenerationError, SpecError, render_markdown, render_text, run_design, to_json  # noqa: E402
@@ -63,10 +64,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=600.0, metavar="SECONDS")
     parser.add_argument("--env-passthrough", action="append", default=[], metavar="NAMES", help=f"environment variables handed to the command (default: {', '.join(DEFAULT_ENV_PASSTHROUGH)})")
     parser.add_argument("--allow-command", action="append", default=[], metavar="NAME", help=f"additional program names allowed to run (default: {', '.join(DEFAULT_ALLOWED_COMMANDS)})")
+    add_container_arguments(parser)
     parser.add_argument("--output", metavar="FILE", help="write the JSON architecture report to FILE")
     parser.add_argument("--format", choices=("text", "json", "markdown"), default="text")
     parser.add_argument("--strict", action="store_true", help="exit 1 when the audit of the generated project reports findings or the tests did not pass")
     args = parser.parse_args(argv)
+    container_executor_from_args(args)  # registers the configured container executor; used only with --executor container
 
     if not args.validate_only and not args.target:
         sys.stderr.write(f"{PROG}: error: --target DIR is required unless --validate-only is given\n")

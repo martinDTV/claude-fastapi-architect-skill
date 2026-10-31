@@ -36,6 +36,7 @@ from typing import List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from fastapi_audit.remediate.container_cli import add_container_arguments, container_executor_from_args  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, TRUST_PROFILES, TRUST_UNTRUSTED, Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_ENV_PASSTHROUGH, ExecutionPolicy  # noqa: E402
 from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
@@ -102,12 +103,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--env-passthrough", action="append", default=[], metavar="NAMES")
         p.add_argument("--allow-command", action="append", default=[], metavar="NAME")
         p.add_argument("--keep-copy", action="store_true", help="keep the verification copy (its path is reported)")
+        add_container_arguments(p)
     for p in (d, pr, ad, rc, sub.choices["plan"], sub.choices["apply"]):
         p.add_argument("--output", metavar="FILE", help="write the JSON report to FILE")
         p.add_argument("--format", choices=("text", "json"), default="text")
     sub.choices["plan"].add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
     sub.choices["apply"].add_argument("--strict", action="store_true", help="exit 1 unless the verification ended verified")
     args = parser.parse_args(argv)
+    if hasattr(args, "container_image"):
+        container_executor_from_args(args)  # plan/apply: registers the configured container executor
 
     if args.command == "discover":
         try:

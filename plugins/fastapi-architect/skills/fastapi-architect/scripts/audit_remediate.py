@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi_audit.model import RULES, TOOL_NAME  # noqa: E402
 from fastapi_audit.remediate import RECIPES, Authorization, RemediationError, RunOptions, run_remediation  # noqa: E402
+from fastapi_audit.remediate.container_cli import add_container_arguments, container_executor_from_args, maybe_reap  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, TRUST_PROFILES, TRUST_UNTRUSTED  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_ENV_PASSTHROUGH, ExecutionPolicy  # noqa: E402
 from fastapi_audit.remediate.render import render_markdown, render_text, to_json  # noqa: E402
@@ -62,6 +63,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=600.0, metavar="SECONDS", help="wall-clock limit per test run (default 600)")
     parser.add_argument("--env-passthrough", action="append", default=[], metavar="NAMES", help=f"environment variables handed to the command (default: {', '.join(DEFAULT_ENV_PASSTHROUGH)})")
     parser.add_argument("--allow-command", action="append", default=[], metavar="NAME", help=f"additional command names allowed to run (default: {', '.join(DEFAULT_ALLOWED_COMMANDS)})")
+    add_container_arguments(parser, reap=True)
     parser.add_argument("--workspace", metavar="DIR", help="use this empty directory for the isolated copy instead of a temporary one")
     parser.add_argument("--keep-workspace", action="store_true", help="do not delete the isolated copy at the end (its path is reported)")
     parser.add_argument("--patch-dir", metavar="DIR", help="write one .diff per patched case into DIR")
@@ -73,6 +75,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--fail-on-rejected", action="store_true", help="exit 1 when any case ends rejected")
     parser.add_argument("--strict", action="store_true", help="exit 1 unless every case ends verified")
     args = parser.parse_args(argv)
+    reaped = maybe_reap(args, TOOL_NAME)
+    if reaped is not None:
+        return reaped
+    container_executor_from_args(args)  # registers the configured container executor; used only with --executor container
 
     select = _csv(args.select)
     unknown = sorted(r for r in select if r not in RULES)

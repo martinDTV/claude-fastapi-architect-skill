@@ -49,7 +49,7 @@ def run_generated_tests(target_dir: str, authorization: Authorization, policy: E
         return {"ran": False, "denied_reason": denial, "denied_code": code, "run": None}
     if not command:
         return {"ran": False, "denied_reason": "no test command given", "denied_code": "no_command", "run": None, "executor": executor.to_dict()}
-    workspace = Workspace.create(str(target))
+    workspace = Workspace.create(str(target), executor.workspace_dir())
     try:
         before = digest_tree(str(workspace.project))
         run = executor.run(command, workspace, policy)
@@ -60,8 +60,9 @@ def run_generated_tests(target_dir: str, authorization: Authorization, policy: E
             "executor": executor.to_dict(),
             "run": run.to_dict(),
             "workspace": {"copied": True, "python_files_digested": len(before), "python_files_changed_by_the_run": changed},
-            "denied_reason": None,
+            "denied_reason": None if (run.ran or run.refused) else (run.stderr_tail or run.outcome),  # an infrastructure failure explains itself here (v2.1)
             "denied_code": None,
         }
     finally:
+        executor.release(workspace)
         shutil.rmtree(workspace.root, ignore_errors=True)
