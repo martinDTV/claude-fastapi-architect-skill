@@ -127,6 +127,11 @@ assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
 assert (root/'tests/test_design_v20.py').is_file() and (root/'tests/test_audit_v20.py').is_file() and (root/'tests/test_design_v20_security.py').is_file(), 'Missing v2.0 test modules'
 assert (root/'tests/fixtures/design20/specs/valid/rls_claim_binding.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/security12_policy.json').is_file(), 'Missing schema 1.2 security fixtures'
+assert (root/'tests/test_audit_v20_named_authz.py').is_file() and (root/'tests/fixtures/regressions_v20/named_authz/named/security.py').is_file() and (root/'tests/fixtures/regressions_v20/named_authz_privilege/priv/api.py').is_file(), 'Missing the name-based authorization negative controls (security hardening)'
+for name in ('inventory-service','orders-platform','team-notes','tenant-projects','oidc_owner_scoped','rls_claim_binding','tenant_unbound'):
+    assert 'not_claimed' in json.loads((root/f'tests/fixtures/design20/guarantees/{name}.json').read_text(encoding='utf-8')), f'Missing or incomplete guarantees fixture {name}'
+assert (base.parent.parent/'examples/generated/team-notes/tests/test_jwks.py').is_file(), 'team-notes lacks the generated HTTPS JWKS tests'
+assert 'authorization_named_only' in (base/'references/audit-engine.md').read_text(encoding='utf-8'), 'references/audit-engine.md does not document authorization_named_only'
 assert (root/'docs/guides/identity-authorization-and-rls.md').is_file(), 'Missing docs/guides/identity-authorization-and-rls.md'
 assert 'guides/identity-authorization-and-rls.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the identity guide'
 assert '## 8. Identity, authorization and tenant isolation' in (base/'references/design-contracts.md').read_text(encoding='utf-8'), 'references/design-contracts.md lacks the security section'

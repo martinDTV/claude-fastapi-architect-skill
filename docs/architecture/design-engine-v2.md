@@ -260,3 +260,50 @@ passes 51 generated tests on a throwaway PostgreSQL 16 as the restricted role, a
 the migration refuse with no table behind, and the evolution that adds a module protects its table and passes 64
 tests. The auditor's rules and regexes did not change; the corpora were not re-scored because nothing that scores
 them moved. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+## Security acceptance hardening (after increment 5)
+
+**A name is not a policy.** The v1.7 contracts gave a route the authorization kind `role` whenever a dependency
+was *called* `require_*`, `*_admin`, `RoleChecker`, or carried `Scope` in its arguments, and the privilege-change
+and tenant-binding questions went silent on the same names. The review built the seven dependencies that make
+this wrong (no check, returns `None`, accepts any token, authenticates only, hands the principal on, never reads
+the principal, a neutral name over a nested name-only check) and the auditor labelled every one of them
+"authorization visible". The fix reuses what the engine already had: each function record now carries
+`policy_evidence`, the lines where its own code decides on privileges (a condition or predicate over a
+role/scope/permission attribute or privilege predicate, a `raise` of a permission exception or an HTTP 403,
+`Security(scopes=...)`); a dependency contributes `role` only through that evidence, found anywhere in its chain,
+its `__call__`, its closures, or one project call away. Names without evidence are recorded as
+`authorization_named_only` with the reason (no check visible in the chain, or implementation outside the project)
+and the route's authorization stays unknown. Router-level dependencies follow the same rule, so authentication
+applied at the router no longer counts as authorization. The one resolution gap this exposed on a real codebase,
+a permission factory re-exported through a facade recorded under the other source-root spelling, is closed in
+`canonical_function`. Measured with the precision script: the dev and acceptance corpora score identically per
+rule, the two calibration projects keep their findings, and on the clinic project two routes lose a kind they
+never had (router-level authentication) while four gain one through a delegated decision. The holdout was not
+re-scored. Two test expectations that encoded the old assumption were changed deliberately and say why.
+
+**The JWKS client is verified against a provider, not described.** The generated OIDC module now carries the
+behaviour a provider outage or a hostile network can test: TLS verification that can be extended with a private
+CA but never disabled, a size cap on the key set, one fetch attempt per interval whatever the reason, a bounded
+stale window when a refresh fails and nothing served without a usable set, a JWKS with no asymmetric key treated
+as unavailable, and an injectable clock. The generated `tests/test_jwks.py` stands up an HTTPS provider on
+127.0.0.1 with a certificate authority created for the session (trusted only through `oidc_ca_bundle`, with the key
+identifiers and usages strict verifiers demand) and proves: fetch and signature, cache, rotation after the
+interval, no fetch per unknown kid, same-kid replacement rejected until expiry, removed key rejected, malformed
+JSON, invalid and symmetric-only sets, HTTP errors, a slow provider, TLS failures with the system store and with
+another CA, outage without cache and recovery after the interval, stale service within the window only, and eight
+concurrent cold starts fetching once. A provider failure is always 503 without a challenge; a token failure is
+always 401 with one.
+
+**Row-level security has a boundary and the suite shows it.** The tenant context is a transaction setting written
+from the authenticated principal, and any statement executed as the application role in that transaction can
+rewrite it. The generated `tests/test_rls.py` now demonstrates that limit directly (a `set_config` statement as
+the application role switches tenant; a bound parameter carrying the same text does not) next to the privileges
+the role lacks (catalog secrets, `alembic_version`, DDL, policy creation, ownership). The `guarantees` block says
+who sets the context, who can change it, what the role may do, that `FORCE` binds the owner unless it bypasses
+RLS, and lists under `not_claimed` isolation against SQL injection or arbitrary SQL as that role, OAuth2 flows
+beyond token validation, validation against a real identity provider, protection against the code the generated
+tests run, business rules beyond the declared policy, and authorization proven by names. The guarantees of every
+example and fixture contract are frozen under `tests/fixtures/design20/guarantees` so that a change in a claim is a
+reviewed edit. Options that would survive arbitrary SQL (`SECURITY DEFINER` wrappers over a signed context, a role
+per tenant, a schema or database per tenant) are recorded as future architecture, not as capabilities.

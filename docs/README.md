@@ -50,6 +50,8 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | [`tests/fixtures/remediation19/README.md`](../tests/fixtures/remediation19/README.md) | the fixture that reproduces the three remediation recipes |
 | `tests/fixtures/design20/specs/` | architecture contracts that must validate (`valid/`) and must be rejected with the listed JSON paths (`invalid/`, `x-expect`) |
 | `tests/fixtures/regressions_v20/nested_routers/`, `route_composition/` | router dependencies propagated through `include_router` (negative control) and route paths composed through nested, multiply-mounted and dynamically-prefixed routers |
+| `tests/fixtures/regressions_v20/named_authz/`, `named_authz_privilege/` | dependencies named like a policy that decide nothing (seven negative controls) next to policies that show their decision (security hardening: a name is never an authorization kind) |
+| [`tests/fixtures/design20/guarantees/`](../tests/fixtures/design20/guarantees/README.md) | the frozen `guarantees` block of every example and fixture contract; any change in what the engine claims is a deliberate edit here |
 | [`tests/fixtures/adoption20/handmade_shop/`](../tests/fixtures/adoption20/handmade_shop/README.md) | a hand-written FastAPI application (no src layout, module-level storage, idiosyncratic formatting) used to test adoption and anchored transforms |
 | [`tests/schemas/README.md`](../tests/schemas/README.md) | the vendored SARIF 2.1.0 schema |
 

@@ -376,6 +376,66 @@ them. Nothing cloud-native or distributed is started.
   `security` record. Docs: `references/design-contracts.md` section 8, `docs/guides/identity-authorization-and-rls.md`,
   the architecture record, this file.
 
+## Security acceptance hardening (after increment 5)
+
+### Auditor precision: a name is not a policy (deliberate semantic change)
+
+- Route contracts record the authorization kind `role` only when the dependency's own code shows a privilege
+  decision (a condition or predicate over a role/scope/permission attribute or privilege predicate, a `raise` of a
+  permission/forbidden exception or an HTTP 403, `Security(scopes=...)`), found in its chain, its `__call__`, its
+  closures or one project call away (`FunctionRecord.policy_evidence`, `contracts.policy_records`). A dependency
+  named like a policy that decides nothing, or whose implementation is not in the project, is listed in the new
+  additive field `authorization_named_only` with the reason, and the route's authorization stays unknown.
+  Router-level dependencies follow the same rule (authentication at the router is no longer an authorization kind);
+  `SEC_PRIVILEGE_CHANGE_UNVERIFIED` and `SEC_TENANT_NOT_BOUND_TO_PRINCIPAL` go silent only on visible decisions and
+  name the unverified policy-like dependency in their message; a bare `None` annotation on a dependency parameter
+  is no longer read as optional authentication. Re-exports recorded under the other source-root spelling of a
+  module are followed once when a dependency name is resolved.
+- Negative controls: `tests/fixtures/regressions_v20/named_authz` (no check, returns `None`, accepts any token,
+  authenticates only, hands the principal on, never reads the principal, nested name-only, external library) and
+  `named_authz_privilege`; positive controls (real check, factory closure, class-based checker, nested decision,
+  delegated predicate, denial one call away) keep their kind. `tests/test_audit_v20_named_authz.py` (12 tests).
+- Measured with `scripts/audit_precision.py --against HEAD`: per-rule tp/fp/fn/tn identical on truth16, truth17 dev
+  and acceptance, truth18 dev and acceptance; calibration projects plataforma-citas-medicas 52 → 52 and
+  agentforge-notify 15 → 15 findings; on the clinic project two routes moved from "authorization visible" to
+  "authenticated only" (router-level authentication without a policy) and four gained a kind through a delegated
+  decision. Holdout not re-scored. Two test expectations that encoded the old assumption were changed and say why
+  (`test_audit_v17` declared-contracts fixture whose `Admin.__call__` decides nothing; `test_audit_v18` factory alias
+  `admin_authenticated() -> None: pass`); a third (`test_audit_interprocedural`, fixture `hexagonal_sessions`) now
+  expects the resource question on a route whose only protection is a router-level authentication dependency and
+  that hands a resource id to a service without any principal. Rule identifiers, fingerprints, report schema 1.7 and
+  SARIF are unchanged.
+
+### JWKS client verified over HTTPS
+
+- The generated OIDC module (`JwksSource`) now carries: TLS verification always on and extensible with a private CA
+  (`oidc_ca_bundle`), a 256 KiB cap on the key set, one fetch attempt per 30 s whatever the reason, a bounded stale
+  window (`oidc_jwks_stale_max_s`) when a refresh fails and nothing served without a usable set, symmetric-only sets
+  treated as unavailable, a configurable fetch timeout, an injectable clock, `JwksUnavailable` mapped to 503 and
+  logged without the token.
+- The generated `tests/test_jwks.py` starts an HTTPS provider on 127.0.0.1 with a certificate authority created for
+  the session and proves 17 scenarios (fetch and signature, cache, rotation, unknown `kid`, same-`kid` replacement,
+  removed key, malformed JSON, invalid and symmetric-only sets, HTTP 500 and 404, oversized body, timeout, TLS failure
+  with the system store and with another CA, outage without cache and recovery after the interval, stale window,
+  concurrent cold starts). `team-notes` passes 71 generated tests through the trust model (54 before).
+
+### Row-level security threat model
+
+- Documented in `references/design-contracts.md` section 8, `docs/guides/identity-authorization-and-rls.md` section 8
+  and `references/authz-multitenancy.md`: who sets the context, who can change it (any statement run as the
+  application role in the transaction; a bound parameter cannot), the role's privileges, SQL injection and arbitrary
+  SQL as the boundary, transactions and pooling, `FORCE` and composite keys, a compromised principal, and the future
+  options that would survive arbitrary SQL (none generated). The generated `tests/test_rls.py` demonstrates the
+  boundary and the least privilege (14 demonstrations; `tenant-projects` passes 53 generated tests as `fa_app`).
+
+### Guarantees as a contract
+
+- `guarantees.multi_tenant.rls` gains `context_set_by`, `context_trust`, `role_privileges`, `owner`; `not_claimed`
+  adds isolation against SQL injection or arbitrary SQL as the application role, OAuth2 flows beyond token
+  validation, validation against a real identity provider, protection against the code the generated tests run,
+  business rules beyond the declared policy, and authorization proven by names. The block of every example and
+  fixture contract is frozen under `tests/fixtures/design20/guarantees` and compared exactly by the tests.
+
 ## Compatibility
 
 - 59 rules, report schema 1.7, JSON/SARIF outputs, fingerprints, suppressions, declared contracts, the opt-in loop
@@ -392,9 +452,10 @@ them. Nothing cloud-native or distributed is started.
   1.1, tenant binding refusal, Alembic and foreign keys, guarantees, ruff on the generated projects when ruff or
   uvx is available), `tests/test_audit_v20.py` (12 tests: router propagation and route composition),
   `tests/test_evolve_v20.py` (26), `tests/test_evolve_v20_recovery.py` (17), `tests/test_evolve_v20_adoption.py`
-  (22), `tests/test_design_v20_security.py` (27) and the opt-in `tests/test_design_v20_postgresql.py` (9 tests,
-  `FA_DESIGN_PG=1`). Full suite: 532 tests on Python 3.13 (10 skipped: the opt-in PostgreSQL tests and ruff) and
-  3.9 (22 skipped: plus the generated suites, which need Python 3.12+).
+  (22), `tests/test_design_v20_security.py` (29), `tests/test_audit_v20_named_authz.py` (12) and the opt-in
+  `tests/test_design_v20_postgresql.py` (9 tests, `FA_DESIGN_PG=1`). Full suite: 546 tests on Python 3.13 (10
+  skipped: the opt-in PostgreSQL tests and ruff) and 3.9 (22 skipped: plus the generated suites, which need Python
+  3.12+).
 - Fixtures: `tests/fixtures/design20/specs/{valid,invalid}` (9 + 15 contracts),
   `tests/fixtures/regressions_v20/{nested_routers,route_composition}`, `tests/fixtures/adoption20/handmade_shop`.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`
@@ -416,11 +477,15 @@ them. Nothing cloud-native or distributed is started.
 
 - Only the initial migration is generated; later migrations are the author's (`alembic revision --autogenerate`
   works on the generated metadata). `uv.lock` is not generated (resolution needs the index).
-- Security: session authentication, refresh tokens, token issuance, public resources inside an authenticated API,
-  cross-tenant administration, schema or database per tenant are not generated; the OIDC provider is trusted for
-  the claims it signs; a project generated from a 1.0/1.1 contract keeps application scoping even if it declared
-  `shared_schema_rls` (moving to RLS is a new design, not an evolution); the throwaway-cluster verification uses the
-  bootstrap superuser as the migrations owner (FORCE is checked through the catalog flags and the restricted role).
+- Security: session authentication, OAuth2 flows beyond the validation of externally issued tokens, public
+  resources inside an authenticated API, cross-tenant administration, schema or database per tenant are not
+  generated; the OIDC provider is trusted for the claims it signs and the JWKS client is verified against a local
+  HTTPS provider, not a real one; row-level security protects against missing filters, not against SQL injection or
+  arbitrary SQL run as the application role (the context is a setting that role can rewrite); a project generated
+  from a 1.0/1.1 contract keeps application scoping even if it declared `shared_schema_rls` (moving to RLS is a new
+  design, not an evolution); the throwaway-cluster verification uses the bootstrap superuser as the migrations owner
+  (FORCE is checked through the catalog flags and the restricted role); the auditor counts a policy only where its
+  code shows the decision, and a decision hidden behind an unresolvable call or a library is reported as unknown.
 - Generated PostgreSQL suites other than `orders-platform` and `tenant-projects` are generated and linted but not
   executed by the plugin's tests; the opt-in verification needs local PostgreSQL binaries and uv.
 - The local executor is process hygiene, not a sandbox; generated code runs with the operator's privileges when

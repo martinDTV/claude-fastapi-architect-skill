@@ -195,7 +195,7 @@ strategy for an implemented one.
   "tool": {"name": "fastapi-architect design", "version": "2.0.0"},
   "spec": {"name", "schema", "digest", "source", "package", "modules", "entities", "persistence", "authentication", "multi_tenant", "explicit_paths", "assumed_paths", "document"},
   "recommendation": {"style", "rationale", "rejected", "assumptions", "pending", "signals", "ports_modules", "warnings", "persistence_notes", "security_notes", "testing_notes"},
-  "guarantees": {"multi_tenant": {"requested", "strategy_declared", "strategy_implemented", "principal_tenant_binding", "storage_isolation", "row_level_security", "rls": {"app_role", "context_key", "context_scope"} | null, "schema_or_database_per_tenant": false}, "authentication", "identity": {"principal", "subject_source", "roles_source", "tenant_source"}, "resource_authorization", "authorization_model", "audit_logging", "persistence": {"kind", "migrations", "create_all_used": false, "constraint_violation_on_commit", "infrastructure_failure"}, "execution", "not_claimed"},
+  "guarantees": {"multi_tenant": {"requested", "strategy_declared", "strategy_implemented", "principal_tenant_binding", "storage_isolation", "row_level_security", "rls": {"app_role", "context_key", "context_scope", "context_set_by", "context_trust", "role_privileges", "owner"} | null, "schema_or_database_per_tenant": false}, "authentication", "identity": {"principal", "subject_source", "roles_source", "tenant_source"}, "resource_authorization", "authorization_model", "audit_logging", "persistence": {"kind", "migrations", "create_all_used": false, "constraint_violation_on_commit", "infrastructure_failure"}, "execution", "not_claimed"},
   "layout": ["tree lines"], "files": ["relative paths"], "blueprint_notes": [],
   "generation": {"target", "dry_run", "written", "unchanged", "conflicts", "manifest"} | null,
   "generation_refused": "reason" | null,
@@ -255,10 +255,19 @@ being a digest of the key). `oauth2_jwt` needs `security.oidc`: `issuer` (https)
 `<issuer>/.well-known/jwks.json`), `leeway_s` (0..300), `jwks_cache_s` (30..86400) and `claims` (`subject`, `tenant`,
 `roles`; providers may namespace them as URLs). The generated `core/security.py` accepts a token only when its
 header algorithm is in the contract's list (checked before any key lookup), the signature verifies against the
-JWKS key named by `kid` (keys cached for `jwks_cache_s`, refreshed at most once per unknown key id and never more
-often than every 30 s, fetched over https only), `iss`, `aud`, `exp`, `nbf` and `iat` hold, and the required claims
-are present; the principal is built from verified claims only. A static JWKS (`<PKG>_OIDC_JWKS_JSON`) is accepted
-only when `<PKG>_ENVIRONMENT=test`; an unreachable provider is 503, never 401. The generated `tests/test_auth.py`
+JWKS key named by `kid`, `iss`, `aud`, `exp`, `nbf` and `iat` hold, and the required claims are present; the principal
+is built from verified claims only. The JWKS client (`JwksSource`): https only, certificate and hostname verification
+always on and extensible with a private CA through `oidc_ca_bundle` (never disabled), the response capped at 256 KiB,
+the key set cached for `jwks_cache_s`, one fetch attempt per 30 s whatever the reason (expiry, unknown `kid`, failure),
+the last keys served for at most `oidc_jwks_stale_max_s` when a refresh fails and nothing served without a usable set,
+a set without any asymmetric key treated as unavailable, a fetch timeout of `oidc_fetch_timeout_s`, and an injectable
+clock. A static JWKS (`<PKG>_OIDC_JWKS_JSON`) is accepted only when `<PKG>_ENVIRONMENT=test`; any provider failure is
+503 (`JwksUnavailable`, logged without the token) and never 401. The generated `tests/test_jwks.py` proves the client
+against an HTTPS provider started on 127.0.0.1 with a certificate authority created for the session: fetch and
+signature, cache, rotation after the interval, no fetch per unknown `kid`, a key replaced under the same `kid` rejected
+until expiry, a removed key rejected, malformed JSON, invalid and symmetric-only sets, HTTP errors, a slow provider,
+TLS failures with the system store and with another CA, outage without cache and recovery after the interval, stale
+service within the window only, eight concurrent cold starts fetching once. The generated `tests/test_auth.py`
 holds the negative controls: altered claims with the original signature, expired, not yet valid, wrong audience
 or issuer, HS256 with the public key as secret, `alg: none`, unknown or missing `kid`, another key under the same
 `kid`, malformed tokens, missing required claims, a malformed roles claim, a token without a usable tenant claim,
@@ -309,6 +318,27 @@ revision and regenerates `tests/test_rls.py`; a 1.0/1.1 project that declared `s
 application scoping and the plan says so (moving to RLS is a reviewed design change with new tests, never an
 evolution, and `security`/`persistence` are not evolution operations).
 
+**Threat model of the row-level security (what the mechanism does and does not stop).** *Who sets the context:*
+`get_tenant_session`, from the authenticated principal's tenant, with `set_config(..., true)` before the first
+statement of the request transaction; the request never supplies it. *Who can change it:* any statement executed on
+that connection in that transaction as the application role: the application's own code, a raw `text()` statement, or
+an injection that reaches statement level; a bound parameter cannot (the generated `tests/test_rls.py` demonstrates
+both: a `set_config` statement switches tenant, the same text as a parameter does not). *What the role may do:*
+`SELECT`, `INSERT`, `UPDATE`, `DELETE` on the tenant tables and `USAGE` on the schema; no DDL, no `TRUNCATE`, no
+`BYPASSRLS`, no `CREATEROLE`, no `alembic_version`, no `pg_authid` (demonstrated). *SQL injection:* the generated
+code only issues parameterised statements; an injection able to run statements as the application role defeats the
+tenant boundary for that session and is outside what RLS promises. *Arbitrary SQL as the role:* same limit; the
+role still cannot lift the policies, create objects or read secrets. *Transactions and pooling:* the context ends
+with commit or rollback; the service commits once at the end of the use case and issues no statement afterwards;
+SQLAlchemy resets the connection on return, `pool_pre_ping` discards dead ones, and the next checkout starts without
+context (fail closed). *FORCE and composite keys:* `FORCE` subjects the owner to the policies unless it is a superuser
+or `BYPASSRLS`, so an owner that runs data migrations needs a context or `BYPASSRLS`; composite `(tenant_id, id)`
+foreign keys stop cross-tenant references even for roles that bypass RLS. *A compromised principal:* valid
+credentials of tenant A reach only tenant A and only the operations its roles allow; roles come from the grant or
+the token, never from the request. *Not provided, documented as future architecture:* a context the application
+cannot rewrite (`SECURITY DEFINER` wrappers over a signed context token), one database role per tenant with `SET
+ROLE` at the pool boundary, a schema or database per tenant.
+
 **Unsupported or impossible configurations (rejected by the contract or refused by the generator):** `oauth2_jwt`
 without `oidc` (1.0/1.1), symmetric or unsigned algorithms, http issuer or JWKS URL, `principal_claim` with API
 keys, `api_key_registry` with OIDC, roles or ownership on a shared API key, owned entities without an ownership
@@ -318,12 +348,15 @@ without authentication, `session` authentication, multi-tenancy without a bindin
 public resources inside an authenticated API, cross-tenant administration.
 
 **Verification procedures.** `tests/test_design_v20_security.py` validates the contract rules, the generated code,
-the guarantees, the auditor on the generated projects (zero findings above `info`, every protected route with a
+the guarantees (frozen per contract under `tests/fixtures/design20/guarantees`: a change in a claim is a reviewed
+fixture edit), the auditor on the generated projects (zero findings above `info`, every protected route with a
 visible authorization kind, and two negative controls: a route stripped of its policy and principal is reported
 through `CONTRACT_MUTATION_AUTHZ_REQUIRED`, a session-level `SET` through `SEC_RLS_SET_NOT_LOCAL`), the evolution
-rules, and runs the generated suites of `team-notes` (OIDC + `principal_claim` + `roles_and_ownership`, in memory)
-and of the single-tenant owner-scoped `journal` fixture through the trust model when PyJWT and cryptography are
-importable. `tests/test_design_v20_postgresql.py` (`FA_DESIGN_PG=1`) runs the generated suite of `tenant-projects`
+rules, and runs the generated suites of `team-notes` (OIDC + `principal_claim` + `roles_and_ownership`, in memory,
+including `tests/test_jwks.py` against the local HTTPS provider) and of the single-tenant owner-scoped `journal`
+fixture through the trust model when PyJWT and cryptography are importable. `tests/test_audit_v20_named_authz.py`
+holds the auditor's negative controls for policy-like names (seven dependencies that decide nothing, six that do:
+`references/audit-engine.md`). `tests/test_design_v20_postgresql.py` (`FA_DESIGN_PG=1`) runs the generated suite of `tenant-projects`
 on a throwaway PostgreSQL 16 as the restricted role `fa_app`, checks that a BYPASSRLS role and a missing role make
 the migration refuse without leaving tables behind, and evolves the project with a new module whose table is
 protected. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.

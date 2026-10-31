@@ -54,8 +54,10 @@ pending declaration and a declared `shared_schema_rls` stays application scoping
 
 ## 3. What is generated
 
-- `core/security.py`: for OIDC, a `JwksSource` (https only, bounded cache, one refresh per unknown key id, static
-  JWKS only in the test environment), `verify_token` (algorithm allow-list checked before any key lookup, signature,
+- `core/security.py`: for OIDC, a `JwksSource` (https only with TLS verification always on, a private CA added
+  through `oidc_ca_bundle`, response capped, one fetch attempt per 30 s, a bounded stale window when a refresh fails,
+  nothing served without a usable key set, static JWKS only in the test environment; a provider failure is
+  `JwksUnavailable` and 503), `verify_token` (algorithm allow-list checked before any key lookup, signature,
   issuer, audience, `exp`/`nbf`/`iat`, required claims) and `require_bearer_token`, which builds the `Principal`
   (subject, tenant, roles) from verified claims only; for API-key grants, `require_api_key` with a constant-time
   comparison over every key. With a tenant binding, `require_tenant_member` compares the bound tenant with the path
@@ -112,6 +114,17 @@ survive commit, rollback or the next checkout of the same pooled connection; a r
 an invalid or empty context fails closed; the role cannot disable or un-force RLS, drop the policy, truncate or
 grant itself `BYPASSRLS`; 24 concurrent requests of two tenants never mix rows; an unreachable database is 503.
 
+`tests/test_rls.py` also shows the boundary: a `set_config` statement run as the application role switches the
+tenant of that transaction (the policies read a setting that role may write), while the same text sent as a bound
+parameter changes nothing; and it lists what the role cannot do (read `pg_authid` or `alembic_version`, create
+tables or policies, take ownership). Section 8 states the threat model.
+
+For OIDC projects, `tests/test_jwks.py` starts an HTTPS identity provider on 127.0.0.1 with a certificate authority
+created for the session (trusted only through `oidc_ca_bundle`) and proves the client: fetch and signature, cache,
+key rotation, no fetch per unknown `kid`, a key replaced under the same `kid`, a removed key, malformed and invalid
+documents, HTTP errors, a slow provider, TLS failures, outage and recovery, the stale window, concurrent cold starts.
+Every provider failure is 503 without a challenge; every token failure is 401 with one.
+
 The plugin runs all of this itself on a throwaway PostgreSQL 16 when asked:
 
 ```
@@ -144,9 +157,29 @@ be confused later.
 
 ## 7. Limits
 
-No session authentication, refresh tokens or token issuance; no public resources inside an authenticated API; no
-cross-tenant administration; no schema or database per tenant; the OIDC provider is trusted for the claims it signs
-(the service validates, it does not manage identities); the static JWKS used by the generated tests is refused
-outside the test environment; the throwaway-cluster verification uses the bootstrap superuser as the migrations
-owner (FORCE is verified through the catalog flags and through the restricted role, not through a non-superuser
-owner); the local executor is process hygiene, not a sandbox.
+No session authentication, no OAuth2 flows (code, PKCE, device), consent, refresh tokens or token issuance (only
+externally issued tokens are validated); no public resources inside an authenticated API; no cross-tenant
+administration; no schema or database per tenant; the OIDC provider is trusted for the claims it signs (the service
+validates, it does not manage identities) and the JWKS client is verified against a local HTTPS provider, not
+against a real one; the static JWKS used by the generated tests is refused outside the test environment; the
+throwaway-cluster verification uses the bootstrap superuser as the migrations owner (FORCE is verified through the
+catalog flags and through the restricted role, not through a non-superuser owner); the local executor is process
+hygiene, not a sandbox; the auditor counts a policy only where its code shows the decision, never by the name of a
+dependency, and says so in `authorization_named_only`.
+
+## 8. Threat model of the row-level security
+
+| Question | Answer |
+|---|---|
+| Who sets the tenant context | `get_tenant_session`, from the authenticated principal's tenant, with `set_config(..., true)` before the first statement of the request transaction; never the request |
+| Who can change it | any statement run on that connection in that transaction as the application role: application code, a raw `text()`, or an injection that reaches statement level. A bound parameter cannot (demonstrated both ways in `tests/test_rls.py`) |
+| What the application role may do | `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the tenant tables, `USAGE` on the schema. Not: DDL, `TRUNCATE`, `BYPASSRLS`, `CREATEROLE`, `alembic_version`, `pg_authid`, policies, ownership (demonstrated) |
+| SQL injection | the generated code only issues parameterised statements; an injection able to execute statements as the role defeats the tenant boundary for that session. RLS protects against missing filters and wrong ids, not against arbitrary SQL |
+| Arbitrary SQL as the role | same boundary; the role still cannot lift the policies, create objects or read secrets |
+| Transactions and pooling | the context ends with commit or rollback; the service commits once at the end of the use case; SQLAlchemy resets connections on return and `pool_pre_ping` discards dead ones; the next checkout starts without context (fail closed) |
+| `FORCE` and composite keys | `FORCE` subjects the owner to the policies unless it is a superuser or `BYPASSRLS`; composite `(tenant_id, id)` foreign keys stop cross-tenant references even for roles that bypass RLS |
+| A compromised principal | valid credentials of tenant A reach tenant A only, with the operations its roles allow; roles come from the grant or the token, never from the request |
+| Future options, not generated | a context the application cannot rewrite (`SECURITY DEFINER` wrappers over a signed context token), one database role per tenant with `SET ROLE` at the pool boundary, a schema or database per tenant |
+
+The report's `guarantees.multi_tenant.rls` block repeats these answers (`context_set_by`, `context_trust`,
+`role_privileges`, `owner`) and `not_claimed` lists the isolation against SQL injection as not provided.
