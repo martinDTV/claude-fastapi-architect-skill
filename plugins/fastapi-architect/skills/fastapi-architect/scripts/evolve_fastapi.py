@@ -103,6 +103,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--env-passthrough", action="append", default=[], metavar="NAMES")
         p.add_argument("--allow-command", action="append", default=[], metavar="NAME")
         p.add_argument("--keep-copy", action="store_true", help="keep the verification copy (its path is reported)")
+        p.add_argument("--authorize-contract", action="store_true", help="authorise a contract phase (NOT NULL after a complete backfill): a human decision, never the continuation of a backfill; needs authorization.contract in the contract and fresh evidence")
+        p.add_argument("--evidence", metavar="FILE", help="migration evidence written by `python -m <pkg>.ops.backfill verify` (overrides authorization.contract.evidence)")
         add_container_arguments(p)
     for p in (d, pr, ad, rc, sub.choices["plan"], sub.choices["apply"]):
         p.add_argument("--output", metavar="FILE", help="write the JSON report to FILE")
@@ -197,6 +199,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         test_command=args.test_command,
         baseline_contract=args.baseline_contract,
         keep_copy=bool(args.keep_copy),
+        authorize_contract=bool(getattr(args, "authorize_contract", False)),
+        evidence=getattr(args, "evidence", None),
     )
     try:
         report = run_evolution(args.contract, options)

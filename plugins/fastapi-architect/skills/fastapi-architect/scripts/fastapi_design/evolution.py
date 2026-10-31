@@ -47,19 +47,22 @@ from fastapi_common.fs import resolve_against
 
 from .adoption import ADOPTION
 from .advisor import recommend
-from .blueprint import Layout, Lineage, added_columns, build
+from .blueprint import Layout, Lineage, PhaseState, added_columns, build, delta_revision
+from .blueprint.phased import contract_revision, index_name, index_revision, operation_id, phase_descriptions
 from .discovery import ProjectModel, discover
 from .generator import MANIFEST, GenerationError, WriteError, build_manifest, safe_join
 from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
+from .migrations import backfill_params, contract_preconditions, load_evidence, validate_authorization, validate_backfill, validate_contract_fields, validate_indexes
 from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
 from .verify import run_generated_tests
 
-EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.1"
-EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1")
-REPORT_SCHEMA = "evolution_report/1.2"  # 1.2 (v2.1): verification.tests.run carries an `environment` record (additive)
+EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.2"  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization
+EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2")
+EVOLUTION_SCHEMA_12 = "fastapi-architect/evolution/1.2"
+REPORT_SCHEMA = "evolution_report/1.3"  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
-DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py")
+DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
 STATE_PLANNED = "planned"
 STATE_NOOP = "noop"
@@ -111,16 +114,17 @@ class EvolutionContract:
     preserve: List[str]
     source: Optional[str] = None
     document: Dict[str, Any] = field(default_factory=dict)
+    authorization: Dict[str, Any] = field(default_factory=dict)  # 1.2: {contract: {declared_by, evidence, max_evidence_age_hours}}
 
     @property
     def digest(self) -> str:
         return canonical_digest(self.document)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"schema": self.schema, "project_path": self.project_path, "package": self.package, "expected_spec_digest": self.expected_spec_digest, "baseline_contract": self.baseline_contract, "add_modules": [m.get("name") for m in self.add_modules], "modify_modules": [m.to_dict() for m in self.modify_modules], "invariants": list(self.invariants), "allow_modify": self.allow_modify, "preserve": list(self.preserve), "digest": self.digest}
+        return {"schema": self.schema, "project_path": self.project_path, "package": self.package, "expected_spec_digest": self.expected_spec_digest, "baseline_contract": self.baseline_contract, "add_modules": [m.get("name") for m in self.add_modules], "modify_modules": [m.to_dict() for m in self.modify_modules], "invariants": list(self.invariants), "allow_modify": self.allow_modify, "preserve": list(self.preserve), "authorization": dict(self.authorization), "digest": self.digest}
 
 
-def _validate_module_changes(raw: Any, errors: List[str]) -> List[ModuleChange]:
+def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] = None) -> List[ModuleChange]:
     out: List[ModuleChange] = []
     if raw is None:
         return out
@@ -161,16 +165,32 @@ def _validate_module_changes(raw: Any, errors: List[str]) -> List[ModuleChange]:
             for key in e:
                 if key in ("remove_fields", "rename_fields", "change_fields", "remove_operations"):
                     errors.append(f"{q}.{key}: unsupported in evolution 1.1")
+                elif key in ("add_indexes", "contract_fields"):
+                    if schema != EVOLUTION_SCHEMA_12:
+                        errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_12}")
                 elif key not in ("name", "add_fields", "add_operations") and not str(key).startswith("x-"):
                     errors.append(f"{q}.{key}: unknown property")
             if "add_fields" in e and (not isinstance(e["add_fields"], list) or not e["add_fields"]):
                 errors.append(f"{q}.add_fields: expected a non-empty list of fields")
+            elif "add_fields" in e:
+                for k, fld in enumerate(e["add_fields"]):
+                    if isinstance(fld, dict) and "backfill" in fld:
+                        if schema != EVOLUTION_SCHEMA_12:
+                            errors.append(f"{q}.add_fields[{k}].backfill: needs schema {EVOLUTION_SCHEMA_12}")
+                        else:
+                            errors.extend(validate_backfill(fld, f"{q}.add_fields[{k}]"))
+            if "add_indexes" in e and schema == EVOLUTION_SCHEMA_12:
+                e["add_indexes"], index_errors = validate_indexes(e["add_indexes"], f"{q}.add_indexes")
+                errors.extend(index_errors)
+            if "contract_fields" in e and schema == EVOLUTION_SCHEMA_12:
+                e["contract_fields"], contract_errors = validate_contract_fields(e["contract_fields"], f"{q}.contract_fields")
+                errors.extend(contract_errors)
             if "add_operations" in e:
                 ops = e["add_operations"]
                 if not isinstance(ops, list) or any(o not in OPERATIONS for o in ops):
                     errors.append(f"{q}.add_operations: expected a list of {', '.join(OPERATIONS)}")
-            if "add_fields" not in e and "add_operations" not in e:
-                errors.append(f"{q}: nothing to add (add_fields or add_operations)")
+            if not any(key in e for key in ("add_fields", "add_operations", "add_indexes", "contract_fields")):
+                errors.append(f"{q}: nothing to add (add_fields, add_operations, add_indexes or contract_fields)")
         endpoints = m.get("add_endpoints", [])
         if not isinstance(endpoints, list):
             errors.append(f"{p}.add_endpoints: expected a list")
@@ -226,7 +246,7 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
     errors: List[str] = []
     if not isinstance(document, dict):
         return None, ["top level: expected an object"]
-    known = ("schema", "project", "add_modules", "modify_modules", "invariants", "files")
+    known = ("schema", "project", "add_modules", "modify_modules", "invariants", "files", "authorization")
     for key in document:
         if key in ("security", "persistence"):
             errors.append(
@@ -241,6 +261,10 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
         errors.append(f"evolution.schema: expected one of {', '.join(repr(x) for x in EVOLUTION_SCHEMAS)}, got {schema!r}")
     if schema == "fastapi-architect/evolution/1.0" and "modify_modules" in document:
         errors.append("evolution.modify_modules: needs schema fastapi-architect/evolution/1.1")
+    if "authorization" in document and schema != EVOLUTION_SCHEMA_12:
+        errors.append(f"evolution.authorization: needs schema {EVOLUTION_SCHEMA_12}")
+    authorization, auth_errors = validate_authorization(document.get("authorization")) if schema == EVOLUTION_SCHEMA_12 else ({}, [])
+    errors.extend(auth_errors)
     project = document.get("project")
     if not isinstance(project, dict):
         errors.append("evolution.project: required object with 'path'")
@@ -269,7 +293,7 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
             errors.append(f"evolution.add_modules[{i}]: expected an object")
         elif not isinstance(m.get("name"), str) or not IDENT_RE.match(m.get("name", "")):
             errors.append(f"evolution.add_modules[{i}].name: module name must be a lowercase python identifier")
-    changes = _validate_module_changes(document.get("modify_modules"), errors)
+    changes = _validate_module_changes(document.get("modify_modules"), errors, str(schema) if isinstance(schema, str) else None)
     if not modules and not changes and not any(e.startswith("evolution.modify_modules") or e.startswith("evolution.add_modules") for e in errors):
         errors.append("evolution: nothing to do (add_modules and modify_modules are both empty)")
     invariants = document.get("invariants", list(INVARIANTS))
@@ -301,7 +325,7 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
                 preserve = list(value)
     if errors:
         return None, sorted(set(errors))
-    return EvolutionContract(schema=str(schema), project_path=str(path), package=package, expected_spec_digest=expected, baseline_contract=baseline, add_modules=modules, modify_modules=changes, invariants=list(invariants), allow_modify=allow_modify, preserve=preserve, source=source, document=json.loads(json.dumps(document))), []
+    return EvolutionContract(schema=str(schema), project_path=str(path), package=package, expected_spec_digest=expected, baseline_contract=baseline, add_modules=modules, modify_modules=changes, invariants=list(invariants), allow_modify=allow_modify, preserve=preserve, source=source, document=json.loads(json.dumps(document)), authorization=authorization), []
 
 
 def load_evolution(path: str) -> EvolutionContract:
@@ -361,6 +385,9 @@ class EvolutionPlan:
     tests_required: List[str] = field(default_factory=list)
     diffs: Dict[str, str] = field(default_factory=dict)
     transforms: List[Dict[str, Any]] = field(default_factory=list)  # adopted: structural edit evidence
+    phased_new: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: phased changes this plan declares (expand)
+    indexes_new: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: concurrent indexes this plan creates
+    contracting: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: phased changes this plan contracts
     files: Dict[str, str] = field(default_factory=dict)
     expected: Dict[str, Optional[str]] = field(default_factory=dict)
     evolved_spec: Optional[Spec] = None
@@ -374,6 +401,8 @@ class EvolutionPlan:
             what.append("add " + ", ".join(self.added_modules))
         if self.modified_modules:
             what.append("modify " + ", ".join(self.modified_modules))
+        if self.contracting:
+            what.append("contract " + ", ".join(f"{c['table']}.{c['column']}" for c in self.contracting))
         return f"evolve ({self.kind}) {'; '.join(what)} [contract {self.contract.digest[:12]}]"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -400,6 +429,7 @@ class EvolutionPlan:
             "tests_required": list(self.tests_required),
             "diffs": dict(self.diffs),
             "transforms": list(self.transforms),
+            "phased": {"new": list(self.phased_new), "indexes": list(self.indexes_new), "contracting": list(self.contracting)},
         }
 
 
@@ -440,8 +470,10 @@ def _module_files(layout: Layout, pkg: str, module: str) -> List[str]:
     return out
 
 
-def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[ModuleChange], pg: bool, plan: "EvolutionPlan", block) -> Dict[str, Any]:
-    """Merge modify_modules into the document; classify every change; block the unsafe ones."""
+def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[ModuleChange], pg: bool, plan: "EvolutionPlan", block, phased_ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Merge modify_modules into the document; classify every change; block the unsafe ones. ``phased_ctx`` (v2.1)
+    carries the manifest's phased changes and indexes and collects the ones this plan declares."""
+    phased_ctx = phased_ctx if phased_ctx is not None else {"manifest_phased": [], "manifest_indexes": [], "head_before": None, "new": [], "indexes": [], "contracting": []}
     modules = {m.get("name"): m for m in doc.get("functional", {}).get("modules", []) if isinstance(m, dict)}
     existing_tables = {e.plural for m in baseline.modules for e in m.entities}
     for change in changes:
@@ -476,6 +508,29 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 if f["name"] in existing_fields:
                     plan.changes.append({"kind": "add_field", "target": label, "classification": COMPATIBLE, "detail": "already present; no-op"})
                     continue
+                backfill = f.get("backfill") if isinstance(f.get("backfill"), dict) else None
+                if backfill is not None:
+                    if not pg or table not in existing_tables:
+                        block("backfill_needs_existing_postgresql_table", f"{label}: a backfill applies to an existing table of a PostgreSQL project; in memory or on a new table there is nothing to fill")
+                        continue
+                    strategy = str(backfill.get("strategy"))
+                    params = backfill_params(backfill)
+                    if strategy == "copy_column":
+                        source = next((sf for sf in ent.get("fields", []) if isinstance(sf, dict) and sf.get("name") == params.get("source")), None)
+                        if source is None:
+                            block("backfill_source_exists", f"{label}: copy_column source {params.get('source')!r} is not a field of {ech['name']}")
+                            continue
+                        if source.get("type") != f.get("type"):
+                            block("backfill_source_type", f"{label}: copy_column source {params.get('source')!r} has type {source.get('type')!r}, the new field {f.get('type')!r}")
+                            continue
+                    op_id = operation_id(table, f["name"], strategy, params, phased_ctx.get("head_before") or "")
+                    if any(p.get("op_id") == op_id for p in phased_ctx["manifest_phased"]):
+                        plan.changes.append({"kind": "add_field", "target": label, "classification": COMPATIBLE, "detail": f"phased change {op_id} already declared; no-op"})
+                        continue
+                    ent.setdefault("fields", []).append({k: v for k, v in f.items() if k != "backfill"})
+                    phased_ctx["new"].append({"op_id": op_id, "module": change.name, "entity": ech["name"], "table": table, "column": f["name"], "field_type": f.get("type"), "required": bool(f.get("required", True)), "strategy": strategy, "params": params, "state_declared": "expand", "declared_on_head": phased_ctx.get("head_before"), "expand_revision": None, "index_revision": None, "contract_revision": None, "application_version": None})
+                    plan.changes.append({"kind": "add_field", "target": label, "classification": COMPATIBLE, "detail": f"phased (operation {op_id}): added nullable without a server default (compatible with the running application); existing rows are filled by the generated backfill ({strategy}); NOT NULL only in a later, authorised contract phase"})
+                    continue
                 required = f.get("required", True)
                 has_default = "default" in f and f.get("default") is not None
                 if required and f.get("references") and pg and table in existing_tables:
@@ -495,6 +550,38 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 if f.get("references"):
                     detail += "; nullable foreign key to an existing table"
                 plan.changes.append({"kind": "add_field", "target": label, "classification": COMPATIBLE, "detail": detail})
+            names_now = {ff.get("name") for ff in ent.get("fields", []) if isinstance(ff, dict)}
+            for spec_index in ech.get("add_indexes", []) if isinstance(ech.get("add_indexes"), list) else []:
+                columns = list(spec_index.get("columns", []))
+                label = f"{change.name}.{ech['name']}:index({','.join(columns)})"
+                if not pg or table not in existing_tables:
+                    block("index_needs_existing_postgresql_table", f"{label}: concurrent indexes apply to existing tables of PostgreSQL projects (a new table gets its indexes in the revision that creates it)")
+                    continue
+                missing = [c for c in columns if c not in names_now]
+                if missing:
+                    block("index_columns_exist", f"{label}: unknown column(s) {missing}")
+                    continue
+                name = index_name(table, columns)
+                if any(i.get("name") == name for i in phased_ctx["manifest_indexes"] + phased_ctx["indexes"]):
+                    plan.changes.append({"kind": "add_index", "target": label, "classification": COMPATIBLE, "detail": f"index {name} already declared; no-op"})
+                    continue
+                phased_ctx["indexes"].append({"name": name, "table": table, "columns": columns, "unique": bool(spec_index.get("unique", False))})
+                plan.changes.append({"kind": "add_index", "target": label, "classification": COMPATIBLE, "detail": f"CREATE INDEX CONCURRENTLY {name} in its own non-transactional revision: writes continue; an invalid leftover is dropped and rebuilt, another definition under the same name is refused"})
+            for item in ech.get("contract_fields", []) if isinstance(ech.get("contract_fields"), list) else []:
+                label = f"{change.name}.{ech['name']}.{item['name']}:contract"
+                pending = next((p for p in phased_ctx["manifest_phased"] if p.get("op_id") == item["operation"]), None)
+                if pending is None or pending.get("table") != table or pending.get("column") != item["name"]:
+                    block("contract_operation_known", f"{label}: operation {item['operation']} is not a phased change of {table}.{item['name']} recorded in the manifest")
+                    continue
+                if pending.get("state_declared") != "expand":
+                    block("contract_operation_pending", f"{label}: operation {item['operation']} is already declared {pending.get('state_declared')!r}")
+                    continue
+                field_doc = next((ff for ff in ent.get("fields", []) if isinstance(ff, dict) and ff.get("name") == item["name"]), None)
+                if field_doc is None or field_doc.get("required", True) is not True:
+                    block("contract_field_required", f"{label}: the field must be declared required (its desired state) to become NOT NULL")
+                    continue
+                phased_ctx["contracting"].append(dict(pending))
+                plan.changes.append({"kind": "contract_not_null", "target": label, "classification": POTENTIALLY_INCOMPATIBLE, "detail": f"NOT NULL transition of operation {item['operation']}: needs the backfill complete, zero pending rows, the application version that writes the column, fresh evidence and explicit authorization; online (CHECK NOT VALID, VALIDATE, SET NOT NULL, DROP CONSTRAINT); reversible (DROP NOT NULL)"})
             current_ops = ent.get("operations")
             current_set = set(current_ops) if isinstance(current_ops, list) else set(OPERATIONS)
             for op in ech.get("add_operations", []):
@@ -509,7 +596,7 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
     return doc
 
 
-def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION) -> EvolutionPlan:
+def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION, authorize_contract: bool = False, evidence_path: Optional[str] = None) -> EvolutionPlan:
     """Compute the plan without writing anything."""
     raw = _resolve_project(contract)
     plan = EvolutionPlan(state=STATE_PLANNED, project=str(raw), contract=contract)
@@ -611,11 +698,31 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     evolved_doc = json.loads(json.dumps(baseline.document))
     evolved_doc.setdefault("functional", {}).setdefault("modules", [])
     evolved_doc["functional"]["modules"] = list(evolved_doc["functional"]["modules"]) + list(new_modules)  # new modules first: changes may depend on them
-    evolved_doc = _apply_module_changes(baseline, evolved_doc, contract.modify_modules, pg, plan, block)
+    manifest_chain = [m for m in (model.manifest.get("migrations") or []) if isinstance(m, dict)]
+    head_before = str(manifest_chain[-1].get("revision")) if manifest_chain else None
+    phased_ctx: Dict[str, Any] = {"manifest_phased": [dict(x) for x in (model.manifest.get("phased_changes") or []) if isinstance(x, dict)], "manifest_indexes": [dict(x) for x in (model.manifest.get("concurrent_indexes") or []) if isinstance(x, dict)], "head_before": head_before, "new": [], "indexes": [], "contracting": []}
+    evolved_doc = _apply_module_changes(baseline, evolved_doc, contract.modify_modules, pg, plan, block, phased_ctx)
+    plan.phased_new, plan.indexes_new, plan.contracting = phased_ctx["new"], phased_ctx["indexes"], phased_ctx["contracting"]
     if plan.blockers:
         plan.state = STATE_BLOCKED
         return plan
-    if canonical_digest(evolved_doc) == baseline.digest:
+    if plan.contracting:
+        auth = contract.authorization.get("contract") or {}
+        evidence_file = evidence_path or auth.get("evidence")
+        evidence, evidence_errors = (None, ["no evidence path given (authorization.contract.evidence or --evidence)"])
+        if evidence_file:
+            evidence, evidence_errors = load_evidence(str(resolve_against(str(evidence_file), contract.source)))
+        if evidence is None:
+            block("contract_evidence_valid", "; ".join(evidence_errors))
+        for change in plan.contracting:
+            for name, ok, detail in contract_preconditions(change, evidence, head_before=head_before, authorized=authorize_contract, declared_by=auth.get("declared_by"), max_age_hours=float(auth.get("max_evidence_age_hours") or 24.0), indexes=phased_ctx["manifest_indexes"]):
+                pre.append(Precondition(name, ok, detail))
+                if not ok:
+                    block(name, f"{change['table']}.{change['column']}: {detail}")
+        if plan.blockers:
+            plan.state = STATE_BLOCKED
+            return plan
+    if canonical_digest(evolved_doc) == baseline.digest and not (plan.indexes_new or plan.contracting):
         plan.state = STATE_NOOP
         plan.evolved_spec_digest = baseline.digest
         pre.append(Precondition("already_applied", True, "the contract adds nothing the project does not already have; nothing to do"))
@@ -681,11 +788,46 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         return plan
 
     baseline_rec = recommend(baseline)
-    old_files = build(baseline, baseline_rec).files
-    new_bp = build(evolved, rec, lineage)
+    baseline_phases = PhaseState(pending=[x for x in phased_ctx["manifest_phased"] if x.get("state_declared") == "expand"], all_phased=list(phased_ctx["manifest_phased"]), all_indexes=list(phased_ctx["manifest_indexes"]), head=head_before)
+    old_files = build(baseline, baseline_rec, phases=baseline_phases).files
+    phases: Optional[PhaseState] = None
+    expand_rev = index_rev = contract_rev = None
+    if pg and lineage is not None:
+        if (plan.phased_new or plan.indexes_new or plan.contracting) and not evolved.persistence["kind"] == "postgresql":
+            block("phased_needs_postgresql", "phased changes need PostgreSQL persistence")
+        head = lineage.head
+        tables_now = set(lineage.tables)
+        if any(e.plural not in tables_now for m in evolved.modules for e in m.entities) or added_columns(evolved, lineage):
+            expand_rev = delta_revision(lineage, evolved)
+            head = expand_rev
+        if plan.indexes_new:
+            index_rev = index_revision(head, plan.indexes_new)
+            head = index_rev
+        if plan.contracting:
+            contract_rev = contract_revision(head, [str(c["op_id"]) for c in plan.contracting])
+            head = contract_rev
+        for op in plan.phased_new:
+            op.update(expand_revision=expand_rev, index_revision=index_rev, application_version=evolved.digest)
+        contracting_ids = {str(c["op_id"]) for c in plan.contracting}
+        all_phased: List[Dict[str, Any]] = []
+        for x in phased_ctx["manifest_phased"]:
+            entry = dict(x)
+            if entry.get("op_id") in contracting_ids:
+                entry.update(state_declared="contract", contract_revision=contract_rev)
+            all_phased.append(entry)
+        all_phased.extend(plan.phased_new)
+        plan.contracting = [x for x in all_phased if x.get("op_id") in contracting_ids]
+        all_indexes = list(phased_ctx["manifest_indexes"]) + [dict(i, revision=index_rev) for i in plan.indexes_new]
+        phases = PhaseState(pending=[x for x in all_phased if x.get("state_declared") == "expand"], all_phased=all_phased, all_indexes=all_indexes, new_phased=list(plan.phased_new), new_indexes=list(plan.indexes_new), contracting=list(plan.contracting), head=head_before)
+    elif plan.phased_new or plan.indexes_new or plan.contracting:
+        block("phased_needs_migration_lineage", "phased changes, concurrent indexes and contract phases need a PostgreSQL project with a known migration chain")
+    if plan.blockers:
+        plan.state = STATE_BLOCKED
+        return plan
+    new_bp = build(evolved, rec, lineage, phases)
     new_files = dict(new_bp.files)
     history = list(model.manifest.get("history") or [{"operation": "generate", "spec_digest": baseline.digest, "modules": existing}])
-    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules})
+    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting]}})
     manifest = build_manifest(evolved, new_bp, tool_version, history=history)
     if lineage:
         for rel in lineage.files:
@@ -764,6 +906,15 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         delta = [m for m in new_bp.migrations if m["revision"] not in {r["revision"] for r in lineage.revisions}]
         columns = added_columns(evolved, lineage)
         plan.migration = {"required": bool(delta), "head_before": lineage.head, "new_revision": delta[0]["revision"] if delta else None, "file": delta[0]["file"] if delta else None, "tables": delta[0]["tables"] if delta else [], "columns": [f"{t}.{f.name}" + (" (NOT NULL, server default)" if f.required else " (nullable)") for t, f, _r in columns], "kind": "additive (create_table, add_column nullable or with server default, foreign keys, indexes); no drop, no alter, no data migration" if delta else "none", "historical_files_kept": list(lineage.files)}
+        plan.migration.update({
+            "head_after": delta[-1]["revision"] if delta else lineage.head,
+            "revisions": [{"revision": x["revision"], "file": x["file"], "phase": x.get("phase", "additive"), "transactional": x.get("transactional", True), "reversible": x.get("reversible", True)} for x in delta],
+            "phases": phase_descriptions(evolved, plan.phased_new, plan.indexes_new, plan.contracting, lineage.head, expand_rev, index_rev, contract_rev),
+            "backfills": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "strategy": op["strategy"], "params": op["params"], "application_version": op["application_version"], "run": f"python -m {evolved.package}.ops.backfill run {op['op_id']}", "verify": f"python -m {evolved.package}.ops.backfill verify --application-version {op['application_version']} --output evidence.json", "state": "declared: expand; applied and verified states are read from the database, never from the repository"} for op in plan.phased_new],
+            "contract": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "revision": contract_rev, "reversible": True} for op in plan.contracting],
+        })
+        if plan.phased_new or plan.indexes_new or plan.contracting:
+            plan.migration["kind"] = "phased: " + ", ".join(p["phase"] for p in plan.migration["phases"]) + " (expand adds nullable columns; the backfill runs out of band; the contract phase is a separate, authorised evolution)"
     else:
         plan.migration = {"required": False, "kind": "not applicable (in-memory persistence)" if not pg else "unknown"}
     if plan.style_warning:
@@ -784,11 +935,19 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
             plan.risks.append(f"{c['target']}: existing rows receive the server default on upgrade; downgrade drops the column and its data")
         elif c["kind"] == "add_field" and "nullable" in c["detail"]:
             plan.risks.append(f"{c['target']}: existing rows read NULL; downgrade drops the column and its data")
+    for op in plan.phased_new:
+        plan.risks.append(f"{op['table']}.{op['column']} (operation {op['op_id']}): state is declared, not applied: run `alembic upgrade head`, then `python -m {evolved.package}.ops.backfill run {op['op_id']}` as the owner, then `verify --application-version {op['application_version']}`; until the contract phase the column is nullable and the read schema optional; the backfill never overwrites a value and reports `complete` only after counting zero pending rows")
+        if evolved.rls:
+            plan.risks.append(f"{op['table']}.{op['column']}: the table has row-level security; the runner refuses to run as a role that does not bypass RLS (it would silently see no rows): use the owner URL")
+    for i in plan.indexes_new:
+        plan.risks.append(f"index {i['name']}: CREATE INDEX CONCURRENTLY in its own revision (SHARE UPDATE EXCLUSIVE: writes continue; two scans; waits for older transactions); an interruption leaves an invalid index that a re-run drops and rebuilds; the revision fails rather than end invalid")
+    for op in plan.contracting:
+        plan.risks.append(f"{op['table']}.{op['column']}: contract phase: the revision re-checks pending rows and the progress state on the live database and fails rather than contract prematurely; ADD CONSTRAINT NOT VALID and SET NOT NULL take brief ACCESS EXCLUSIVE locks, VALIDATE takes SHARE UPDATE EXCLUSIVE; an application version that still inserts NULLs makes the revision fail: it must be gone (declared by the operator in the evidence)")
     if plan.preserved_manual:
         plan.risks.append("manual changes are preserved in: " + ", ".join(plan.preserved_manual))
     points = [rel for rel in plan.modify if rel != MANIFEST]
     plan.risks.append("files regenerated from the contract: " + ", ".join(points) if points else "no file regenerated (only the manifest is updated)")
-    plan.tests_required = [f"tests/test_{m}.py" for m in plan.added_modules + plan.modified_modules] + (["tests/test_migrations.py"] if pg else []) + ["the existing suite (every module), through the trust model"]
+    plan.tests_required = [f"tests/test_{m}.py" for m in plan.added_modules + plan.modified_modules] + (["tests/test_migrations.py"] if pg else []) + (["tests/test_backfill.py"] if phases is not None and (phases.all_phased or phases.new_phased) else []) + ["the existing suite (every module), through the trust model"]
     if plan.blockers:
         plan.state = STATE_BLOCKED
     return plan
@@ -924,6 +1083,8 @@ class EvolveOptions:
     baseline_contract: Optional[str] = None
     keep_copy: bool = False
     faults: Optional[FaultInjector] = None  # tests: interrupt the publication of the real project
+    authorize_contract: bool = False  # v2.1: the explicit human authorization a contract phase needs (--authorize-contract)
+    evidence: Optional[str] = None  # v2.1: migration evidence file (overrides authorization.contract.evidence)
 
 
 def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None, *, durable: bool = True) -> Operation:
@@ -1005,7 +1166,7 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
 def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None) -> Dict[str, Any]:
     options = options or EvolveOptions()
     contract = contract_or_path if isinstance(contract_or_path, EvolutionContract) else load_evolution(contract_or_path)
-    plan = plan_evolution(contract, baseline_contract=options.baseline_contract)
+    plan = plan_evolution(contract, baseline_contract=options.baseline_contract, authorize_contract=options.authorize_contract, evidence_path=options.evidence)
     report: Dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "tool": {"name": "fastapi-architect evolve", "version": TOOL_VERSION},
@@ -1014,6 +1175,7 @@ def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None
         "verification": None,
         "applied": {"written": [], "state": "not_applied"},
         "authorization": options.authorization.to_dict(),
+        "contract_authorization": {"authorize_contract": bool(options.authorize_contract), "evidence": options.evidence or (contract.authorization.get("contract") or {}).get("evidence"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by")},
         "state": plan.state,
         "note": "preview only unless --apply; with --apply the plan is first applied to a copy and verified, and the project is written only when that verification did not reject it, through the recoverable writer (journal under .fastapi-architect/ops); verified requires executed tests, audit_clean means no test was executed",
     }
