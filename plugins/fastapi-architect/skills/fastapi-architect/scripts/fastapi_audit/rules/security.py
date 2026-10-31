@@ -12,7 +12,7 @@ import ast
 import re
 from typing import List, Optional, Set, Tuple
 
-from ..contracts import RouteContract, build_contracts, decorator_authz, names_in, policy_evidence_in, policy_records, route_public, router_dependency_targets, tenant_param_set
+from ..contracts import TENANT_PARAMS, RouteContract, build_contracts, decorator_policy, names_in, policy_evidence_in, policy_records, route_public, router_dependency_targets, tenant_param_set
 from ..facts import AUTH_RE
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, annotation_to_dotted, dotted_name
@@ -21,7 +21,6 @@ from . import FileContext
 
 CATEGORY = "security"
 
-TENANT_PARAMS = frozenset({"tenant_id", "org_id", "organization_id", "workspace_id", "company_id"})
 PUBLIC_PATH_RE = re.compile(
     r"^/?(|health|healthz|ready|readyz|live|livez|metrics|ping|version|docs|openapi\.json|redoc|status)/?$"
 )
@@ -451,8 +450,11 @@ def _privilege_change(ctx: FileContext, func: FunctionInfo, out: List[Finding]) 
             return
         if ADMIN_RE.search(label):
             named_only.append(label)
-    if decorator_authz(func):
-        return  # @requires("admin") and similar decorators name the policy
+    dec, dec_evidence, dec_named = decorator_policy(ctx, func, _dependency_record, _dependency_chain)
+    if dec and dec_evidence:
+        return  # @requires("admin") resolved to a framework decorator or to project code that shows the decision
+    if dec_named:
+        named_only.append(dec)
     for node in func.scope_nodes():  # an explicit check in the body: if not user.is_admin / if "admin" not in user.roles
         if isinstance(node, ast.If) and ADMIN_RE.search(ast.unparse(node.test) if hasattr(ast, "unparse") else ""):
             return

@@ -305,6 +305,21 @@ def policy_evidence_in(records, graph=None) -> List[str]:
     return out
 
 
+def _policy_call_verified(ctx, graph, node: ast.Call, callee_parts: List[str], dependency_record, dependency_chain) -> Optional[str]:
+    """The first evidence line of the project function a policy-like call resolves to, or None."""
+    if graph is None:
+        return None
+    status, key = graph.site_target(ctx.relpath, node.lineno, node.col_offset)
+    if status != "project" or not key:
+        return None
+    rec = graph.functions.get(key)
+    if rec is None:
+        return None
+    records = policy_records(ctx, key, None, dependency_record, dependency_chain) or [rec]
+    evidence = policy_evidence_in(records, graph)
+    return evidence[0] if evidence else None
+
+
 def path_params(path: Optional[str]) -> List[str]:
     return re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::[^}]*)?\}", path or "")
 
@@ -314,7 +329,8 @@ def names_in(node: ast.AST) -> Set[str]:
 
 
 def decorator_authz(func: FunctionInfo) -> Optional[str]:
-    """``@requires("admin")``-style decorators: the decorator name and its arguments name a policy."""
+    """``@requires("admin")``-style decorators: the decorator name and its arguments name a policy (a name only; see
+    ``decorator_policy`` for the evidence-bearing version used by the contracts and the rules)."""
     for dec in getattr(func.node, "decorator_list", []):
         target = dec.func if isinstance(dec, ast.Call) else dec
         parts = dotted_name(target)
@@ -326,6 +342,42 @@ def decorator_authz(func: FunctionInfo) -> Optional[str]:
         if DECORATOR_AUTHZ_RE.search(parts[-1]) or (isinstance(dec, ast.Call) and ROLE_RE.search(text)):
             return text
     return None
+
+
+# decorators whose authorization semantics are documented by the framework that ships them: recognised by their
+# resolved import origin, never by a bare name (``from starlette.authentication import requires`` raises 403 or
+# redirects when the request's auth scopes lack the required ones)
+KNOWN_AUTHZ_DECORATORS = frozenset({"starlette.authentication.requires"})
+
+
+def decorator_policy(ctx, func: FunctionInfo, dependency_record, dependency_chain) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """``(decorator text, evidence, named_only reason)`` for the first policy-like decorator of a route (v2.0 acceptance):
+    the kind ``decorator`` is recorded only with evidence, which is either the decorator's resolved origin being a known
+    framework authorization decorator, or a privilege decision visible in the project function it resolves to (its
+    closures included). A policy-like name that resolves to code without a decision, or to no project code at all,
+    is a named-only signal."""
+    text = decorator_authz(func)
+    if text is None:
+        return None, None, None
+    graph = getattr(ctx.facts, "callgraph", None) if ctx.facts is not None else None
+    for dec, dotted in zip(getattr(func.node, "decorator_list", []), func.decorators):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        parts = dotted_name(target) or []
+        if not parts or parts[-1] in {"get", "post", "put", "patch", "delete", "head", "options", "api_route"}:
+            continue
+        this_text = ast.unparse(dec) if hasattr(ast, "unparse") else ".".join(parts)
+        if this_text != text:
+            continue
+        canonical = (ctx.facts.canonical(dotted) if (dotted and ctx.facts is not None) else dotted) or dotted
+        if canonical in KNOWN_AUTHZ_DECORATORS or dotted in KNOWN_AUTHZ_DECORATORS:
+            return text, f"{canonical or dotted}: framework decorator with documented scope enforcement", None
+        records = policy_records(ctx, dotted, parts, dependency_record, dependency_chain) if dotted else []
+        evidence = policy_evidence_in(records, graph)
+        if evidence:
+            return text, evidence[0], None
+        why = f"no decision is visible in {' -> '.join(r.name for r in records)}" if records else "its implementation is not in the project"
+        return text, None, f"decorator {text}: named like a policy, {why}"
+    return text, None, f"decorator {text}: named like a policy, its implementation is not in the project"
 
 
 # --------------------------------------------------------------------------- #
@@ -461,10 +513,12 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
                 c.authorization.extend(kinds)
                 c.authorization.append("router_dependencies")
             c.authorization_evidence.append(dep_text)
-        dec = decorator_authz(func)
-        if dec:
+        dec, dec_evidence, dec_named = decorator_policy(ctx, func, dependency_record, dependency_chain)
+        if dec and dec_evidence:
             c.authorization.append("decorator")
-            c.authorization_evidence.append(dec)
+            c.authorization_evidence.append(f"{dec}: {dec_evidence}")
+        elif dec_named:
+            c.named_only.append(dec_named)
 
         # body: principal flowing with the resource, authorization-service calls, tenant comparisons
         resource_set = set(c.resource_params)
@@ -485,9 +539,11 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             with_principal = bool(arg_names & principal)
             with_resource = bool(arg_names & resource_set)
             with_tenant = bool(arg_names & tenant_set)
-            if callee_name and AUTHZ_CALL_RE.search(callee_name) and with_principal and callee_name not in {"require", "requires"}:
+            if callee_name and AUTHZ_CALL_RE.search(callee_name) and with_principal and callee_name not in {"require", "requires"} and _policy_call_verified(ctx, graph, node, callee_parts, dependency_record, dependency_chain):
+                # v2.0 acceptance: a call named like a policy counts only when the project function it resolves to shows a
+                # privilege decision (itself or one call deep); an unresolvable or decision-less callee is a name
                 c.authorization.append("authorization_call")
-                c.authorization_evidence.append(f"line {node.lineno}: {'.'.join(callee_parts)}()")
+                c.authorization_evidence.append(f"line {node.lineno}: {'.'.join(callee_parts)}(): {_policy_call_verified(ctx, graph, node, callee_parts, dependency_record, dependency_chain)}")
             elif with_principal and (with_resource or with_tenant) and callee_parts:
                 status, key = graph.site_target(ctx.relpath, node.lineno, node.col_offset) if graph is not None else ("dynamic", None)
                 if status == "project" or callee_name not in {"print", "format", "str", "dict"}:
