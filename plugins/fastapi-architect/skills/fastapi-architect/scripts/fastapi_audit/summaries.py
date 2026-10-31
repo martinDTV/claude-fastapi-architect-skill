@@ -16,6 +16,7 @@ attribute receivers each method touches. Nothing here executes inspected code.
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 
@@ -161,6 +162,10 @@ class FunctionRecord:
     owner_class: Optional[str] = None  # class whose `self` the function reads: the method's class, also for closures inside it
     returns_none: bool = False  # annotated `-> None`: a dependency that yields no value (a token check, a side effect)
     writes_request_state: bool = False  # assigns request.state.<x> / scope["state"]: an ambient principal may exist
+    # v2.0 security hardening: lines where the function visibly decides on privileges (a condition or predicate over a
+    # role/permission/scope-like attribute or call, or a Security(scopes=...) parameter). A name alone never counts:
+    # ``def require_admin(): pass`` has no evidence, ``if user.role != "admin": raise`` has.
+    policy_evidence: List[str] = field(default_factory=list)
 
     def kind_of(self, name: str) -> Tuple[Optional[str], Optional[str]]:
         """(kind, evidence) for a parameter/local name: declared > dependency > inferred."""
@@ -533,6 +538,91 @@ def _lambda_target(node: ast.Lambda, func: FunctionInfo, module_defs, facts, pro
     return None
 
 
+POLICY_ATTR_RE = re.compile(
+    r"^(role|roles|perm|perms|permission|permissions|scope|scopes|privilege|privileges|groups|grants|claims|acl|"
+    r"is_admin|is_superuser|is_staff|is_owner|is_moderator|is_manager|superuser|admin_roles|allowed_roles|required_roles)$",
+    re.I,
+)
+BOOL_WRAPPERS = frozenset({"bool", "any", "all", "len", "set", "frozenset"})
+FORBIDDEN_RAISE_RE = re.compile(r"Permission|Forbidden|Denied|Unauthori[sz]ed|NotAuthori[sz]ed|NotAllowed|AccessDenied|InsufficientScope|StepUp", re.I)
+FORBIDDEN_STATUS_RE = re.compile(r"\b403\b|HTTP_403|FORBIDDEN", re.I)
+POLICY_CALL_RE = re.compile(
+    r"^(has_(role|perm|permission|scope|privilege|access|any_role|all_roles)|can_[a-z_]+|can$|may_[a-z_]+|allows?(_[a-z_]+)?$|allowed(_[a-z_]+)?$|"
+    r"is_(admin|owner|superuser|staff|member|moderator|allowed|authorized|authorised)|check_(role|roles|perm|permission|permissions|scope|scopes|access|policy|authorization|authorisation)|"
+    r"authori[sz]e[a-z_]*|permitted|enforce[a-z_]*|in_role|in_group|has_authority)",
+    re.I,
+)
+
+
+def _policy_names(expr: ast.AST) -> Optional[str]:
+    """The privilege-like attribute, key, bare name or predicate read by ``expr``, or None."""
+    for sub in ast.walk(expr):
+        if isinstance(sub, ast.Attribute) and POLICY_ATTR_RE.match(sub.attr):
+            return sub.attr
+        if isinstance(sub, ast.Subscript) and isinstance(sub.slice, ast.Constant) and isinstance(sub.slice.value, str) and POLICY_ATTR_RE.match(sub.slice.value):
+            return sub.slice.value
+        if isinstance(sub, ast.Call):
+            parts = dotted_name(sub.func) or []
+            if parts and POLICY_CALL_RE.search(parts[-1]):
+                return parts[-1] + "()"
+        if isinstance(sub, ast.Name) and POLICY_ATTR_RE.match(sub.id):
+            return sub.id
+    return None
+
+
+def _forbidden_raise(node: ast.Raise) -> Optional[str]:
+    """The exception a ``raise`` denies with, when it is a permission/forbidden kind or an HTTP 403."""
+    exc = node.exc
+    if exc is None:
+        return None
+    target = exc.func if isinstance(exc, ast.Call) else exc
+    parts = dotted_name(target) or []
+    name = parts[-1] if parts else ""
+    if name and FORBIDDEN_RAISE_RE.search(name):
+        return name
+    if isinstance(exc, ast.Call):
+        text = ast.unparse(exc) if hasattr(ast, "unparse") else ""
+        if name.endswith("HTTPException") and FORBIDDEN_STATUS_RE.search(text):
+            return f"{name}(403)"
+    return None
+
+
+def _policy_evidence(func: FunctionInfo) -> List[str]:
+    """Structural signs that ``func`` decides on a principal's privileges, as evidence lines. Consulted for dependency
+    functions by the route contracts: a dependency named ``require_admin`` whose body shows none of this is a name,
+    not a policy. Nested closures and ``__call__`` methods are separate records with their own evidence."""
+    out: List[str] = []
+    for arg, default in func.param_defaults().items():
+        if isinstance(default, ast.Call):
+            parts = dotted_name(default.func) or []
+            if parts and parts[-1] == "Security" and any(k.arg == "scopes" for k in default.keywords):
+                out.append(f"line {default.lineno}: Security(scopes=...) on parameter {arg}")
+    for node in func.scope_nodes():
+        if isinstance(node, (ast.If, ast.IfExp, ast.Assert)):
+            hit = _policy_names(node.test)
+            kind = "condition"
+        elif isinstance(node, ast.Return) and isinstance(node.value, (ast.Compare, ast.BoolOp, ast.UnaryOp)):
+            hit = _policy_names(node.value)  # `return user.role == "admin"`, `return bool(principal.roles & required)`
+            kind = "predicate"
+        elif isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+            parts = dotted_name(node.value.func) or []  # `return has_role(user, "admin")`; never `return User(role=user.role)`
+            if parts and POLICY_CALL_RE.search(parts[-1]):
+                hit = parts[-1] + "()"
+            elif parts and parts[-1] in BOOL_WRAPPERS:  # `return bool(user.scopes & required)`, `return any(s in user.roles ...)`
+                hit = _policy_names(node.value)
+            else:
+                hit = None
+            kind = "predicate"
+        elif isinstance(node, ast.Raise):
+            hit = _forbidden_raise(node)  # `raise PermissionDeniedError(...)`, `raise HTTPException(403)`: a denial is a decision
+            kind = "denial"
+        else:
+            continue
+        if hit:
+            out.append(f"line {node.lineno}: {kind} on {hit}")
+    return out
+
+
 def build_summaries(
     rel: str,
     module: str,
@@ -763,6 +853,7 @@ def build_summaries(
                     rec.writes_request_state = True
                 if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Subscript) and isinstance(target.value.slice, ast.Constant) and target.value.slice.value == "state":
                     rec.writes_request_state = True
+        rec.policy_evidence = _policy_evidence(func)
         if rec.returns_class is None:
             for node in func.scope_nodes():
                 if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):

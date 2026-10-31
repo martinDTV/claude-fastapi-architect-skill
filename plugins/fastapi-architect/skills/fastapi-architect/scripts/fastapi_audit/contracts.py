@@ -90,6 +90,7 @@ class RouteContract:
     principal_kind: str = "unknown"  # v1.8 review: value | none | unknown (see principal_kind_of)
     effective_paths: List[str] = field(default_factory=list)  # v2.0: paths composed through include_router from the application(s)
     path_resolution: str = "unmounted"  # v2.0: resolved | ambiguous (several mounts) | unresolved (a prefix is not a constant) | unmounted
+    named_only: List[str] = field(default_factory=list)  # v2.0 hardening: dependencies named like a policy whose check is not visible (never an authorization kind)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -113,6 +114,7 @@ class RouteContract:
             "principal_kind": self.principal_kind,  # schema 1.6 (review)
             "effective_paths": list(self.effective_paths),  # v2.0
             "path_resolution": self.path_resolution,  # v2.0
+            "authorization_named_only": list(self.named_only),  # v2.0 hardening
         }
 
 
@@ -217,6 +219,92 @@ def router_dependency_text(ctx, func: FunctionInfo) -> str:
     return " ".join(texts)
 
 
+def _depends_target(call: ast.Call, resolve) -> Optional[Tuple[Optional[str], Optional[List[str]], str]]:
+    """``(dotted, raw parts, label)`` of a ``Depends(x)`` / ``Security(x, scopes=...)`` call, or None."""
+    parts = dotted_name(call.func)
+    if not parts or parts[-1] not in {"Depends", "Security"} or not call.args:
+        return None
+    arg0 = call.args[0]
+    inner = dotted_name(arg0)
+    label = inner[-1] if inner else ""
+    if inner is None and isinstance(arg0, ast.Call):  # Depends(require("x")): a factory and its arguments
+        inner = dotted_name(arg0.func)
+        label = ast.unparse(arg0) if hasattr(ast, "unparse") else (inner[-1] if inner else "")
+    if call.keywords and hasattr(ast, "unparse"):
+        label = f"{parts[-1]}({label}, " + ", ".join(ast.unparse(k) for k in call.keywords) + ")"
+    return (resolve(inner) if inner else None, inner, label)
+
+
+def router_dependency_targets(ctx, func: FunctionInfo) -> List[Tuple[Optional[str], Optional[List[str]], str]]:
+    """The ``Depends()``/``Security()`` targets of ``dependencies=[...]`` on the route decorator and on its router (same file)."""
+    route = func.route
+    if route is None:
+        return []
+    values: List[ast.AST] = []
+    if route.decorator is not None:
+        values += [kw.value for kw in route.decorator.keywords if kw.arg == "dependencies"]
+    receiver_root = route.receiver.split(".")[0]
+    for stmt in ctx.tree.body:
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call) and any(isinstance(t, ast.Name) and t.id == receiver_root for t in stmt.targets):
+            values += [kw.value for kw in stmt.value.keywords if kw.arg == "dependencies"]
+    out = []
+    for value in values:
+        for sub in ast.walk(value):
+            if isinstance(sub, ast.Call):
+                target = _depends_target(sub, func.resolve)
+                if target is not None:
+                    out.append(target)
+    return out
+
+
+def policy_records(ctx, dotted: Optional[str], raw: Optional[List[str]], dependency_record, dependency_chain) -> List[object]:
+    """The function records that can carry policy evidence for a dependency target: its dependency chain, the
+    ``__call__`` chain of a class-based dependency, and the closures defined inside each of them (``require("x")``
+    returns one). Empty when the target is not in the project (a library dependency): nothing can be verified."""
+    graph = getattr(ctx.facts, "callgraph", None) if ctx.facts is not None else None
+    records = list(dependency_chain(ctx, dependency_record(ctx, dotted, raw)))
+    if not records and graph is not None:
+        module = ctx.facts.file_module.get(ctx.relpath, "") if ctx.facts is not None else ""
+        candidates = [dotted] + ([f"{module}.{'.'.join(raw)}" if module else ".".join(raw)] if raw else [])
+        for cand in candidates:
+            cls = graph.canonical_class(cand) if cand else None
+            if cls:
+                records = list(dependency_chain(ctx, graph.functions.get(f"{cls}.__call__")))
+                break
+    if graph is not None and records:
+        nested = getattr(graph, "_nested_function_index", None)
+        if nested is None:
+            nested = {}
+            for key in graph.functions:
+                head = key.rsplit(".", 1)[0] if "." in key else key
+                nested.setdefault(head, []).append(key)
+            graph._nested_function_index = nested
+        seen = {rec.key for rec in records}
+        for rec in list(records):
+            for key in nested.get(rec.key, []):
+                if key not in seen:
+                    seen.add(key)
+                    records.append(graph.functions[key])
+    return records
+
+
+def policy_evidence_in(records, graph=None) -> List[str]:
+    """``"<function>: line N: condition on role"`` for every record of the chain that shows a privilege decision, plus the
+    decisions of the project functions each record calls directly (``if not user_is_allowed(user): raise``: the
+    predicate lives one call away; followed one level, never by name)."""
+    out: List[str] = []
+    for rec in records:
+        out.extend(f"{rec.name}: {e}" for e in getattr(rec, "policy_evidence", []) or [])
+        if graph is None:
+            continue
+        for site in getattr(rec, "calls", []) or []:
+            key = graph.canonical_function(site.target) if site.target else None
+            callee = graph.functions.get(key) if key else None
+            if callee is not None and callee is not rec:
+                out.extend(f"{rec.name} -> {callee.name}: {e}" for e in getattr(callee, "policy_evidence", []) or [])
+    return out
+
+
 def path_params(path: Optional[str]) -> List[str]:
     return re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::[^}]*)?\}", path or "")
 
@@ -302,21 +390,30 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             if auth:
                 principal.add(param)
                 c.authentication_evidence.append(f"{param}: {label}" + (f" -> {' -> '.join(chain_names)}" if chain_names else ""))
-            # authorization kinds carried by the dependency
+            # authorization kinds carried by the dependency. v2.0 hardening: a role/permission kind needs structural
+            # evidence in the dependency's own code (a condition over a role/scope/permission attribute or predicate,
+            # anywhere in its chain, its __call__ or its closures); a name such as require_admin is recorded as
+            # named_only and leaves the route's authorization unknown
+            records = policy_records(ctx, dotted, raw, dependency_record, dependency_chain)
+            evidence = policy_evidence_in(records, graph)
+            named_like_policy = bool(ROLE_RE.search(label) and not MEMBERSHIP_RE.search(label)) or any(ROLE_RE.search(n) and not MEMBERSHIP_RE.search(n) for n in chain_names)
             if "scopes=" in label or "Security(" in label:
                 c.authorization.append("scopes")
                 c.authorization_evidence.append(label)
-            elif ROLE_RE.search(label) and not MEMBERSHIP_RE.search(label):
+            elif evidence:
                 c.authorization.append("role")
-                c.authorization_evidence.append(label)
-            if any(rec.tenant_params or any(p in tenant_names for p in rec.params) for rec in chain) or MEMBERSHIP_RE.search(label):
+                c.authorization_evidence.append(f"{param}: {label}: {evidence[0]}")
+            elif named_like_policy:
+                why = f"no check on the principal is visible in {' -> '.join(chain_names)}" if records else "its implementation is not in the project"
+                c.named_only.append(f"{param}: {label}: named like a policy, {why}")
+            if any(rec.tenant_params or any(p in tenant_names for p in rec.params) for rec in chain):
                 c.authorization.append("membership")
                 c.authorization_evidence.append(f"{param}: {label}")
+            elif MEMBERSHIP_RE.search(label):
+                c.named_only.append(f"{param}: {label}: named like a membership check, but no dependency in its chain receives the tenant")
             if any(set(rec.params) & path_ids - tenant_names for rec in chain) and chain:
                 c.authorization.append("resource_dependency")
                 c.authorization_evidence.append(f"{param}: {label} receives {sorted(set().union(*[set(rec.params) & path_ids for rec in chain]))}")
-            elif ROLE_RE.search(label) and any(ROLE_RE.search(n) for n in chain_names):
-                pass
         for arg in func.params():
             if AUTH_RE.search(arg.arg) and arg.arg not in tenant_names and arg.arg not in principal and arg.arg not in {"self", "cls"}:
                 principal.add(arg.arg)
@@ -330,8 +427,8 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             chain_names = [rec.name for rec in dependency_chain(ctx, dependency_record(ctx, dotted, raw))]
             annotation = next((a.annotation for a in func.params() if a.arg == param), None)
             ann_text = ast.unparse(annotation) if (annotation is not None and hasattr(ast, "unparse")) else ""
-            if OPTIONAL_RE.search(label) or any(OPTIONAL_RE.search(n) for n in chain_names) or "None" in ann_text or "Optional[" in ann_text:
-                optional = True
+            if OPTIONAL_RE.search(label) or any(OPTIONAL_RE.search(n) for n in chain_names) or "| None" in ann_text or "Optional[" in ann_text or ann_text.startswith("Union[") and "None" in ann_text:
+                optional = True  # `User | None` / `Optional[User]`: anonymous callers accepted; a bare `_: None = Depends(check)` is not optional
         if principal or param_signal(ctx, func):
             c.authentication = "optional" if (optional and not router_signal(ctx, func)) else "present"
             if c.authentication == "optional":
@@ -340,11 +437,29 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
             c.authentication = "present"
             c.authentication_evidence.append("router/application dependencies or middleware" + (f": {dep_text}" if dep_text else ""))
         if dep_text:
-            if ROLE_RE.search(dep_text) and not MEMBERSHIP_RE.search(dep_text):
-                c.authorization.append("role")
-            if MEMBERSHIP_RE.search(dep_text):
-                c.authorization.append("membership")
-            c.authorization.append("router_dependencies")
+            # v2.0 hardening: router-level dependencies contribute a kind only when their code shows one (scopes, a
+            # privilege decision, a tenant received); an authentication-only or a named-only router dependency keeps
+            # the route authenticated but leaves its authorization unknown
+            kinds: List[str] = []
+            for dotted, raw, label in router_dependency_targets(ctx, func):
+                records = policy_records(ctx, dotted, raw, dependency_record, dependency_chain)
+                chain = dependency_chain(ctx, dependency_record(ctx, dotted, raw))
+                evidence = policy_evidence_in(records, graph)
+                if "scopes=" in label or "Security(" in label:
+                    kinds.append("scopes")
+                elif evidence:
+                    kinds.append("role")
+                    c.authorization_evidence.append(f"router: {label}: {evidence[0]}")
+                elif ROLE_RE.search(label) and not MEMBERSHIP_RE.search(label):
+                    why = f"no check on the principal is visible in {' -> '.join(rec.name for rec in chain)}" if records else "its implementation is not in the project"
+                    c.named_only.append(f"router: {label}: named like a policy, {why}")
+                if any(rec.tenant_params or any(p in tenant_names for p in rec.params) for rec in chain):
+                    kinds.append("membership")
+                elif MEMBERSHIP_RE.search(label):
+                    c.named_only.append(f"router: {label}: named like a membership check, but no dependency in its chain receives the tenant")
+            if kinds:
+                c.authorization.extend(kinds)
+                c.authorization.append("router_dependencies")
             c.authorization_evidence.append(dep_text)
         dec = decorator_authz(func)
         if dec:

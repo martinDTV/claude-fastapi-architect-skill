@@ -212,6 +212,13 @@ class CallGraph:
             alias = self.facts.function_aliases.get(candidate)
             if alias:
                 return alias
+        # v2.0 security hardening: a re-export recorded under the other source-root spelling of the same module
+        # (``src.app.x.public.require`` -> ``app.x.deps.require``) is followed once through the file the module maps to
+        head, _, tail = dotted.rpartition(".")
+        rel = self.facts.module_map.get(head) if head else None
+        other = self.facts.file_module.get(rel) if rel else None
+        if other and other != head:
+            return self.canonical_function(f"{other}.{tail}")
         return None
 
     def canonical_class(self, dotted: Optional[str]) -> Optional[str]:

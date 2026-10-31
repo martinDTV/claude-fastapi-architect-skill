@@ -12,7 +12,7 @@ import ast
 import re
 from typing import List, Optional, Set, Tuple
 
-from ..contracts import RouteContract, build_contracts, decorator_authz, names_in, route_public, tenant_param_set
+from ..contracts import RouteContract, build_contracts, decorator_authz, names_in, policy_evidence_in, policy_records, route_public, router_dependency_targets, tenant_param_set
 from ..facts import AUTH_RE
 from ..model import ENV_MIGRATION, Finding, new_finding
 from ..resolver import FunctionInfo, annotation_to_dotted, dotted_name
@@ -291,11 +291,14 @@ def _unbound_tenant(ctx: FileContext, func: FunctionInfo) -> Optional[Tuple[List
     principal_names: Set[str] = set()
     for param, dotted, raw, label in providers:
         chain = _dependency_chain(ctx, _dependency_record(ctx, dotted, raw))
-        if TENANT_BINDING_RE.search(label) or TENANT_BINDING_RE.search(param):
-            return None  # a membership/authorization dependency binds the tenant
         for rec in chain:
-            if rec.tenant_params or TENANT_BINDING_RE.search(rec.name) or any(p in tenant_names for p in rec.params):
+            if rec.tenant_params or any(p in tenant_names for p in rec.params):
                 return None  # the dependency itself receives the tenant: the binding happens there
+        if TENANT_BINDING_RE.search(label) or TENANT_BINDING_RE.search(param) or any(TENANT_BINDING_RE.search(rec.name) for rec in chain):
+            # v2.0 hardening: a membership/authorization-looking name binds the tenant only when its code shows a
+            # decision (a tenant received, above, or a privilege check); a bare name keeps the question open
+            if policy_evidence_in(policy_records(ctx, dotted, raw, _dependency_record, _dependency_chain), _graph(ctx)):
+                return None
         if AUTH_RE.search(label) or any(AUTH_RE.search(rec.name) for rec in chain) or AUTH_RE.search(param):
             principal_names.add(param)
     for arg in func.params():
@@ -303,16 +306,12 @@ def _unbound_tenant(ctx: FileContext, func: FunctionInfo) -> Optional[Tuple[List
             principal_names.add(arg.arg)
     if not principal_names:
         return None  # unauthenticated: SEC_TENANT_ID_FROM_REQUEST covers it
-    if route.decorator is not None:
-        for kw in route.decorator.keywords:
-            if kw.arg == "dependencies" and TENANT_BINDING_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
-                return None
-    receiver_root = route.receiver.split(".")[0]
-    for stmt in ctx.tree.body:  # router-level membership dependency in the same file
-        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call) and any(isinstance(t, ast.Name) and t.id == receiver_root for t in stmt.targets):
-            for kw in stmt.value.keywords:
-                if kw.arg == "dependencies" and TENANT_BINDING_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
-                    return None
+    for dotted, raw, label in router_dependency_targets(ctx, func):  # router/decorator-level dependency, same file
+        chain = _dependency_chain(ctx, _dependency_record(ctx, dotted, raw))
+        if any(rec.tenant_params or any(p in tenant_names for p in rec.params) for rec in chain):
+            return None
+        if (TENANT_BINDING_RE.search(label) or any(TENANT_BINDING_RE.search(rec.name) for rec in chain)) and policy_evidence_in(policy_records(ctx, dotted, raw, _dependency_record, _dependency_chain), _graph(ctx)):
+            return None
     tenant_set = set(tenant_params)
     for node in func.scope_nodes():
         if isinstance(node, (ast.Compare, ast.BoolOp, ast.Assert)) or (isinstance(node, ast.If)):
@@ -438,31 +437,28 @@ def _privilege_change(ctx: FileContext, func: FunctionInfo, out: List[Finding]) 
             break
     if change is None:
         return
-    # an admin/owner/role-level signal anywhere on the handler, its dependency chain or its decorator
+    # an admin/owner/role-level policy visible on the handler's dependencies, its router, its decorator or its body.
+    # v2.0 hardening: a dependency counts through the privilege decision its code shows (a condition over a role/scope/
+    # permission attribute or predicate, in its chain, its __call__ or its closures), never through its name alone
+    named_only: List[str] = []
     for param, dotted, raw, label in _providers(ctx, func):
-        if ADMIN_RE.search(label) or ADMIN_RE.search(param):
+        if "scopes=" in label or "Security(" in label or policy_evidence_in(policy_records(ctx, dotted, raw, _dependency_record, _dependency_chain), _graph(ctx)):
             return
-        for rec in _dependency_chain(ctx, _dependency_record(ctx, dotted, raw)):
-            if ADMIN_RE.search(rec.name):
-                return
-    for arg in func.params():
-        if arg.arg in PRIVILEGE_ATTRS:
-            continue  # `role: str` is the value being assigned, not a policy signal
-        if ADMIN_RE.search(arg.arg) and arg.arg not in TENANT_PARAMS:
+        if ADMIN_RE.search(label) or ADMIN_RE.search(param) or any(ADMIN_RE.search(rec.name) for rec in _dependency_chain(ctx, _dependency_record(ctx, dotted, raw))):
+            named_only.append(label)
+    for dotted, raw, label in router_dependency_targets(ctx, func):
+        if "scopes=" in label or policy_evidence_in(policy_records(ctx, dotted, raw, _dependency_record, _dependency_chain), _graph(ctx)):
             return
-        if arg.annotation is not None and ADMIN_RE.search(ast.unparse(arg.annotation) if hasattr(ast, "unparse") else ""):
-            return
-    if route.decorator is not None:
-        for kw in route.decorator.keywords:
-            if kw.arg == "dependencies" and ADMIN_RE.search(ast.unparse(kw.value) if hasattr(ast, "unparse") else ""):
-                return
+        if ADMIN_RE.search(label):
+            named_only.append(label)
     if decorator_authz(func):
         return  # @requires("admin") and similar decorators name the policy
-    for node in func.scope_nodes():  # an explicit check in the body: if not user.is_admin / require(...)
+    for node in func.scope_nodes():  # an explicit check in the body: if not user.is_admin / if "admin" not in user.roles
         if isinstance(node, ast.If) and ADMIN_RE.search(ast.unparse(node.test) if hasattr(ast, "unparse") else ""):
             return
     has_auth = _param_signal(ctx, func) or _router_signal(ctx, func)
     where = f"'{func.qualname}' ({route.method} {route.path or ''})".replace(" )", ")")
+    unverified = f" '{', '.join(sorted(set(named_only)))}' is named like a policy but no check on the principal is visible in its code." if named_only else ""
     out.append(
         new_finding(
             "SEC_PRIVILEGE_CHANGE_UNVERIFIED",
@@ -472,7 +468,7 @@ def _privilege_change(ctx: FileContext, func: FunctionInfo, out: List[Finding]) 
             (
                 f"{where} changes privileges ({change[1]} at line {change[0]}) and "
                 + ("only a generic authentication signal is visible" if has_auth else "no authentication signal is visible")
-                + ": no dependency, parameter, decorator or body check names an admin/owner/role/permission policy. Whether "
+                + ": no dependency, decorator or body check shows an admin/owner/role/permission policy." + unverified + " Whether "
                 "the caller may change privileges cannot be decided statically; if a policy is applied elsewhere this is a false positive."
             ),
             confidence="low" if (has_auth and _router_signal(ctx, func)) else "medium",
