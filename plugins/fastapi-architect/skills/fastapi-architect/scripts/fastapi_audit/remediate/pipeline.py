@@ -25,10 +25,11 @@ before and after the run; a difference aborts with ``RemediationError``.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
+from fastapi_common.fs import sha256_text
 
 from ..discovery import classify_environment
 from ..engine import AuditOptions, audit_project
@@ -113,8 +114,7 @@ class RunOptions:
     include_tests: bool = False
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+_sha = sha256_text
 
 
 def _brief(f: Dict[str, object]) -> Dict[str, object]:

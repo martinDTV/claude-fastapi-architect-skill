@@ -7,28 +7,12 @@ import os
 import re
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from fastapi_common.artefacts import TRANSIENT_DIRS, VIRTUALENV_DIRS
+
 from .model import ENV_APPLICATION, ENV_MIGRATION, ENV_TEST
 
-DEFAULT_EXCLUDED_DIRS = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-        ".nox",
-        ".eggs",
-        "dist",
-        "build",
-        "site-packages",
-    }
-)
+# The shared transient set plus the installed-packages directory; `env` is deliberately scanned (a plausible package name).
+DEFAULT_EXCLUDED_DIRS = frozenset(TRANSIENT_DIRS) | frozenset(VIRTUALENV_DIRS) | frozenset({"site-packages"})
 DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024
 
 # Test code is classified, never hidden by default. ``--exclude-tests`` opts out explicitly.

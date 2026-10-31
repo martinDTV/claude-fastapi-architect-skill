@@ -21,6 +21,7 @@ from _audit_support import FIXTURES, REPO_ROOT, SKILL_SCRIPTS
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
+from fastapi_common.artefacts import walk_files  # noqa: E402
 from fastapi_design import journal, transforms  # noqa: E402
 from fastapi_design.generator import GenerationError, WriteError  # noqa: E402
 
@@ -33,7 +34,7 @@ def sha(path: Path) -> str:
 
 
 def tree_digest(root: Path) -> dict:
-    return {p.relative_to(root).as_posix(): sha(p) for p in root.rglob("*") if p.is_file() and ".fastapi-architect/ops" not in p.as_posix()}
+    return {p.relative_to(root).as_posix(): sha(p) for p in walk_files(root) if ".fastapi-architect/ops" not in p.as_posix()}
 
 
 class JournalCase(unittest.TestCase):

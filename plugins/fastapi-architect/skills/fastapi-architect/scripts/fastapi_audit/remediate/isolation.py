@@ -27,13 +27,15 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from fastapi_common.artefacts import TRANSIENT_DIRS, VIRTUALENV_DIRS
+
 from .model import RemediationError, TestRun
 
-DEFAULT_IGNORED_DIRS = (".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".nox", "dist", "build", ".eggs")
+DEFAULT_IGNORED_DIRS = (*TRANSIENT_DIRS, *VIRTUALENV_DIRS, "env")  # the shared transient set plus `env` (never copied into a workspace, as in v1.9)
 DEFAULT_ENV_PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR")
 DEFAULT_ALLOWED_COMMANDS = ("python", "pytest", "uv")
 INTERPRETER_RE = re.compile(r"^python(\d+(\.\d+)?)?$")

@@ -30,6 +30,7 @@ if str(SKILL_SCRIPTS) not in sys.path:
 import fastapi_design as design  # noqa: E402
 from fastapi_audit.remediate.executors import Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import ExecutionPolicy  # noqa: E402
+from fastapi_common.artefacts import walk_files  # noqa: E402
 from fastapi_design import evolution  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.generator import MANIFEST, WriteError, write_files  # noqa: E402
@@ -165,7 +166,7 @@ class EvolutionContractTests(unittest.TestCase):
 class PlanTests(EvolveCase):
     def test_plan_for_the_committed_example_is_a_preview_that_writes_nothing(self) -> None:
         project = self.copy_example()
-        before = {p.relative_to(project).as_posix(): p.read_bytes() for p in project.rglob("*") if p.is_file()}
+        before = {p.relative_to(project).as_posix(): p.read_bytes() for p in walk_files(project)}
         plan = self.plan(self.contract(project))
         self.assertEqual(plan.state, "planned", plan.blockers)
         self.assertEqual(plan.added_modules, ["suppliers"])
@@ -176,7 +177,7 @@ class PlanTests(EvolveCase):
         self.assertEqual(len(plan.public_contracts["routes_added"]), 5)
         self.assertFalse(plan.migration["required"])
         self.assertIn("suppliers_router", plan.diffs["src/inventory_service/api/router.py"])
-        after = {p.relative_to(project).as_posix(): p.read_bytes() for p in project.rglob("*") if p.is_file()}
+        after = {p.relative_to(project).as_posix(): p.read_bytes() for p in walk_files(project)}
         self.assertEqual(before, after)  # a plan never writes
 
     def test_style_is_kept_even_when_the_advisor_would_change_it(self) -> None:
@@ -367,10 +368,10 @@ class VerticalCaseTests(EvolveCase):
         self.assertEqual(report["verification"]["routes"]["before"], 6)
         self.assertEqual(report["verification"]["routes"]["after"], 11)
         # second run: nothing to do, nothing written
-        digests_before = {p: p.read_bytes() for p in project.rglob("*") if p.is_file()}
+        digests_before = {p: p.read_bytes() for p in walk_files(project)}
         again = self.run_evolution(self.contract(project, name="again.json"), **options)
         self.assertEqual(again["state"], "noop")
-        self.assertEqual({p: p.read_bytes() for p in project.rglob("*") if p.is_file()}, digests_before)
+        self.assertEqual({p: p.read_bytes() for p in walk_files(project)}, digests_before)
         # a manual change on a managed, non-integration file survives the next evolution
         service = project / "src" / "inventory_service" / "services" / "catalog.py"
         service.write_text(service.read_text(encoding="utf-8") + "\n# hand-written note\n", encoding="utf-8")

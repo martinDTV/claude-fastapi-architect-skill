@@ -34,6 +34,7 @@ import fastapi_design as design  # noqa: E402
 from fastapi_audit.model import TOOL_VERSION  # noqa: E402
 from fastapi_audit.remediate.executors import Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import ExecutionPolicy  # noqa: E402
+from fastapi_common.artefacts import walk_files  # noqa: E402
 
 SPECS = FIXTURES / "design20" / "specs"
 EXAMPLES = REPO_ROOT / "plugins" / "fastapi-architect" / "examples"
@@ -354,11 +355,11 @@ class GeneratorTests(TempDirCase):
 
     def test_second_run_is_idempotent(self) -> None:
         self.gen(self.target())
-        before = {p: p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}
+        before = {p: p.read_bytes() for p in walk_files(self.tmp)}
         again = self.gen(self.target())
         self.assertEqual(again.written, [])
         self.assertEqual(sorted(again.unchanged), sorted(list(self.bp.files) + [design.MANIFEST]))
-        after = {p: p.read_bytes() for p in self.tmp.rglob("*") if p.is_file()}
+        after = {p: p.read_bytes() for p in walk_files(self.tmp)}
         self.assertEqual(before, after)
 
     def test_manifest_is_reproducible_across_directories(self) -> None:
@@ -562,8 +563,8 @@ class SnapshotTests(TempDirCase):
                 spec = design.load_spec(str(spec_path))
                 bp = design.build(spec, design.recommend(spec))
                 result = design.generate(spec, bp, self.target(snapshot.name), tool_version=TOOL_VERSION)
-                fresh = {str(p.relative_to(result.target)): p.read_text(encoding="utf-8") for p in Path(result.target).rglob("*") if p.is_file()}
-                committed = {str(p.relative_to(snapshot)): p.read_text(encoding="utf-8") for p in snapshot.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+                fresh = {str(p.relative_to(result.target)): p.read_text(encoding="utf-8") for p in walk_files(Path(result.target))}
+                committed = {str(p.relative_to(snapshot)): p.read_text(encoding="utf-8") for p in walk_files(snapshot)}  # transient artefacts (caches, .DS_Store) are not part of a snapshot
                 self.assertEqual(sorted(committed), sorted(fresh))
                 for rel in fresh:
                     self.assertEqual(committed[rel], fresh[rel], f"{rel} differs from a fresh generation")

@@ -29,6 +29,7 @@ if str(SKILL_SCRIPTS) not in sys.path:
 
 from fastapi_audit.remediate.executors import Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import ExecutionPolicy  # noqa: E402
+from fastapi_common.artefacts import walk_files  # noqa: E402
 from fastapi_design import adoption, evolution, journal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.generator import MANIFEST  # noqa: E402
@@ -47,7 +48,7 @@ def sha(path: Path) -> str:
 
 
 def tree(root: Path) -> dict:
-    return {p.relative_to(root).as_posix(): sha(p) for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts and ".fastapi-architect/ops" not in p.as_posix()}
+    return {p.relative_to(root).as_posix(): sha(p) for p in walk_files(root) if ".fastapi-architect/ops" not in p.as_posix()}
 
 
 class Inc4Case(unittest.TestCase):

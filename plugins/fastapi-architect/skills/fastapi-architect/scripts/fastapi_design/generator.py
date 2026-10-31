@@ -20,12 +20,13 @@ renamed into place; a failure before the renames leaves the project untouched.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from fastapi_common.fs import sha256_text, symlink_on_path
 
 from .blueprint import Blueprint
 from .spec import Spec
@@ -67,11 +68,7 @@ class GenerationResult:
         }
 
 
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-_sha = sha256_text
+_sha = sha256_text  # kept as a name: the digest helper lives in fastapi_common.fs
 
 
 def safe_join(target: Path, relpath: str) -> Path:
@@ -90,11 +87,9 @@ _safe_join = safe_join
 
 def _no_symlink_on_path(target: Path, relpath: str) -> None:
     """Refuse to write through a symlinked file or directory inside the target."""
-    current = target
-    for part in relpath.split("/"):
-        current = current / part
-        if current.is_symlink():
-            raise GenerationError(f"refusing to write through a symlink: {relpath!r} ({current.relative_to(target)})")
+    offending = symlink_on_path(target, relpath)
+    if offending is not None:
+        raise GenerationError(f"refusing to write through a symlink: {relpath!r} ({offending.relative_to(target)})")
 
 
 def build_manifest(spec: Spec, blueprint: Blueprint, tool_version: str, *, history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:

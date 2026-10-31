@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import ast
 import difflib
-import hashlib
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
+
+from fastapi_common.fs import sha256_text
 
 from .model import Edit, PatchProposal
 
@@ -155,8 +156,7 @@ def apply_edits(source: str, edits: List[Edit]) -> str:
     return "".join(lines)
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+_sha = sha256_text
 
 
 def _proposal(recipe: str, relpath: str, summary: str, source: str, edits: List[Edit]) -> Union[PatchProposal, Blocked]:

@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import ast
 import configparser
-import hashlib
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -31,7 +29,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from fastapi_audit.discovery import DEFAULT_EXCLUDED_DIRS, iter_python_files
 from fastapi_audit.engine import AuditOptions, audit_project
 from fastapi_audit.facts import collect_facts, load_config
-from fastapi_audit.resolver import Scope, collect_functions, collect_scope, dotted_name, resolve_in_scopes
+from fastapi_audit.resolver import Scope, collect_scope, dotted_name, resolve_in_scopes
+from fastapi_common.fs import sha256_bytes
 
 from .generator import MANIFEST, MANIFEST_SCHEMAS
 from .spec import Spec, canonical_digest, validate_spec
@@ -117,8 +116,7 @@ class ProjectModel:
         }
 
 
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+_sha = sha256_bytes
 
 
 def _read_manifest(root: Path) -> Tuple[Optional[Dict[str, Any]], List[str]]:

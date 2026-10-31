@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi_audit.model import TOOL_VERSION
+from fastapi_common.fs import resolve_against
 
 from .discovery import ProjectModel, discover
 from .generator import GenerationError, safe_join
@@ -197,10 +198,7 @@ def load_adoption_contract(path: str) -> AdoptionContract:
 
 
 def _resolve_project(contract: AdoptionContract) -> Path:
-    raw = Path(contract.project_path)
-    if not raw.is_absolute() and contract.source:
-        raw = Path(contract.source).resolve().parent / raw
-    return raw
+    return resolve_against(contract.project_path, contract.source)
 
 
 def read_adoption(project: Path) -> Optional[Dict[str, Any]]:
