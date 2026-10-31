@@ -1,6 +1,6 @@
 # FastAPI Architect v2.0.0 — Architecture & Engineering Foundations
 
-**Status: increments 1 and 2 implemented and validated locally; pending human review; not published.**
+**Status: increments 1, 2 and 3 implemented and validated locally; pending human review; not published.**
 
 v2.0 turns FastAPI Architect from an auditor and remediator into a system that can also **design and build**
 professional backends, reusing the audit engine (v1.3–v1.8) and the remediation trust model (v1.9) instead of
@@ -151,6 +151,75 @@ them. Nothing cloud-native or distributed is started.
   `references/design-contracts.md` (schema 1.1, guarantees matrix, limits), `docs/architecture/design-engine-v2.md`
   (increment 2 record), structure validator extended.
 
+## Increment 3: Safe Project Evolution
+
+### Project discovery (`fastapi_design/discovery.py`, `evolve_fastapi.py discover`)
+
+- Static model of an existing FastAPI project, by parsing only (no import, no execution): package and source root,
+  layout (`layered`, `modular`, `unknown`; reported, never converted), business modules, routers with own and
+  effective prefixes, routes with effective paths and authentication (from the audit contracts), pydantic models
+  and settings, SQLAlchemy models (through resolved declarative bases), services, repositories, dependency aliases,
+  lifespan, Alembic chain (revisions, heads, unknown parents, historical files changed since generation), declared
+  contracts, and the ownership of every file against the manifest (`managed_unchanged`, `managed_modified`,
+  `unmanaged`, `missing_managed`; `unknown` for every file without a manifest). Uncertainties are listed instead
+  of guessed.
+
+### Manifest 1.1 (`fastapi-architect/generation/1.1`)
+
+- Adds `spec_document` (the contract, digest-checked), `migrations` (revision, parent, file, tables) and
+  `history` (operations) to the file digests; 1.0 manifests are still read. Both committed examples regenerated.
+
+### Evolution contract and plan (`fastapi_design/evolution.py`)
+
+- `fastapi-architect/evolution/1.0`: project (path, package, expected baseline digest, optional baseline contract
+  for 1.0 manifests), `add_modules` (same shape as the design contract), invariants, `files.allow_modify` and
+  `files.preserve`. The modules are merged into the baseline contract and the whole contract is validated again;
+  errors point at `evolution.add_modules[i]...`.
+- Plan: preconditions (manifest, baseline, digest, package, layout, missing files, linear Alembic chain with the
+  recorded head, historical migrations unchanged), style pinned to the existing layout (the advisor's new opinion
+  is a warning), files to create / modify / keep, preserved manual changes, conflicts (`file_in_the_way`,
+  `manual_change_on_integration_point`, `unmanaged_file_in_the_way`, `not_allowed_to_modify`,
+  `preserved_file_would_change`, `missing_managed_file`, `unsafe_path`), route collisions, public-contract changes,
+  the additive migration (PostgreSQL), risks, required tests and unified diffs. Same contract twice → `noop`;
+  an existing module with a different definition → blocked.
+
+### Safe writer (`generator.write_files`)
+
+- Two-phase atomic writes shared by generation and evolution: every expected digest (or absence) re-checked
+  immediately before writing (concurrent changes abort before any write), temporaries then renames, cleanup on
+  failure, unsafe paths and writes through symlinks refused, nothing deleted, nothing silently overwritten.
+
+### Verification in a copy and states
+
+- `apply` applies the plan to a copy, audits it and compares by fingerprint with the project (new high/critical
+  findings reject), checks that every existing route keeps its path and authentication, checks that nothing
+  outside the plan changed, runs the tests only under the trust model (the authorised scope covers the project and
+  is moved to the copy; `untrusted` fails closed), and writes the project only after `verified` or `audit_clean`.
+  States: `planned`, `noop`, `blocked`, `verified`, `audit_clean`, `inconclusive`, `rejected`.
+
+### Verified
+
+- `inventory-service` + `suppliers` (layered, in-memory): 7 files created, 4 regenerated, 18 generated tests
+  (9 existing + 9 new) passed through the trust model with nonce-bound evidence, applied; second run `noop`; a
+  manual change on `services/catalog.py` preserved by a third evolution; a hand-edited `api/router.py` blocks.
+- `orders-platform` + `shipments` (hexagonal, PostgreSQL, multi-tenant): additive migration
+  `77d681cb65a8` chained after `9dab920675b3`, composite tenant foreign key to `orders`, 50 generated tests passed on
+  a throwaway PostgreSQL 16 through the trust model (opt-in `FA_DESIGN_PG=1`), historical migration byte-identical,
+  database left with `alembic_version` only. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+### Tests, examples, docs
+
+- `tests/test_evolve_v20.py` (26 tests: discovery of generated and hand-written projects, contract validation,
+  plan preview, style pinning, unknown project, stale baseline, duplicate module and routes, cycles and bad
+  references with contract paths, manual changes on integration points and elsewhere, unexpected managed content,
+  files in the way and preserved files, symlinked project, writer escapes / symlinks / concurrent changes, write
+  error, apply without authorization, test command without authorization, untrusted profile, the vertical case
+  with tests and idempotency, failed verification, additive migration plan, modified historical migration and two
+  heads, CLI exit codes); the opt-in PostgreSQL module gains the evolved backend run.
+- `examples/evolutions/{inventory-add-suppliers,orders-add-shipments}.json`,
+  `references/evolution-contracts.md`, `docs/guides/evolving-generated-projects.md`, the increment 3 section of
+  `docs/architecture/design-engine-v2.md`, `evolve_fastapi.py` (skill + root shim), structure validator extended.
+
 ## Compatibility
 
 - 59 rules, report schema 1.7, JSON/SARIF outputs, fingerprints, suppressions, declared contracts, the opt-in loop
@@ -172,7 +241,12 @@ them. Nothing cloud-native or distributed is started.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`
   (extended with the v2.0 artefacts), `claude plugin validate`, `git diff --check`: see the increment report.
 
-## Known limits (after increment 2)
+## Known limits (after increment 3)
+
+- Evolution adds whole modules to generated projects only: existing modules are not changed, hand-written projects
+  are discovered but refused, layouts are never migrated, integration points are regenerated (a manual change on
+  one must be moved into the contract first), one additive migration per evolution (no column changes, no data
+  migrations, no merge of heads).
 
 - Only the initial migration is generated; later migrations are the author's (`alembic revision --autogenerate`
   works on the generated metadata). `uv.lock` is not generated (resolution needs the index).
@@ -187,7 +261,8 @@ them. Nothing cloud-native or distributed is started.
 
 ## Roadmap for the next v2.0 increments
 
-1. Extending an existing project from a contract (read the current layout, add a module, preserve everything).
+1. Evolving existing modules (new fields and operations) with additive column migrations, and adopting
+   hand-written projects module by module under an explicit ownership declaration.
 2. Authentication beyond API keys (OAuth2/JWT with the references' guidance) and resource-level authorization
    policies as declared decisions.
 3. Row-level security as an opt-in strategy implementation (policies, session tenant context, the tenant-ledger

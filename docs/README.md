@@ -7,10 +7,10 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | Document | Purpose |
 |---|---|
 | [`plugins/fastapi-architect/skills/fastapi-architect/SKILL.md`](../plugins/fastapi-architect/skills/fastapi-architect/SKILL.md) | the skill: workflow, stages, standards, auditor and remediation usage |
-| [`plugins/fastapi-architect/skills/fastapi-architect/references/`](../plugins/fastapi-architect/skills/fastapi-architect/references/) | the 27 reference documents the skill routes to (architecture, data layer, security, auditor engine and rules, safe refactoring, design contracts, …) |
+| [`plugins/fastapi-architect/skills/fastapi-architect/references/`](../plugins/fastapi-architect/skills/fastapi-architect/references/) | the 28 reference documents the skill routes to (architecture, data layer, security, auditor engine and rules, safe refactoring, design and evolution contracts, …) |
 | [`plugins/fastapi-architect/evals/README.md`](../plugins/fastapi-architect/evals/README.md) | the offline evaluation suite (`claude plugin eval` format) |
 | [`plugins/fastapi-architect/examples/tenant-ledger/`](../plugins/fastapi-architect/examples/tenant-ledger/README.md) | the verified reference implementation (README, VERIFICATION, LIMITATIONS) |
-| [`plugins/fastapi-architect/examples/specs/`](../plugins/fastapi-architect/examples/specs/) and [`examples/generated/`](../plugins/fastapi-architect/examples/generated/README.md) | the two example architecture contracts (v2.0) and the backends generated from them (`inventory-service`, `orders-platform`), with the [verification evidence](../plugins/fastapi-architect/examples/generated/VERIFICATION.md) of the PostgreSQL run |
+| [`plugins/fastapi-architect/examples/specs/`](../plugins/fastapi-architect/examples/specs/), [`examples/evolutions/`](../plugins/fastapi-architect/examples/evolutions/) and [`examples/generated/`](../plugins/fastapi-architect/examples/generated/README.md) | the example architecture and evolution contracts (v2.0), the backends generated from them (`inventory-service`, `orders-platform`), and the [verification evidence](../plugins/fastapi-architect/examples/generated/VERIFICATION.md) of the PostgreSQL runs |
 
 ## Architecture records
 
@@ -23,6 +23,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | Document | Purpose |
 |---|---|
 | [`guides/generated-postgresql-projects.md`](guides/generated-postgresql-projects.md) | persistence, Alembic migrations, the generated test suite and the opt-in verification of a generated PostgreSQL backend against a throwaway cluster |
+| [`guides/evolving-generated-projects.md`](guides/evolving-generated-projects.md) | discover an existing project, write an evolution contract, preview the plan, approve and apply it with verification in a copy; what the engine protects |
 
 ## Release notes
 

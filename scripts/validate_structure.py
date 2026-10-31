@@ -81,7 +81,7 @@ for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lo
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 # v2.0: design engine (contract, advisor, blueprint, generator, verification, report), tool (skill + root shim), examples, fixtures, docs
 design=base/'scripts/fastapi_design'
-for mod in ('__init__.py','spec.py','advisor.py','blueprint.py','generator.py','verify.py','report.py','pipeline.py'):
+for mod in ('__init__.py','spec.py','advisor.py','blueprint.py','generator.py','verify.py','report.py','pipeline.py','discovery.py','evolution.py'):
     assert (design/mod).is_file(), f'Missing fastapi_design/{mod}'
     compile((design/mod).read_text(encoding='utf-8'),str(design/mod),'exec')
 design_tool=base/'scripts/design_fastapi.py'
@@ -100,6 +100,21 @@ assert (base.parent.parent/'examples/generated/README.md').is_file() and (base.p
 assert (root/'tests/fixtures/regressions_v20/route_composition/.audit-fastapi.json').is_file(), 'Missing v2.0 route-composition regression fixture'
 assert (root/'tests/test_design_v20_postgresql.py').is_file() and (root/'tests/_pg_support.py').is_file(), 'Missing the opt-in PostgreSQL verification of generated backends'
 assert (root/'docs/guides/generated-postgresql-projects.md').is_file(), 'Missing docs/guides/generated-postgresql-projects.md'
+evolve_tool=base/'scripts/evolve_fastapi.py'
+evolve_shim=root/'scripts/evolve_fastapi.py'
+assert evolve_tool.is_file(), f'Missing evolution tool: {evolve_tool}'
+assert evolve_shim.is_file() and 'evolve_fastapi.py' in evolve_shim.read_text(encoding='utf-8'), 'Root evolve_fastapi.py does not forward to the skill tool'
+compile(evolve_tool.read_text(encoding='utf-8'),str(evolve_tool),'exec')
+for contract_name in ('inventory-add-suppliers.json','orders-add-shipments.json'):
+    contract_doc=json.loads((base.parent.parent/'examples/evolutions'/contract_name).read_text(encoding='utf-8'))
+    assert contract_doc.get('schema')=='fastapi-architect/evolution/1.0', f'examples/evolutions/{contract_name}: unexpected schema'
+assert (root/'tests/test_evolve_v20.py').is_file(), 'Missing tests/test_evolve_v20.py'
+assert (base/'references/evolution-contracts.md').is_file(), 'Missing references/evolution-contracts.md'
+assert (root/'docs/guides/evolving-generated-projects.md').is_file(), 'Missing docs/guides/evolving-generated-projects.md'
+assert 'guides/evolving-generated-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the evolution guide'
+for snapshot in ('inventory-service','orders-platform'):
+    manifest_doc=json.loads((base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').read_text(encoding='utf-8'))
+    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.1' and 'spec_document' in manifest_doc, f'{snapshot}: manifest must be 1.1 with the embedded contract'
 assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'

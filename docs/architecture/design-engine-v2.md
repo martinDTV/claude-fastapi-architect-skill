@@ -1,6 +1,6 @@
 # Design engine (v2.0): architecture record
 
-Status: increments 1 and 2 implemented and tested locally; not published.
+Status: increments 1, 2 and 3 implemented and tested locally; not published.
 
 ## Decision
 
@@ -124,3 +124,38 @@ virtual environment and a lock file into the committed snapshot. `run_generated_
 (`FA_DESIGN_PG=1`) creates a throwaway cluster, runs the generated suite through the trust model with
 `DATABASE_URL`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` passed through, and includes a negative control that
 mutates a model and expects the drift test to fail. Evidence: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+## Increment 3: safe project evolution
+
+**The manifest is the contract of ownership.** Since 1.1 the generation manifest embeds the architecture
+contract, the migration chain (revision, parent, file, tables) and the operation history, next to the sha256 of
+every generated file. Discovery derives ownership from it and from nothing else: a file is managed only if the
+manifest lists it; a listed file whose digest differs is a manual change; an unlisted file is the developer's,
+whatever its name. A project without a manifest has `unknown` ownership everywhere and is refused by the
+evolution engine, although discovery still describes it.
+
+**Evolution is regeneration from a merged contract, never text surgery.** The new modules are appended to the
+baseline contract, the whole contract is validated again (cycles, references, duplicates, reserved names) and two
+blueprints are built: what every managed file should contain now and what it should become. The difference is
+the plan. Files whose generated content does not change are never written, so manual changes on them survive;
+integration points that must change are regenerated only when they are managed, unchanged, allowed and not
+preserved; everything else is a conflict that blocks. Historical migrations are kept verbatim and one additive
+revision is chained after the recorded head. The layout is pinned: the advisor's new opinion is reported, not
+applied.
+
+**Writes are two-phase and re-check the world.** `write_files` verifies every expected digest (or absence)
+immediately before writing, writes temporaries, then renames; a precondition failure or an I/O error before the
+renames leaves the project untouched. Symlinked projects and writes through symlinks are refused.
+
+**Verification happens on a copy first.** `apply` applies the plan to a copy, audits it against the project by
+fingerprint, checks that existing routes keep their paths and authentication, checks that nothing outside the
+plan moved, runs the tests through the trust model (the operator's scope covers the project and is moved to the
+copy), and only then writes the project. `verified` needs executed tests; `audit_clean` is the ceiling without
+them; `inconclusive` and `rejected` never write.
+
+**Verified in this increment.** `inventory-service` + `suppliers`: 18 tests through the trust model, applied,
+no-op on the second run, a manual change on `services/catalog.py` preserved by a third evolution, a hand-edited
+`api/router.py` blocking a fourth. `orders-platform` + `shipments`: additive migration chained after the initial
+revision, 50 generated tests on a throwaway PostgreSQL 16 through the trust model, database left with
+`alembic_version` only; the historical migration byte-identical. Evidence in
+`plugins/fastapi-architect/examples/generated/VERIFICATION.md`.

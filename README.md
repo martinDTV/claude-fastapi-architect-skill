@@ -66,7 +66,8 @@ plugins/fastapi-architect/
     │   ├── testing.md                    # fixtures, per-test rollback, unit and integration tests
     │   ├── security-and-config.md        # settings, secrets, OIDC/JWT, authorization, CORS
     │   ├── operations.md                 # logging, request IDs, tracing, health checks, Docker, CI
-    │   └── design-contracts.md           # v2.0: architecture contract, advisor rules, generation safety, report schema
+    │   ├── design-contracts.md           # v2.0: architecture contract, advisor rules, generation safety, report schema
+    │   └── evolution-contracts.md        # v2.0: project discovery, evolution contract, plan, safe writer, verification states
     ├── assets/
     │   ├── pyproject.toml                # uv, ruff, mypy, pytest, import-linter configured
     │   ├── Dockerfile                    # multi-stage, uv, non-root
@@ -78,11 +79,12 @@ plugins/fastapi-architect/
         ├── audit_diff.py                 # report comparison tool (v1.8)
         ├── audit_remediate.py            # verified remediation tool (v1.9)
         ├── design_fastapi.py             # design engine entry point: contract -> recommendation -> project -> verification (v2.0)
+        ├── evolve_fastapi.py             # discover an existing project; plan and apply an evolution contract with verification in a copy (v2.0)
         ├── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, remediate/, cli
-        └── fastapi_design/               # design package: spec (contract), advisor, blueprint, generator, verify, report, pipeline (v2.0)
+        └── fastapi_design/               # design package: spec, advisor, blueprint, generator, verify, report, pipeline, discovery, evolution (v2.0)
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
 plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS);
-                                          # specs/: example architecture contracts; generated/inventory-service: backend generated from the first one (v2.0)
+                                          # specs/ and evolutions/: example architecture and evolution contracts; generated/: the backends generated from them (v2.0)
 evals/evals.json                          # human-scorer prompts for evaluating the skill
 scripts/audit_fastapi.py                  # root entry point forwarding to the skill's auditor
 scripts/validate_structure.py             # packaging, links and version checks
@@ -90,6 +92,7 @@ scripts/audit_precision.py                # precision/recall/coverage/time/memor
 scripts/audit_diff.py                     # compare two audit reports by fingerprint: new, no longer detected, persistent, confidence/severity changes (v1.8)
 scripts/audit_remediate.py                # patch findings in an isolated copy, re-audit and re-test; never writes to the project (v1.9)
 scripts/design_fastapi.py                 # validate an architecture contract, recommend a structure, generate the project, audit it and run its tests under the trust model (v2.0)
+scripts/evolve_fastapi.py                 # discover an existing project; plan and apply an evolution contract, verified in a copy before the project is written (v2.0)
 tests/                                    # auditor suites per category, fixtures (incl. the truth16/17/18 ground-truth corpora), PostgreSQL integration tests
 docs/                                     # documentation index (docs/README.md), release notes (docs/releases/), architecture records (docs/architecture/), guides (docs/guides/)
 ```
@@ -248,4 +251,5 @@ FastAPI Architect now **designs and builds** backends as well as auditing and re
 - **PostgreSQL for real (increment 2).** A PostgreSQL contract gets SQLAlchemy 2 models with a naming convention, foreign keys from declared `references` (composite `(tenant_id, id)` between tenant tables), an Alembic environment and an initial migration generated from the contract (tables exist only after `alembic upgrade head`, never through `create_all`), a request-scoped unit of work that rolls back on errors and answers constraint violations with 409, and a suite that only accepts an empty database, migrates it, truncates between tests, checks that the schema matches the models and repeats up/down. `orders-platform` was verified on a throwaway PostgreSQL 16 through the trust model (39 generated tests, nonce-bound evidence; a mutated model makes the drift test fail): `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
 - **Tenant contracts that do not overpromise (increment 2).** Schema 1.1 adds `security.multi_tenant.binding`; only `api_key_registry` is generated (each key bound to one tenant, 403 for any other tenant, scoped queries, composite foreign keys). A multi-tenant contract without a binding is refused, and the report's `guarantees` block states declared versus implemented isolation (`shared_schema_application_scoping`; no row-level security, no resource authorization).
 - **Route composition in the auditor (increment 2).** Route contracts carry `effective_paths` and `path_resolution` composed through `APIRouter(prefix=...)` and `include_router(..., prefix=...)`, including applications created in factories; `public_routes` and `route_auth_required` match them; a router mounted twice is public only if every mount is declared, a non-constant prefix is `unresolved`, fingerprints are unchanged, corpora score identically.
-- **Honest limits.** OAuth2/JWT and session authentication are accepted by the contract and refused by the generator; authorization policies, row-level security, outbox/inbox, later migrations and service splitting are pending decisions, not code; the local executor is process hygiene, not a sandbox. Contract and report schemas in `references/design-contracts.md`; design record in [`docs/architecture/design-engine-v2.md`](docs/architecture/design-engine-v2.md); release details in [`docs/releases/RELEASE-NOTES-v2.0.md`](docs/releases/RELEASE-NOTES-v2.0.md).
+- **Safe project evolution (increment 3).** `scripts/evolve_fastapi.py discover` builds a static model of an existing FastAPI project (layout, routers and effective routes, models, services, repositories, dependencies, settings, lifespan, Alembic chain, file ownership against the manifest) without importing it; `plan` turns an evolution contract (`fastapi-architect/evolution/1.0`) into a previewable change set and verifies it in a copy; `apply` writes the project only after that verification, re-checking every digest. Generated projects grow by whole modules: integration points are regenerated from the merged contract, never merged by text replacement; a hand-edited integration point blocks the plan, other manual changes are preserved, historical migrations stay byte-identical and one additive revision is appended; the same contract twice is a no-op. `inventory-service` + suppliers (18 tests) and `orders-platform` + shipments (two chained revisions, 50 tests on a throwaway PostgreSQL 16) were verified through the trust model.
+- **Honest limits.** OAuth2/JWT and session authentication are accepted by the contract and refused by the generator; authorization policies, row-level security, outbox/inbox, service splitting, changing existing modules, evolving hand-written projects and merging layouts are pending decisions, not code; the local executor is process hygiene, not a sandbox. Contract and report schemas in `references/design-contracts.md`; design record in [`docs/architecture/design-engine-v2.md`](docs/architecture/design-engine-v2.md); release details in [`docs/releases/RELEASE-NOTES-v2.0.md`](docs/releases/RELEASE-NOTES-v2.0.md).
