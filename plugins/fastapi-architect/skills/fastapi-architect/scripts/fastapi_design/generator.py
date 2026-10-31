@@ -31,8 +31,8 @@ from .blueprint import Blueprint
 from .spec import Spec
 
 MANIFEST = ".fastapi-architect/generation.json"
-MANIFEST_SCHEMA = "fastapi-architect/generation/1.1"
-MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1")
+MANIFEST_SCHEMA = "fastapi-architect/generation/1.2"  # 1.2 records the implemented security model (increment 5)
+MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2")
 
 
 class GenerationError(RuntimeError):
@@ -98,7 +98,19 @@ def _no_symlink_on_path(target: Path, relpath: str) -> None:
 
 
 def build_manifest(spec: Spec, blueprint: Blueprint, tool_version: str, *, history: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Manifest 1.1: file digests plus the contract document, the migration chain and the operation history."""
+    """Manifest 1.2: file digests plus the contract document, the migration chain, the operation history and the security
+    model that was actually generated (so a later evolution can never mistake a declared strategy for an implemented one)."""
+    mt = spec.security["multi_tenant"]
+    security = {
+        "authentication": spec.security["authentication"],
+        "identity": "per_caller" if (spec.oidc is not None or (spec.multi_tenant and mt["binding"] == "api_key_registry")) else ("none" if spec.security["authentication"] == "none" else "shared_credential"),
+        "authorization_model": spec.authz_model,
+        "authorization_declared": spec.authz_declared,
+        "tenant_strategy_declared": mt["strategy"] if spec.multi_tenant else None,
+        "tenant_strategy_implemented": ("shared_schema_rls" if spec.rls else "shared_schema_application_scoping") if spec.multi_tenant else None,
+        "tenant_binding": mt["binding"] if spec.multi_tenant else None,
+        "row_level_security": bool(spec.rls),
+    }
     return {
         "schema": MANIFEST_SCHEMA,
         "tool": {"name": "fastapi-architect design", "version": tool_version},
@@ -108,6 +120,7 @@ def build_manifest(spec: Spec, blueprint: Blueprint, tool_version: str, *, histo
         "package": blueprint.package,
         "files": {path: _sha(content) for path, content in sorted(blueprint.files.items())},
         "migrations": list(blueprint.migrations),
+        "security": security,
         "history": list(history) if history is not None else [{"operation": "generate", "spec_digest": spec.digest, "modules": [m.name for m in spec.modules]}],
     }
 

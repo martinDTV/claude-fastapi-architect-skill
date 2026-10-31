@@ -1,0 +1,40 @@
+{
+  "schema": "fastapi-architect/spec/1.2",
+  "name": "journal",
+  "package": "journal",
+  "description": "Single-tenant private journal: every entry is visible to its author and to moderators only.",
+  "functional": {
+    "modules": [
+      {
+        "name": "entries",
+        "entities": [
+          {
+            "name": "Entry",
+            "owned": true,
+            "fields": [
+              {"name": "title", "type": "str", "max_length": 80},
+              {"name": "mood", "type": "int", "min_value": 1, "max_value": 5}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "persistence": {"kind": "memory"},
+  "security": {
+    "authentication": "oauth2_jwt",
+    "oidc": {
+      "issuer": "https://id.example.org",
+      "audience": "journal",
+      "algorithms": ["ES256"],
+      "claims": {"roles": "https://example.org/roles"}
+    },
+    "authorization": {
+      "model": "roles_and_ownership",
+      "roles": ["moderator", "writer"],
+      "operations": {"create": ["writer", "moderator"]},
+      "ownership": {"visibility": "owner", "admin_roles": ["moderator"]}
+    },
+    "audit": {"authorization_decisions": true}
+  }
+}

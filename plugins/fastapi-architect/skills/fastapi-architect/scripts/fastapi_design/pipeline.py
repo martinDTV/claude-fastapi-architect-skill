@@ -23,8 +23,8 @@ from .spec import Spec, SpecError, load_spec
 from .verify import audit_generated, run_generated_tests
 
 TOOL_NAME = "fastapi-architect design"
-UNSUPPORTED_AUTHENTICATION = ("oauth2_jwt", "session")
-IMPLEMENTED_TENANT_BINDINGS = ("api_key_registry",)
+UNSUPPORTED_AUTHENTICATION = ("session",)  # oauth2_jwt is generated from schema 1.2 (security.oidc); in 1.0/1.1 it stays a declaration
+IMPLEMENTED_TENANT_BINDINGS = ("api_key_registry", "principal_claim")
 
 
 class DesignError(RuntimeError):
@@ -67,12 +67,14 @@ def generation_refusal(spec: Spec) -> Optional[str]:
     """Why the generator will not emit code for this (valid) specification, if it will not."""
     auth = spec.security["authentication"]
     if auth in UNSUPPORTED_AUTHENTICATION:
-        return f"authentication {auth!r} is accepted by the contract but this increment does not generate it; the generator refuses to emit a non-functional security stub (use api_key or none, and record the real scheme as a pending decision)"
+        return f"authentication {auth!r} is accepted by the contract but this increment does not generate it; the generator refuses to emit a non-functional security stub (use api_key or oauth2_jwt with security.oidc, and record the real scheme as a pending decision)"
+    if auth == "oauth2_jwt" and not spec.oidc:
+        return f"authentication 'oauth2_jwt' in a {spec.schema.rsplit('/', 1)[-1]} contract is a declaration without the provider configuration; move the contract to schema 1.2 and declare security.oidc (issuer, audience, algorithms, jwks_url, claims) so the token validation can be generated and tested, or use api_key"
     if spec.multi_tenant and spec.security["multi_tenant"]["binding"] not in IMPLEMENTED_TENANT_BINDINGS:
         return (
             "multi-tenant contract without a principal-tenant binding (security.multi_tenant.binding is "
             f"{spec.security['multi_tenant']['binding']!r}): the generated routes would accept any tenant_id from any authenticated caller, "
-            "which is not authorization; declare binding 'api_key_registry' (each API key is bound to one tenant) or disable multi-tenancy"
+            "which is not authorization; declare binding 'api_key_registry' (each API key is bound to one tenant) or 'principal_claim' (the tenant comes from a verified token claim), or disable multi-tenancy"
         )
     return None
 
@@ -83,11 +85,22 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
     mt = spec.security["multi_tenant"]
     pg = spec.persistence["kind"] == "postgresql"
     auth = spec.security["authentication"]
+    authz = spec.security["authorization"]
     binding = mt["binding"] if spec.multi_tenant else None
+    identity: Dict[str, Any] = {"principal": "none", "subject_source": None, "roles_source": None, "tenant_source": None}
     if auth == "api_key" and binding == "api_key_registry":
-        authentication = "api_key_registry: X-API-Key compared in constant time against a registry of keys, each bound to one tenant"
+        authentication = "api_key_registry: X-API-Key compared in constant time against a registry of grants, each bound to one tenant with a subject and roles"
+        identity = {"principal": "per API key (grant)", "subject_source": "settings.api_keys[key].subject (default: a digest of the key)", "roles_source": "settings.api_keys[key].roles", "tenant_source": "settings.api_keys[key].tenant_id"}
     elif auth == "api_key":
         authentication = "api_key_shared: X-API-Key compared in constant time against one configured key (no per-caller identity)"
+        identity = {"principal": "shared credential, no caller identity", "subject_source": None, "roles_source": None, "tenant_source": None}
+    elif auth == "oauth2_jwt" and spec.oidc:
+        o = spec.oidc
+        authentication = (
+            f"oidc: bearer tokens of issuer {o['issuer']} for audience {o['audience']!r}, algorithms {'/'.join(o['algorithms'])} only (HS*/none refused), signature verified against the JWKS at "
+            f"{o['jwks_url']} (cached {o['jwks_cache_s']} s, refreshed once per unknown key id, https only outside tests), exp/nbf/iat required with {o['leeway_s']} s leeway; provider unreachable is 503, not 401"
+        )
+        identity = {"principal": "per token (verified claims only)", "subject_source": f"claim {o['claims']['subject']}", "roles_source": f"claim {o['claims']['roles']} (list or space-separated)", "tenant_source": f"claim {o['claims']['tenant']} (uuid)" if binding == "principal_claim" else None}
     elif auth == "none":
         authentication = "none: every route is public by design (declared in .audit-fastapi.json)"
     else:
@@ -97,37 +110,67 @@ def security_guarantees(spec: Spec) -> Dict[str, Any]:
         storage.append("tenant_id column on every entity and a tenant filter on every repository query")
         if pg:
             storage.append("composite foreign keys (tenant_id, id) between tenant tables: a row cannot reference another tenant's row")
+        if spec.rls:
+            rls = mt["rls"]
+            storage.append(f"row-level security: ENABLE + FORCE on every tenant table, policy USING/WITH CHECK on {rls['context_key']} (NULL context: no row visible or writable), application role {rls['app_role']} without BYPASSRLS (GRANT SELECT/INSERT/UPDATE/DELETE only), tenant context set with set_config(..., true) at the start of the request transaction, migrations run by the owner")
+    if binding == "api_key_registry":
+        tenant_binding = "enforced: the tenant path parameter must equal the tenant bound to the presented API key, otherwise 403"
+    elif binding == "principal_claim":
+        tenant_binding = f"enforced: the tenant path parameter must equal the verified {spec.oidc['claims']['tenant'] if spec.oidc else 'tenant'} claim of the token, otherwise 403; a token without a valid tenant claim is 401"
+    else:
+        tenant_binding = "none" if spec.multi_tenant else None
+    if spec.authz_declared:
+        resource_authorization = f"not generated (spec.security.authorization = {spec.authz_declared!r} is a pending decision; schema 1.2 declares the policy object)"
+    elif spec.authz_model == "none":
+        resource_authorization = "not generated (spec.security.authorization.model is 'none')"
+    else:
+        parts = []
+        if spec.with_roles:
+            parts.append("per-operation roles checked in a route dependency before the service runs (403): " + (", ".join(f"{op} needs {'/'.join(r)}" for op, r in authz["operations"].items()) or "every declared operation is open to any authenticated member"))
+        if spec.with_ownership:
+            vis = authz["ownership"]["visibility"]
+            admins = authz["ownership"]["admin_roles"]
+            parts.append(
+                f"ownership of {', '.join(f'{m.name}.{e.name}' for m, e in spec.owned_entities())}: owner_id is the creating principal's subject; "
+                + ("reads are tenant-wide, update/delete need the owner" if vis == "tenant" else "reads and writes are owner-scoped in the repository query (another member gets 404)")
+                + (f" or an admin role ({'/'.join(admins)})" if admins else "")
+                + "; enforced in the service and the repository, the router only carries the principal"
+            )
+        resource_authorization = f"{spec.authz_model}: " + "; ".join(parts)
+    not_claimed = ["network or filesystem isolation of executed tests"]
+    if not spec.rls:
+        not_claimed.append("row-level security")
+    not_claimed.append("schema or database per tenant")
+    if spec.authz_model == "none":
+        not_claimed.append("resource-level authorization")
+    if not (auth == "oauth2_jwt" and spec.oidc):
+        not_claimed.append("OAuth2/JWT authentication" if auth != "oauth2_jwt" else "OAuth2/JWT authentication (declared without security.oidc)")
+    not_claimed += ["session authentication", "refresh tokens, token issuance or an authorization server", "cross-tenant administration", "public resources inside an authenticated API"]
     return {
         "multi_tenant": {
             "requested": spec.multi_tenant,
             "strategy_declared": mt["strategy"] if spec.multi_tenant else None,
-            "strategy_implemented": "shared_schema_application_scoping" if spec.multi_tenant else None,
-            "principal_tenant_binding": (
-                "enforced: the tenant path parameter must equal the tenant bound to the presented API key, otherwise 403"
-                if binding == "api_key_registry" else ("none" if spec.multi_tenant else None)
-            ),
+            "strategy_implemented": ("shared_schema_rls" if spec.rls else "shared_schema_application_scoping") if spec.multi_tenant else None,
+            "principal_tenant_binding": tenant_binding,
             "storage_isolation": storage,
-            "row_level_security": False,
+            "row_level_security": bool(spec.rls),
+            "rls": {"app_role": mt["rls"]["app_role"], "context_key": mt["rls"]["context_key"], "context_scope": "transaction (set_config third argument true); never SET at session level"} if spec.rls else None,
             "schema_or_database_per_tenant": False,
         },
         "authentication": authentication,
-        "resource_authorization": (
-            "not generated" + (f" (spec.security.authorization = {spec.security['authorization']!r} is a pending decision)" if spec.security["authorization"] != "none" else "")
-        ),
+        "identity": identity,
+        "resource_authorization": resource_authorization,
+        "authorization_model": spec.authz_model,
+        "audit_logging": "authorization denials are logged with subject, operation and resource type (no credentials)" if spec.security["audit"]["authorization_decisions"] else "not requested",
         "persistence": {
             "kind": spec.persistence["kind"],
             "migrations": "alembic: generated environment and initial migration; tables are created only by `alembic upgrade head`" if pg else "none (in-memory)",
             "create_all_used": False,
             "constraint_violation_on_commit": "rolled back and answered 409 (problem+json)" if pg else "not applicable",
+            "infrastructure_failure": "database unreachable is answered 503 (problem+json), distinct from 401/403/404" if pg else "not applicable",
         },
         "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
-        "not_claimed": [
-            "row-level security",
-            "schema or database per tenant",
-            "resource-level authorization",
-            "OAuth2/JWT or session authentication",
-            "network or filesystem isolation of executed tests",
-        ],
+        "not_claimed": not_claimed,
     }
 
 

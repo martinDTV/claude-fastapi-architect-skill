@@ -1,0 +1,4 @@
+{"schema": "fastapi-architect/spec/1.2", "name": "x", "functional": {"modules": [{"name": "things", "entities": [{"name": "Thing", "owned": true, "fields": [{"name": "label", "type": "str"}]}]}]},
+ "persistence": {"kind": "memory"},
+ "security": {"authentication": "oauth2_jwt", "oidc": {"issuer": "http://login.example.com", "algorithms": ["HS256", "RS256"], "claims": {"tenant": "bad claim!"}}, "multi_tenant": {"enabled": true, "strategy": "shared_schema_rls", "binding": "principal_claim"}},
+ "x-expect": ["spec.security.oidc.issuer", "spec.security.oidc.algorithms: HS256 refused", "spec.security.oidc.audience: required", "spec.security.oidc.claims.tenant", "spec.security.multi_tenant.strategy: 'shared_schema_rls' is PostgreSQL row-level security; persistence.kind is 'memory'", "owned entities (things.Thing) need security.authorization.model ownership or roles_and_ownership"]}

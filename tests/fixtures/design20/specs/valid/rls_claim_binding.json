@@ -1,0 +1,31 @@
+{
+  "schema": "fastapi-architect/spec/1.2",
+  "name": "fleet-telemetry",
+  "package": "fleet",
+  "description": "Vehicles and readings per fleet operator on PostgreSQL with row-level security; identity from an OIDC provider.",
+  "scope": {"size": "medium", "team_size": 4},
+  "functional": {
+    "modules": [
+      {
+        "name": "vehicles",
+        "entities": [
+          {"name": "Vehicle", "fields": [{"name": "plate", "type": "str", "max_length": 12}, {"name": "active", "type": "bool", "default": true}]}
+        ]
+      },
+      {
+        "name": "readings",
+        "depends_on": ["vehicles"],
+        "entities": [
+          {"name": "Reading", "fields": [{"name": "vehicle_id", "type": "uuid", "references": "vehicles.Vehicle"}, {"name": "odometer_km", "type": "float", "min_value": 0}, {"name": "taken_at", "type": "datetime"}], "operations": ["create", "get", "list"]}
+        ]
+      }
+    ]
+  },
+  "persistence": {"kind": "postgresql", "migrations": true},
+  "security": {
+    "authentication": "oauth2_jwt",
+    "oidc": {"issuer": "https://login.fleet.example/", "audience": "fleet-api", "claims": {"tenant": "fleet_id"}},
+    "authorization": {"model": "roles", "roles": ["dispatcher", "driver"], "operations": {"create": ["dispatcher"]}},
+    "multi_tenant": {"enabled": true, "strategy": "shared_schema_rls", "tenant_param": "fleet_id", "binding": "principal_claim", "rls": {"app_role": "fleet_api", "context_key": "fleet.current"}}
+  }
+}

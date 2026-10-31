@@ -169,26 +169,48 @@ def recommend(spec: Spec) -> Recommendation:
 
     security_notes: List[str] = []
     auth = spec.security["authentication"]
+    authz = spec.security["authorization"]
     if auth == "none":
         security_notes.append("no authentication: every route is declared public in the generated .audit-fastapi.json so the auditor reports the exposure as a decision, not a finding")
     elif auth == "api_key":
         security_notes.append("API key in the X-API-Key header compared in constant time; applied as a router dependency to every business route")
+    elif auth == "oauth2_jwt" and spec.oidc:
+        o = spec.oidc
+        security_notes.append(f"OIDC bearer tokens from {o['issuer']} (audience {o['audience']!r}, algorithms {', '.join(o['algorithms'])}): signature against the provider's JWKS ({o['jwks_url']}, cached {o['jwks_cache_s']} s, refreshed on an unknown key id), issuer, audience, exp/nbf/iat with {o['leeway_s']} s leeway; the principal is built from verified claims only ({o['claims']['subject']}, {o['claims']['tenant']}, {o['claims']['roles']}); no refresh tokens, sessions or token issuance")
     else:
         pending.append(f"authentication '{auth}' is accepted by the contract but not generated in this increment (references/security-and-config.md); the generator refuses to emit a non-functional stub")
-    if spec.security["authorization"] != "none":
-        pending.append(f"authorization '{spec.security['authorization']}' needs a policy decision (role model or resource ownership); only authentication is generated")
+    if spec.authz_declared:
+        pending.append(f"authorization '{spec.authz_declared}' is a declaration of schema {spec.schema.rsplit('/', 1)[-1]}: it needs the schema 1.2 policy object (model, roles, operations, ownership) to be generated; only authentication is generated")
+    elif spec.authz_model != "none":
+        parts = [f"authorization model {spec.authz_model}"]
+        if spec.with_roles:
+            restricted = ", ".join(f"{op}: {'/'.join(roles)}" for op, roles in authz["operations"].items()) or "every operation open to any authenticated member"
+            parts.append(f"roles {', '.join(authz['roles'])} checked per operation in a route dependency ({restricted})")
+        if spec.with_ownership:
+            owned = ", ".join(f"{m.name}.{e.name}" for m, e in spec.owned_entities())
+            vis = authz["ownership"]["visibility"]
+            parts.append(f"ownership of {owned}: owner_id recorded at creation; {'every member of the tenant reads, only the owner' if vis == 'tenant' else 'only the owner'}{' or an admin (' + '/'.join(authz['ownership']['admin_roles']) + ')' if authz['ownership']['admin_roles'] else ''} {'modifies' if vis == 'tenant' else 'reads or modifies'}; enforced in the service and in the repository query, never in the router alone")
+        security_notes.append("; ".join(parts))
+    if spec.security["audit"]["authorization_decisions"]:
+        security_notes.append("authorization decisions are logged (denials with subject, operation and resource type; never tokens or keys)")
     if spec.multi_tenant:
         strategy = spec.security["multi_tenant"]["strategy"]
         binding = spec.security["multi_tenant"]["binding"]
         if binding == "api_key_registry":
-            security_notes.append("multi-tenant binding api_key_registry: every API key maps to exactly one tenant (settings.api_keys); the tenant path parameter is resolved by a dependency that refuses any other tenant with 403, and every repository call is scoped by that tenant id")
+            security_notes.append("multi-tenant binding api_key_registry: every API key maps to exactly one tenant (settings.api_keys: tenant_id, subject, roles); the tenant path parameter is resolved by a dependency that refuses any other tenant with 403, and every repository call is scoped by that tenant id")
+        elif binding == "principal_claim":
+            security_notes.append(f"multi-tenant binding principal_claim: the tenant comes from the verified token claim {spec.oidc['claims']['tenant'] if spec.oidc else 'tenant'} (never from the request); the tenant path parameter must equal it, otherwise 403, and every repository call is scoped by it")
         else:
-            pending.append("multi-tenant: no principal-tenant binding is declared (security.multi_tenant.binding is 'none'); the generator refuses to emit tenant routes that would accept any tenant_id from an authenticated caller: declare binding 'api_key_registry' or disable multi-tenancy (references/authz-multitenancy.md)")
-        security_notes.append(f"tenant isolation generated: application-level scoping (tenant_id column, scoped queries{', composite foreign keys between tenant tables' if spec.persistence['kind'] == 'postgresql' else ''}); no row-level security, no schema or database per tenant")
-        if strategy == "shared_schema_rls":
-            pending.append("tenant strategy 'shared_schema_rls' is declared: row-level security policies and the session tenant context are not generated; until they are, the isolation is application scoping only (references/authz-multitenancy.md, tenant-ledger example)")
+            pending.append("multi-tenant: no principal-tenant binding is declared (security.multi_tenant.binding is 'none'); the generator refuses to emit tenant routes that would accept any tenant_id from an authenticated caller: declare binding 'api_key_registry' or 'principal_claim', or disable multi-tenancy (references/authz-multitenancy.md)")
+        if spec.rls:
+            rls = spec.security["multi_tenant"]["rls"]
+            security_notes.append(f"tenant isolation generated: PostgreSQL row-level security (ENABLE + FORCE on every tenant table, policy on {rls['context_key']} set with set_config(..., true) inside the request transaction, application role {rls['app_role']} without BYPASSRLS, migrations run by the owner) plus application scoping and composite foreign keys; no schema or database per tenant")
         else:
-            pending.append(f"tenant strategy '{strategy}' is recorded but the generated persistence uses one schema; schema or database per tenant needs its own provisioning design")
+            security_notes.append(f"tenant isolation generated: application-level scoping (tenant_id column, scoped queries{', composite foreign keys between tenant tables' if spec.persistence['kind'] == 'postgresql' else ''}); no row-level security, no schema or database per tenant")
+            if strategy == "shared_schema_rls":
+                pending.append("tenant strategy 'shared_schema_rls' is declared in a 1.0/1.1 contract: row-level security policies and the session tenant context are not generated for that schema; until the contract moves to schema 1.2 (a reviewed change with new tests), the isolation is application scoping only (references/authz-multitenancy.md)")
+            elif strategy != "shared_schema_application_scoping":
+                pending.append(f"tenant strategy '{strategy}' is recorded but the generated persistence uses one schema; schema or database per tenant needs its own provisioning design")
 
     testing_notes = [f"generated tests cover the {'unit' if 'unit' in spec.testing['levels'] else 'integration'} level of every operation through the HTTP boundary (create, validation, not found, list)"]
     if "end_to_end" in spec.testing["levels"]:

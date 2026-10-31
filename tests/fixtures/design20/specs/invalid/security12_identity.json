@@ -1,0 +1,4 @@
+{"schema": "fastapi-architect/spec/1.2", "name": "x", "functional": {"modules": [{"name": "things", "entities": [{"name": "Thing", "fields": [{"name": "label", "type": "str"}]}]}]},
+ "persistence": {"kind": "postgresql", "migrations": true},
+ "security": {"authentication": "api_key", "oidc": {"issuer": "https://a.example", "audience": "x"}, "authorization": {"model": "roles", "roles": ["admin"]}, "multi_tenant": {"enabled": true, "strategy": "shared_schema_rls", "binding": "none"}},
+ "x-expect": ["spec.security.oidc: only valid with authentication 'oauth2_jwt'", "spec.security.multi_tenant.binding: authorization model 'roles' needs a caller identity", "spec.security.multi_tenant.strategy: 'shared_schema_rls' sets the tenant context from the authenticated principal and needs a binding"]}
