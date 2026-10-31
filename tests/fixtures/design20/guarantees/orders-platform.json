@@ -1,0 +1,46 @@
+{
+  "audit_logging": "not requested",
+  "authentication": "api_key_registry: X-API-Key compared in constant time against a registry of grants, each bound to one tenant with a subject and roles",
+  "authorization_model": "none",
+  "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+  "identity": {
+    "principal": "per API key (grant)",
+    "roles_source": "settings.api_keys[key].roles",
+    "subject_source": "settings.api_keys[key].subject (default: a digest of the key)",
+    "tenant_source": "settings.api_keys[key].tenant_id"
+  },
+  "multi_tenant": {
+    "principal_tenant_binding": "enforced: the tenant path parameter must equal the tenant bound to the presented API key, otherwise 403",
+    "requested": true,
+    "rls": null,
+    "row_level_security": false,
+    "schema_or_database_per_tenant": false,
+    "storage_isolation": [
+      "tenant_id column on every entity and a tenant filter on every repository query",
+      "composite foreign keys (tenant_id, id) between tenant tables: a row cannot reference another tenant's row"
+    ],
+    "strategy_declared": "shared_schema_rls",
+    "strategy_implemented": "shared_schema_application_scoping"
+  },
+  "not_claimed": [
+    "network or filesystem isolation of executed tests",
+    "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)",
+    "row-level security",
+    "schema or database per tenant",
+    "resource-level authorization",
+    "OAuth2/JWT authentication",
+    "session authentication",
+    "OAuth2 authorization flows (code, PKCE, device), consent, token issuance, refresh tokens or an authorization server (only externally issued tokens are validated)",
+    "cross-tenant administration",
+    "public resources inside an authenticated API",
+    "authorization proven by the name of a dependency (the auditor counts a policy only where its code shows the decision)"
+  ],
+  "persistence": {
+    "constraint_violation_on_commit": "rolled back and answered 409 (problem+json)",
+    "create_all_used": false,
+    "infrastructure_failure": "database unreachable is answered 503 (problem+json), distinct from 401/403/404",
+    "kind": "postgresql",
+    "migrations": "alembic: generated environment and initial migration; tables are created only by `alembic upgrade head`"
+  },
+  "resource_authorization": "not generated (spec.security.authorization = 'resource' is a pending decision; schema 1.2 declares the policy object)"
+}

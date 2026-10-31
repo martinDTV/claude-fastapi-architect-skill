@@ -1,0 +1,55 @@
+{
+  "audit_logging": "not requested",
+  "authentication": "api_key_registry: X-API-Key compared in constant time against a registry of grants, each bound to one tenant with a subject and roles",
+  "authorization_model": "roles_and_ownership",
+  "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+  "identity": {
+    "principal": "per API key (grant)",
+    "roles_source": "settings.api_keys[key].roles",
+    "subject_source": "settings.api_keys[key].subject (default: a digest of the key)",
+    "tenant_source": "settings.api_keys[key].tenant_id"
+  },
+  "multi_tenant": {
+    "principal_tenant_binding": "enforced: the tenant path parameter must equal the tenant bound to the presented API key, otherwise 403",
+    "requested": true,
+    "rls": {
+      "app_role": "tenant_projects_app",
+      "context_key": "app.tenant_id",
+      "context_scope": "transaction (set_config third argument true); never SET at session level",
+      "context_set_by": "get_tenant_session, from the authenticated principal's tenant, before the first statement of the request transaction",
+      "context_trust": "any statement run as the application role within that transaction can change it: the boundary holds against missing filters and ordinary application bugs, not against SQL injection or arbitrary SQL as that role",
+      "owner": "migrations run as the owner; FORCE makes the owner subject to the policies too unless it is a superuser or BYPASSRLS",
+      "role_privileges": "SELECT, INSERT, UPDATE, DELETE on the tenant tables and USAGE on the schema; no DDL, no TRUNCATE, no BYPASSRLS, no CREATEROLE, no access to alembic_version or pg_authid"
+    },
+    "row_level_security": true,
+    "schema_or_database_per_tenant": false,
+    "storage_isolation": [
+      "tenant_id column on every entity and a tenant filter on every repository query",
+      "composite foreign keys (tenant_id, id) between tenant tables: a row cannot reference another tenant's row",
+      "row-level security: ENABLE + FORCE on every tenant table, policy USING/WITH CHECK on app.tenant_id (NULL context: no row visible or writable), application role tenant_projects_app without BYPASSRLS (GRANT SELECT/INSERT/UPDATE/DELETE only), tenant context set with set_config(..., true) at the start of the request transaction, migrations run by the owner"
+    ],
+    "strategy_declared": "shared_schema_rls",
+    "strategy_implemented": "shared_schema_rls"
+  },
+  "not_claimed": [
+    "network or filesystem isolation of executed tests",
+    "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)",
+    "isolation against SQL statements executed as the application role (an injection that reaches statement level can change the tenant context; the policies protect against missing filters, not against arbitrary SQL)",
+    "schema or database per tenant",
+    "business rules beyond the declared policy (roles per operation and ownership are enforced; anything finer is the author's code)",
+    "OAuth2/JWT authentication",
+    "session authentication",
+    "OAuth2 authorization flows (code, PKCE, device), consent, token issuance, refresh tokens or an authorization server (only externally issued tokens are validated)",
+    "cross-tenant administration",
+    "public resources inside an authenticated API",
+    "authorization proven by the name of a dependency (the auditor counts a policy only where its code shows the decision)"
+  ],
+  "persistence": {
+    "constraint_violation_on_commit": "rolled back and answered 409 (problem+json)",
+    "create_all_used": false,
+    "infrastructure_failure": "database unreachable is answered 503 (problem+json), distinct from 401/403/404",
+    "kind": "postgresql",
+    "migrations": "alembic: generated environment and initial migration; tables are created only by `alembic upgrade head`"
+  },
+  "resource_authorization": "roles_and_ownership: per-operation roles checked in a route dependency before the service runs (403): delete needs admin; ownership of tasks.Task: owner_id is the creating principal's subject; reads are tenant-wide, update/delete need the owner or an admin role (admin); enforced in the service and the repository, the router only carries the principal"
+}

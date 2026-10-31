@@ -221,7 +221,7 @@ class SecurityContractTests(unittest.TestCase):
         self.assertIn("row-level security", notes["not_claimed"])
         self.assertNotIn("resource-level authorization", notes["not_claimed"])
         self.assertNotIn("OAuth2/JWT authentication", notes["not_claimed"])
-        self.assertIn("refresh tokens, token issuance or an authorization server", notes["not_claimed"])
+        self.assertTrue(any(c.startswith("OAuth2 authorization flows") and "refresh tokens" in c for c in notes["not_claimed"]), notes["not_claimed"])
         self.assertIn("denials are logged", notes["audit_logging"])
         projects = design.security_guarantees(design.load_spec(str(TENANT_PROJECTS)))
         self.assertEqual(projects["multi_tenant"]["strategy_implemented"], "shared_schema_rls")
@@ -234,6 +234,29 @@ class SecurityContractTests(unittest.TestCase):
         self.assertIn("503", projects["persistence"]["infrastructure_failure"])
         md = design.render_markdown(design.run_design(str(TENANT_PROJECTS), design.DesignOptions(validate_only=True)))
         self.assertIn("row-level security: True", md)
+
+    def test_guarantees_blocks_match_their_frozen_fixtures(self) -> None:
+        """Regression control of what the engine claims: a change in any guarantees block is a deliberate fixture edit."""
+        frozen = FIXTURES / "design20" / "guarantees"
+        for name, path in (("inventory-service", EXAMPLES / "specs" / "inventory-service.json"), ("orders-platform", ORDERS), ("team-notes", TEAM_NOTES), ("tenant-projects", TENANT_PROJECTS), ("oidc_owner_scoped", SPECS / "valid" / "oidc_owner_scoped.json"), ("rls_claim_binding", SPECS / "valid" / "rls_claim_binding.json"), ("tenant_unbound", SPECS / "valid" / "tenant_unbound.json")):
+            with self.subTest(contract=name):
+                live = json.loads(json.dumps(design.security_guarantees(design.load_spec(str(path))), sort_keys=True))
+                self.assertEqual(live, json.loads((frozen / f"{name}.json").read_text(encoding="utf-8")))
+
+    def test_not_claimed_names_the_limits_the_review_asked_for(self) -> None:
+        for path in (TEAM_NOTES, TENANT_PROJECTS, ORDERS):
+            claims = design.security_guarantees(design.load_spec(str(path)))["not_claimed"]
+            joined = " | ".join(claims)
+            self.assertIn("authorization proven by the name of a dependency", joined)
+            self.assertIn("OAuth2 authorization flows", joined)
+            self.assertIn("protection against code the generated tests execute", joined)
+        rls = design.security_guarantees(design.load_spec(str(TENANT_PROJECTS)))
+        self.assertTrue(any("SQL injection" in c or "arbitrary SQL" in c for c in rls["not_claimed"]), rls["not_claimed"])
+        self.assertIn("context_trust", rls["multi_tenant"]["rls"])
+        self.assertIn("role_privileges", rls["multi_tenant"]["rls"])
+        oidc = design.security_guarantees(design.load_spec(str(TEAM_NOTES)))
+        self.assertTrue(any("real identity provider" in c for c in oidc["not_claimed"]), oidc["not_claimed"])
+        self.assertIn("tests/test_jwks.py", oidc["authentication"])
 
     def test_advisor_explains_the_security_design(self) -> None:
         rec = design.recommend(design.load_spec(str(TEAM_NOTES)))
@@ -264,6 +287,16 @@ class SecurityBlueprintTests(TempDirCase):
         self.assertIn("audience=settings.oidc_audience", security)
         self.assertIn("issuer=settings.oidc_issuer", security)
         self.assertIn("MIN_REFRESH_INTERVAL_S = 30", security)
+        self.assertIn("MAX_JWKS_BYTES = 262_144", security)
+        self.assertIn("class JwksUnavailable(RuntimeError):", security)
+        self.assertIn("ssl.create_default_context(cafile=settings.oidc_ca_bundle or None)", security)
+        self.assertIn("urllib.request.urlopen(self._url, timeout=self._timeout, context=self._tls)", security)
+        self.assertIn("body = response.read(MAX_JWKS_BYTES + 1)", security)
+        self.assertIn("def _may_attempt(self, now: float) -> bool:", security)
+        self.assertIn("age <= self._stale_max", security)
+        self.assertIn('if not any(key.key_type in ("RSA", "EC", "OKP") for key in keys.keys)', security)
+        self.assertNotIn("CERT_NONE", security)
+        self.assertNotIn("check_hostname = False", security)
         self.assertIn('raise RuntimeError("OIDC_JWKS_URL must be an https URL")', security)
         self.assertIn("is accepted only when ENVIRONMENT is 'test'", security)
         self.assertIn("HTTP_503_SERVICE_UNAVAILABLE", security)
@@ -272,8 +305,14 @@ class SecurityBlueprintTests(TempDirCase):
         self.assertIn("tenant_id = UUID(str(raw_tenant))", security)
         self.assertIn('"pyjwt[crypto]>=2.9,<3"', bp.files["pyproject.toml"])
         config = bp.files["src/team_notes/core/config.py"]
-        for field in ("oidc_issuer", "oidc_audience", "oidc_jwks_url", "oidc_jwks_json", "oidc_jwks_cache_s", "oidc_leeway_s"):
+        for field in ("oidc_issuer", "oidc_audience", "oidc_jwks_url", "oidc_jwks_json", "oidc_jwks_cache_s", "oidc_leeway_s", "oidc_jwks_stale_max_s", "oidc_fetch_timeout_s", "oidc_ca_bundle"):
             self.assertIn(field, config)
+        self.assertIn("TEAM_NOTES_OIDC_CA_BUNDLE", bp.files[".env.example"])
+        jwks_tests = bp.files["tests/test_jwks.py"]
+        for name in ("test_keys_are_fetched_over_https_and_a_valid_signature_is_accepted", "test_a_rotated_key_is_fetched_once_the_refresh_interval_has_passed", "test_unknown_key_ids_cannot_force_a_fetch_per_request", "test_a_key_replaced_under_the_same_id_is_rejected_until_the_cache_expires", "test_an_unusable_or_failing_provider_is_503_not_401", "test_a_slow_provider_times_out_as_503", "test_tls_verification_is_never_disabled", "test_outage_without_a_cache_is_503_and_the_provider_is_retried_after_the_interval", "test_a_warm_cache_survives_an_outage_for_the_stale_window_only", "test_concurrent_cold_starts_fetch_once"):
+            self.assertIn(f"def {name}(", jwks_tests)
+        self.assertIn("x509.SubjectAlternativeName", jwks_tests)
+        self.assertNotIn("CERT_NONE", jwks_tests)
         self.assertNotIn("oidc_algorithms", config)  # not configurable: an environment cannot lower the accepted algorithms
         self.assertIn("app.state.jwks = JwksSource(settings)", bp.files["src/team_notes/main.py"])
         self.assertIn("dependencies=[Depends(require_bearer_token)]", bp.files["src/team_notes/api/router.py"])
@@ -365,8 +404,9 @@ class SecurityBlueprintTests(TempDirCase):
         self.assertIn("def migrated(owner_url: str):", conftest)
         self.assertIn("def app(migrated: str, database_url: str):", conftest)
         rls_tests = bp.files["tests/test_rls.py"]
-        for name in ("test_every_tenant_table_has_rls_enabled_forced_and_a_policy", "test_the_application_role_is_restricted", "test_without_tenant_context_no_row_is_visible", "test_without_tenant_context_an_insert_is_rejected", "test_with_tenant_context_only_that_tenants_rows_are_visible", "test_with_tenant_context_a_row_of_another_tenant_cannot_be_written", "test_tenant_context_does_not_survive_commit_rollback_or_the_pool", "test_rollback_leaves_no_row", "test_an_invalid_or_empty_tenant_context_fails_closed", "test_the_application_role_cannot_lift_the_protection", "test_concurrent_requests_of_two_tenants_never_see_each_other", "test_an_unreachable_database_is_503_not_401_or_404"):
+        for name in ("test_every_tenant_table_has_rls_enabled_forced_and_a_policy", "test_the_application_role_is_restricted", "test_without_tenant_context_no_row_is_visible", "test_without_tenant_context_an_insert_is_rejected", "test_with_tenant_context_only_that_tenants_rows_are_visible", "test_with_tenant_context_a_row_of_another_tenant_cannot_be_written", "test_tenant_context_does_not_survive_commit_rollback_or_the_pool", "test_rollback_leaves_no_row", "test_an_invalid_or_empty_tenant_context_fails_closed", "test_the_application_role_cannot_lift_the_protection", "test_the_context_is_a_setting_that_any_statement_run_as_the_application_role_can_change", "test_the_application_role_has_row_privileges_only", "test_concurrent_requests_of_two_tenants_never_see_each_other", "test_an_unreachable_database_is_503_not_401_or_404"):
             self.assertIn(f"def {name}(", rls_tests)
+        self.assertIn("parameter is data, not a statement", rls_tests)
         self.assertIn("pool_size=1, max_overflow=0", rls_tests)
         self.assertIn("anyio.create_task_group()", rls_tests)
         self.assertTrue(all(m["row_level_security"] for m in bp.migrations))
@@ -469,8 +509,25 @@ class AuthorizationSliceTests(TempDirCase):
             "test_a_member_of_another_tenant_is_403_not_401",
             "test_a_static_jwks_is_refused_outside_the_test_environment",
             "test_an_unreachable_provider_is_503_not_401",
+            # the JWKS client against a local HTTPS provider (tests/test_jwks.py)
+            "test_keys_are_fetched_over_https_and_a_valid_signature_is_accepted",
+            "test_the_cache_serves_repeated_requests_without_refetching",
+            "test_a_rotated_key_is_fetched_once_the_refresh_interval_has_passed",
+            "test_unknown_key_ids_cannot_force_a_fetch_per_request",
+            "test_a_key_replaced_under_the_same_id_is_rejected_until_the_cache_expires",
+            "test_a_removed_key_is_rejected_after_the_cache_expires",
+            "test_an_unusable_or_failing_provider_is_503_not_401[malformed]",
+            "test_an_unusable_or_failing_provider_is_503_not_401[invalid]",
+            "test_an_unusable_or_failing_provider_is_503_not_401[error]",
+            "test_an_unusable_or_failing_provider_is_503_not_401[huge]",
+            "test_a_slow_provider_times_out_as_503",
+            "test_tls_verification_is_never_disabled",
+            "test_outage_without_a_cache_is_503_and_the_provider_is_retried_after_the_interval",
+            "test_a_warm_cache_survives_an_outage_for_the_stale_window_only",
+            "test_concurrent_cold_starts_fetch_once",
         ):
             self.assertIn(expected, executed)
+        self.assertGreaterEqual(run["counts"]["passed"], 70)
         self.assertEqual(report["verification"]["audit"]["findings_total"], 0, report["verification"]["audit"]["findings"])
         manifest = design.verify_manifest(self.target("team-notes"))
         self.assertEqual(manifest["manifest"]["security"], {"authentication": "oauth2_jwt", "identity": "per_caller", "authorization_model": "roles_and_ownership", "authorization_declared": None, "tenant_strategy_declared": "shared_schema_application_scoping", "tenant_strategy_implemented": "shared_schema_application_scoping", "tenant_binding": "principal_claim", "row_level_security": False})

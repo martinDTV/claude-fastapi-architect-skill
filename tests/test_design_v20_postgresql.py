@@ -428,6 +428,8 @@ class RowLevelSecurityBackendTests(unittest.TestCase):
             "test_rollback_leaves_no_row",
             "test_an_invalid_or_empty_tenant_context_fails_closed",
             "test_the_application_role_cannot_lift_the_protection",
+            "test_the_context_is_a_setting_that_any_statement_run_as_the_application_role_can_change",
+            "test_the_application_role_has_row_privileges_only",
             "test_concurrent_requests_of_two_tenants_never_see_each_other",
             "test_an_unreachable_database_is_503_not_401_or_404",
             "test_create_task_cannot_reference_a_project_id_of_another_tenant",

@@ -1,0 +1,43 @@
+{
+  "audit_logging": "authorization denials are logged with subject, operation and resource type (no credentials)",
+  "authentication": "oidc: bearer tokens of issuer https://id.example.org for audience 'journal', algorithms ES256 only (HS*/none refused), signature verified against the JWKS at https://id.example.org/.well-known/jwks.json (TLS verified, private CA only added through oidc_ca_bundle, response capped, cached 300 s, one fetch attempt per 30 s, stale keys served for at most oidc_jwks_stale_max_s), exp/nbf/iat required with 30 s leeway; provider unreachable, failing or unusable is 503, not 401; the client is verified against a local HTTPS provider in tests/test_jwks.py",
+  "authorization_model": "roles_and_ownership",
+  "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+  "identity": {
+    "principal": "per token (verified claims only)",
+    "roles_source": "claim https://example.org/roles (list or space-separated)",
+    "subject_source": "claim sub",
+    "tenant_source": null
+  },
+  "multi_tenant": {
+    "principal_tenant_binding": null,
+    "requested": false,
+    "rls": null,
+    "row_level_security": false,
+    "schema_or_database_per_tenant": false,
+    "storage_isolation": [],
+    "strategy_declared": null,
+    "strategy_implemented": null
+  },
+  "not_claimed": [
+    "network or filesystem isolation of executed tests",
+    "protection against code the generated tests execute (the trust model is process hygiene, not a sandbox)",
+    "row-level security",
+    "schema or database per tenant",
+    "business rules beyond the declared policy (roles per operation and ownership are enforced; anything finer is the author's code)",
+    "validation against a real identity provider (the JWKS client is verified against a local HTTPS provider with a private CA; a provider's own behaviour is not)",
+    "session authentication",
+    "OAuth2 authorization flows (code, PKCE, device), consent, token issuance, refresh tokens or an authorization server (only externally issued tokens are validated)",
+    "cross-tenant administration",
+    "public resources inside an authenticated API",
+    "authorization proven by the name of a dependency (the auditor counts a policy only where its code shows the decision)"
+  ],
+  "persistence": {
+    "constraint_violation_on_commit": "not applicable",
+    "create_all_used": false,
+    "infrastructure_failure": "not applicable",
+    "kind": "memory",
+    "migrations": "none (in-memory)"
+  },
+  "resource_authorization": "roles_and_ownership: per-operation roles checked in a route dependency before the service runs (403): create needs writer/moderator; ownership of entries.Entry: owner_id is the creating principal's subject; reads and writes are owner-scoped in the repository query (another member gets 404) or an admin role (moderator); enforced in the service and the repository, the router only carries the principal"
+}
