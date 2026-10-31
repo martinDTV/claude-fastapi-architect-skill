@@ -1,0 +1,149 @@
+{
+  "files": {
+    ".audit-fastapi.json": "a04aa89d72d413184f1bc852847b6799060ac906288e8bf999a15cefde024b88",
+    ".env.example": "0de5c729f2dcae100f551065219d373e71a5f5f35db9b3107c976d07d1243afc",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
+    "README.md": "2d24cd4b30405e1f91ebdee6739db5da2e83d8f139a2e7aa634ef5bec34e0d72",
+    "pyproject.toml": "e9191d112bbab4cb54e97e78eaf12c2447355f19531df424e43db1879683f0b8",
+    "src/inventory_service/__init__.py": "e7f3ed86667c8ad6e2d5bc94f508f7635d8eeb25181d28e0dcb2052858f46722",
+    "src/inventory_service/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/api/catalog.py": "89dc26f721ff4182d06f6a5bfe9649c92b8be18790b87040085d86ad5ccbcb4e",
+    "src/inventory_service/api/router.py": "c8e9066b8a66804d62aafea4edb0e4576a54501ca02f8c5f5914968145edec5b",
+    "src/inventory_service/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/core/config.py": "38d8b1f91ea8af4269462225ad8c81daca46d876662e899278aed7159ea801b5",
+    "src/inventory_service/core/errors.py": "690f7f032b7aaeee37ef1d87714ee02ce640e075081274edda13004e5b6220ca",
+    "src/inventory_service/core/security.py": "c3c363679953724beefa2b831baac17defe12f60ee052b41ac7e60c4a0885d14",
+    "src/inventory_service/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/dependencies/catalog.py": "55dd0b76e08599eae4876d791297dc29caaab531e89f82fef7a5e9ace32b8f07",
+    "src/inventory_service/main.py": "7a77b32e1ab0dc52e08f36552dea7f8c47b565fcacf6e26e74c5bc03743fd5a8",
+    "src/inventory_service/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/models/catalog.py": "a6da6bce0622e5cc3c8af6f3082aa6ca0b3d1992de908f815e2c9b3fcb4739d1",
+    "src/inventory_service/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/repositories/catalog.py": "c579c0d28115df89f96602795f8331674b4965842a332ca09059f7b85e659aa2",
+    "src/inventory_service/schemas/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/schemas/catalog.py": "ca608b359955916c21f7adb8c746e7140e3f9187cba3494baff4cfd0d4148b4c",
+    "src/inventory_service/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/services/catalog.py": "ff3b931c3a4b23712b486e34b9109cf95be4718df2f4f5713201fed256b5e498",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/conftest.py": "8a48ada2f07b7be7bc6d57fed0273d6a72e7ef7beab231031c39c7091c01bdb8",
+    "tests/test_catalog.py": "4fea98030320ed6a2c07ded87a10e41cb3fbbecb5b16571244facc337a97bf53"
+  },
+  "history": [
+    {
+      "modules": [
+        "catalog"
+      ],
+      "operation": "generate",
+      "spec_digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c"
+    }
+  ],
+  "migrations": [],
+  "package": "inventory_service",
+  "schema": "fastapi-architect/generation/1.1",
+  "spec": {
+    "digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c",
+    "name": "inventory-service",
+    "schema": "fastapi-architect/spec/1.0"
+  },
+  "spec_document": {
+    "assumptions": [
+      "One warehouse per deployment; multi-warehouse is out of scope."
+    ],
+    "decisions": [
+      {
+        "id": "ADR-1",
+        "rationale": "The first increment validates the API contract; PostgreSQL follows once the catalogue shape is agreed.",
+        "status": "accepted",
+        "title": "In-memory persistence for the first slice"
+      }
+    ],
+    "description": "Stock catalogue for a small warehouse: products and their on-hand quantities.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Products that can be stocked and their current quantity.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "description": "Stock keeping unit, unique per warehouse",
+                  "max_length": 32,
+                  "name": "sku",
+                  "type": "str"
+                },
+                {
+                  "max_length": 120,
+                  "name": "name",
+                  "type": "str"
+                },
+                {
+                  "min_value": 0,
+                  "name": "quantity",
+                  "type": "int"
+                },
+                {
+                  "min_value": 0,
+                  "name": "unit_price",
+                  "type": "decimal"
+                },
+                {
+                  "max_length": 500,
+                  "name": "notes",
+                  "required": false,
+                  "type": "str"
+                }
+              ],
+              "name": "Product",
+              "operations": [
+                "create",
+                "get",
+                "list",
+                "update",
+                "delete"
+              ]
+            }
+          ],
+          "name": "catalog"
+        }
+      ]
+    },
+    "infrastructure": {
+      "deployment": "container"
+    },
+    "name": "inventory-service",
+    "nonfunctional": {
+      "availability": "99.5%",
+      "consistency": "strong",
+      "latency_p95_ms": 200
+    },
+    "open_questions": [
+      "Should SKU uniqueness be enforced by the API or by the upstream ERP?"
+    ],
+    "package": "inventory_service",
+    "persistence": {
+      "kind": "memory"
+    },
+    "schema": "fastapi-architect/spec/1.0",
+    "scope": {
+      "data_volume": "small",
+      "expected_rps": 20,
+      "size": "small",
+      "team_size": 2
+    },
+    "security": {
+      "authentication": "api_key"
+    },
+    "testing": {
+      "coverage_target": 80,
+      "levels": [
+        "unit",
+        "integration"
+      ]
+    }
+  },
+  "style": "layered",
+  "tool": {
+    "name": "fastapi-architect design",
+    "version": "2.0.0"
+  }
+}

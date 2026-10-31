@@ -1,0 +1,24 @@
+{
+  "conflicts": {},
+  "description": "compat fixture",
+  "files": [
+    {
+      "expected": "1067d7695f0b3d77aa079a53abc12cd5bc18cb6525d88466f96b0223ce50000e",
+      "new": "0111f7554519f7126c570c154b894f1fbcddf4faa126f6d644b974dab6c77411",
+      "path": "a.txt"
+    },
+    {
+      "expected": "321c7d264774f298d682321e88692b1e8cd75614da07163388b865ca74c7bae6",
+      "new": "e10a1287bfc72ab847878fa7737ea038aa327a3920d6c8c28b8e6484e013e913",
+      "path": "b.txt"
+    }
+  ],
+  "kind": "evolve",
+  "op_id": "e11fe6c6fb90b581",
+  "published": [
+    "a.txt"
+  ],
+  "recovered": [],
+  "schema": "fastapi-architect/operation/1.0",
+  "state": "publishing"
+}

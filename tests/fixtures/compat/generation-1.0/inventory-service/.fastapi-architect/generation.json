@@ -1,0 +1,43 @@
+{
+  "files": {
+    ".audit-fastapi.json": "a04aa89d72d413184f1bc852847b6799060ac906288e8bf999a15cefde024b88",
+    ".env.example": "f57f46c018d7e5414aa41e816e930354f7a0de7fd91320519e198387c66b835b",
+    ".gitignore": "45318973d0e83e04c6ae23d3c0155c48a60153d137ac800c413b4b974dee7b4f",
+    "README.md": "cdbe876c791abd8760ebf5c4ecd0027c84481570f7a09e55177020d475f72e87",
+    "pyproject.toml": "fbc5e977594b2991bb4c90fc38998ec1b70baf4037733d653a3b6231e9f20721",
+    "src/inventory_service/__init__.py": "e7f3ed86667c8ad6e2d5bc94f508f7635d8eeb25181d28e0dcb2052858f46722",
+    "src/inventory_service/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/api/catalog.py": "bf811983f300e3fdcec907dcdcaa6d888afa695bf05f69f778a0920a7c9cd84e",
+    "src/inventory_service/api/router.py": "c8e9066b8a66804d62aafea4edb0e4576a54501ca02f8c5f5914968145edec5b",
+    "src/inventory_service/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/core/config.py": "27d472a67861fa157d461d8bbd17508725427c566db4d61549e978318c215317",
+    "src/inventory_service/core/errors.py": "85c8b13da38675b9f3776d00fb9b27d90f4a309ab1da74e55444b37ff493c6cc",
+    "src/inventory_service/core/security.py": "4a542e261250ccf83c0dc197b6c73892f31ca69205cc4c0c0eb38f241d1f8808",
+    "src/inventory_service/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/dependencies/catalog.py": "55dd0b76e08599eae4876d791297dc29caaab531e89f82fef7a5e9ace32b8f07",
+    "src/inventory_service/main.py": "7a77b32e1ab0dc52e08f36552dea7f8c47b565fcacf6e26e74c5bc03743fd5a8",
+    "src/inventory_service/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/models/catalog.py": "bcfba5c0ea352a3096f89a101232179d7c2aea7cae65f205c14280d07076f2c6",
+    "src/inventory_service/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/repositories/catalog.py": "f1e40e9df50834369e2fe3ad12dd97c716e1c891d9d9b81a0e5a37a654a0c7b6",
+    "src/inventory_service/schemas/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/schemas/catalog.py": "7329e14c9bda0da9a95082f5068da760cd4103c5728eaf61af3acae22154f231",
+    "src/inventory_service/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/inventory_service/services/catalog.py": "47795580bd4317d626e090e9b2edad2bf92054d0414020919689eb51e4f517be",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/conftest.py": "bc40a02a74cc9c7635124ba14d79972adb04529db84404f46e732b64bc03baf8",
+    "tests/test_catalog.py": "5bb975c12b9488f0c7ffc88036d531e945c1939c295857439d6a2c8ec0011803"
+  },
+  "package": "inventory_service",
+  "schema": "fastapi-architect/generation/1.0",
+  "spec": {
+    "digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c",
+    "name": "inventory-service",
+    "schema": "fastapi-architect/spec/1.0"
+  },
+  "style": "layered",
+  "tool": {
+    "name": "fastapi-architect design",
+    "version": "2.0.0"
+  }
+}

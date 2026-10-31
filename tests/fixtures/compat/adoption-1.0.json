@@ -1,0 +1,61 @@
+{
+  "boundary": "only the files listed under modules are adopted and may be transformed; every other file is protected and is never written by the tool",
+  "history": [
+    {
+      "contract_digest": "7d3dc42f8fc6af54",
+      "modules": [
+        "items"
+      ],
+      "operation": "adopt"
+    }
+  ],
+  "modules": {
+    "items": {
+      "files": {
+        "app/routers/items.py": "39a4867c36ff704fe73b37b72e5f68f7e05cc10c11fdfa76c53fd61e2db8c24f",
+        "app/schemas.py": "af19c07302d574558c6838ec844a04c60a27752772aa7ef2f3299dacc94d6622"
+      },
+      "router": {
+        "file": "app/routers/items.py",
+        "name": "router"
+      },
+      "routes": [
+        {
+          "effective_paths": [
+            "/api/items"
+          ],
+          "function": "create_item",
+          "method": "POST",
+          "path": ""
+        },
+        {
+          "effective_paths": [
+            "/api/items"
+          ],
+          "function": "list_items",
+          "method": "GET",
+          "path": ""
+        },
+        {
+          "effective_paths": [
+            "/api/items/{item_id}"
+          ],
+          "function": "get_item",
+          "method": "GET",
+          "path": "/{item_id}"
+        }
+      ]
+    }
+  },
+  "notes": "scenario B: only the items module is adopted; users and everything else stay protected",
+  "project": {
+    "layout": "unknown",
+    "package": "app",
+    "source_root": ""
+  },
+  "schema": "fastapi-architect/adoption/1.0",
+  "tool": {
+    "name": "fastapi-architect evolve",
+    "version": "2.0.0"
+  }
+}
