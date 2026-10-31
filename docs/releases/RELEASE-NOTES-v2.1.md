@@ -1,9 +1,10 @@
-# FastAPI Architect v2.1.0 — Safe Change at Scale (release candidate)
+# FastAPI Architect v2.1.0 — Safe Change at Scale
 
-Status: release candidate on top of the published v2.0.0 (`d2d50d7`), not yet published. The scope was decided on
-2026-10-31 after the discovery recorded in [`docs/architecture/discovery-v2.1.md`](../architecture/discovery-v2.1.md)
-(section 10): increments 0, 1, 2 and 6 (the acceptance, [`ACCEPTANCE-v2.1.0.md`](ACCEPTANCE-v2.1.0.md)). One section
-per increment follows. The version constant, the plugin manifests and the generated manifests were bumped to 2.1.0 by
+Status: **published** on 2026-10-31 as `219383d4ffb2d64b8b580a9b9f7493bbef681f8a` on `origin/main`, a fast-forward of
+21 commits over the published v2.0.0 (`d2d50d7`), after the acceptance recorded in
+[`ACCEPTANCE-v2.1.0.md`](ACCEPTANCE-v2.1.0.md). The scope was decided on 2026-10-31 after the discovery recorded in
+[`docs/architecture/discovery-v2.1.md`](../architecture/discovery-v2.1.md) (section 10): increments 0, 1, 2 and 6.
+One section per increment follows. The version constant, the plugin manifests and the generated manifests were bumped to 2.1.0 by
 the release commit after the acceptance; a manifest written by 2.0.0 is still read (`tests/test_compat_artifacts.py`).
 
 ## Increment 0: Engineering Foundations & Technical Debt

@@ -35,7 +35,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 
 | Version | Title |
 |---|---|
-| [v2.1 (in progress)](releases/RELEASE-NOTES-v2.1.md) | Safe Change at Scale: increment 0 (engineering foundations and technical debt) implemented; increments 1, 2 and 6 pending |
+| [v2.1](releases/RELEASE-NOTES-v2.1.md) | Safe Change at Scale, published 2026-10-31: engineering foundations and technical debt (increment 0), the isolated container executor (increment 1), phased PostgreSQL migrations with safe backfills (increment 2) and the acceptance (increment 6) |
 | [v2.0](releases/RELEASE-NOTES-v2.0.md) | Architecture & Engineering Foundations (increments 1 to 5: design engine, PostgreSQL, evolution, adoption, identity and tenant isolation) |
 | [v2.1.0 acceptance report](releases/ACCEPTANCE-v2.1.0.md) | release-candidate review of the three v2.1 increments as one system: integrity, capability matrix (recommended / implemented / tested / not supported), backfills with locked rows, the semantics of `complete`, contract evidence by what it rests on, the Docker executor on a real daemon, PostgreSQL results, the two end-to-end scenarios, compatibility, tests and validations, defects, residual risks, documentation state and the verdict |
 | [v2.0.0 acceptance report](releases/ACCEPTANCE-v2.0.0.md) | release-candidate audit of the whole v2.0.0 range: integrity, capability matrix, end-to-end cycle, architecture, security limits, compatibility, recovery, executed validations, defects fixed, residual risks, verdict |
