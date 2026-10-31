@@ -13,7 +13,8 @@ class Settings(BaseSettings):
 
     app_name: str = "inventory-service"
     environment: str = "local"
-    api_key: SecretStr = SecretStr("")  # no default secret: set INVENTORY_SERVICE_API_KEY (the dependency refuses an empty key)
+    # no default secret: set INVENTORY_SERVICE_API_KEY (the dependency refuses an empty key)
+    api_key: SecretStr = SecretStr("")
 
 
 @lru_cache

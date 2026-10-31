@@ -18,7 +18,10 @@ class ProductCreate(BaseModel):
 
 class ProductUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    sku: str | None = Field(default=None, min_length=1, max_length=32, description="Stock keeping unit, unique per warehouse")
+    sku: str | None = Field(
+        default=None,
+        min_length=1, max_length=32, description="Stock keeping unit, unique per warehouse",
+    )
     name: str | None = Field(default=None, min_length=1, max_length=120)
     quantity: int | None = Field(default=None, ge=0)
     unit_price: Decimal | None = Field(default=None, ge=0)

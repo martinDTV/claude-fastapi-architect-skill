@@ -13,7 +13,13 @@ class ProductService:
         self._repository = repository
 
     async def create(self, data: ProductCreate) -> Product:
-        product = Product(sku=data.sku, name=data.name, quantity=data.quantity, unit_price=data.unit_price, notes=data.notes)
+        product = Product(
+            sku=data.sku,
+            name=data.name,
+            quantity=data.quantity,
+            unit_price=data.unit_price,
+            notes=data.notes,
+        )
         await self._repository.add(product)
         return product
 

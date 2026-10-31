@@ -32,7 +32,8 @@ class InMemoryProductRepository:
         return self._items.get(product_id)
 
     async def list(self, limit: int, offset: int) -> list[Product]:
-        items = sorted(self._items.values(), key=lambda item: (item.created_at, str(item.id)))
+        scoped = list(self._items.values())
+        items = sorted(scoped, key=lambda item: (item.created_at, str(item.id)))
         return items[offset : offset + limit]
 
     async def save(self, product: Product) -> Product:

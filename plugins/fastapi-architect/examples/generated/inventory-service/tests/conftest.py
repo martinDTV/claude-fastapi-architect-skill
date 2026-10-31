@@ -1,8 +1,8 @@
-"""Test fixtures: one application per test with its own state."""
+"""Test fixtures: one application per test with its own in-memory state."""
 
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-import pytest
 
 from inventory_service.core.config import Settings
 from inventory_service.main import create_app
@@ -10,7 +10,8 @@ from inventory_service.main import create_app
 
 @pytest.fixture
 def app():
-    return create_app(Settings(app_name="test", api_key=SecretStr("test-key")))
+    settings = Settings(app_name="test", api_key=SecretStr("test-key"))
+    return create_app(settings)
 
 
 @pytest.fixture

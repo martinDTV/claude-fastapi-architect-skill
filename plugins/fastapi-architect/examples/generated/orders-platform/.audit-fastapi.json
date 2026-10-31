@@ -1,0 +1,35 @@
+{
+  "contracts": {
+    "commit_layers": [
+      "service"
+    ],
+    "forbidden_imports": [
+      {
+        "from": "orders_platform.modules.customers",
+        "to": "orders_platform.modules.orders"
+      },
+      {
+        "from": "orders_platform.modules.customers",
+        "to": "orders_platform.modules.billing"
+      },
+      {
+        "from": "orders_platform.modules.orders",
+        "to": "orders_platform.modules.billing"
+      },
+      {
+        "from": "orders_platform.modules.billing",
+        "to": "orders_platform.modules.customers"
+      }
+    ],
+    "route_auth_required": [
+      "/api/*"
+    ]
+  },
+  "public_routes": [
+    "/health"
+  ],
+  "tenant_params": [
+    "tenant_id"
+  ],
+  "x-generated-by": "fastapi-architect design (v2.0): declarations of the design, reviewed by the auditor"
+}

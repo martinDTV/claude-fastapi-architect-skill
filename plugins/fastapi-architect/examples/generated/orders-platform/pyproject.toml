@@ -1,0 +1,72 @@
+[project]
+name = "orders-platform"
+version = "0.1.0"
+description = "Order intake for a multi-tenant B2B marketplace: customers, orders and payment notifications."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.4,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.13,<2",
+  "httpx>=0.27,<1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.27,<1",
+  "anyio>=4.4",
+  "ruff>=0.6",
+  "import-linter>=2.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/orders_platform"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.importlinter]
+root_package = "orders_platform"
+
+[[tool.importlinter.contracts]]
+name = "customers does not import other modules"
+type = "forbidden"
+source_modules = ["orders_platform.modules.customers"]
+forbidden_modules = [
+  "orders_platform.modules.orders",
+  "orders_platform.modules.billing",
+]
+
+[[tool.importlinter.contracts]]
+name = "orders depends only on customers"
+type = "forbidden"
+source_modules = ["orders_platform.modules.orders"]
+forbidden_modules = [
+  "orders_platform.modules.billing",
+]
+
+[[tool.importlinter.contracts]]
+name = "billing depends only on orders"
+type = "forbidden"
+source_modules = ["orders_platform.modules.billing"]
+forbidden_modules = [
+  "orders_platform.modules.customers",
+]

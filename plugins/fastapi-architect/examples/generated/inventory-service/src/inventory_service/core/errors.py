@@ -24,11 +24,8 @@ class ConflictError(DomainError):
 
 
 def problem(status: int, title: str, detail: str, instance: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status,
-        content={"type": "about:blank", "title": title, "status": status, "detail": detail, "instance": instance},
-        media_type="application/problem+json",
-    )
+    content = {"type": "about:blank", "title": title, "status": status, "detail": detail, "instance": instance}
+    return JSONResponse(status_code=status, content=content, media_type="application/problem+json")
 
 
 def install_error_handlers(app: FastAPI) -> None:

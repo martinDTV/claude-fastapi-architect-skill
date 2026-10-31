@@ -7,8 +7,10 @@ from fastapi import Header, HTTPException, status
 
 from inventory_service.core.config import SettingsDep
 
+ApiKeyHeader = Annotated[str | None, Header(alias="X-API-Key")]
 
-def require_api_key(settings: SettingsDep, x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None) -> None:
+
+def require_api_key(settings: SettingsDep, x_api_key: ApiKeyHeader = None) -> None:
     expected = settings.api_key.get_secret_value()
     if not expected:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="API key is not configured")

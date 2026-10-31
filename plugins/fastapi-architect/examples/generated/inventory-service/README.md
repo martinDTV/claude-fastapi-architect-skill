@@ -60,9 +60,10 @@ tests/
 uv sync                      # or: pip install -e . --group dev
 uv run uvicorn inventory_service.main:app --reload
 uv run pytest -q
+uv run ruff check .
 ```
 
-Settings come from environment variables prefixed `INVENTORY_SERVICE_` (see `.env.example`). `.audit-fastapi.json` declares the design decisions the auditor should respect (`python3 scripts/audit_fastapi.py .` from the plugin repository).
+Settings come from environment variables prefixed `INVENTORY_SERVICE_` (see `.env.example`; no secret has a default). `.audit-fastapi.json` declares the design decisions the auditor should respect (`python3 scripts/audit_fastapi.py .` from the plugin repository).
 
 ## Pending decisions
 

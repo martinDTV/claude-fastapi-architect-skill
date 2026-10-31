@@ -1,4 +1,4 @@
-"""HTTP boundary of the catalog module: validation by schema, status codes, problem details for domain errors."""
+"""HTTP boundary of the catalog module: schema validation, status codes, problem details for domain errors."""
 
 from typing import Annotated
 from uuid import UUID
