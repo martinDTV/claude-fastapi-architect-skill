@@ -151,3 +151,63 @@ FastAPI 0.162.0, uv 0.11.28).
   are refused by design, not tested as working.
 - The verification copy runs with the operator's privileges and network access; `verified` means the generated
   suite passed there, nothing more.
+
+# Increment 4: changes to existing modules, adoption, recoverable writes
+
+Status: **verified** for what is listed below, on 2026-10-30, on the developer's machine, through the v1.9 trust
+model (process hygiene, not a sandbox). Evolutions ran on temporary copies (`tests/test_evolve_v20_adoption.py`,
+`tests/test_evolve_v20_recovery.py`, `tests/test_design_v20_postgresql.py` with `FA_DESIGN_PG=1`).
+
+## Scenario A: `orders-platform` + `../evolutions/orders-add-customer-columns.json`, PostgreSQL
+
+| Item | Value |
+|---|---|
+| Changes | `customers.Customer.phone` compatible (nullable column); `customers.Customer.tier` compatible (NOT NULL with server default `1`); `orders.Order:update` compatible (new use case, route, tests) |
+| Plan | create 1 (`migrations/versions/e2dc0f95b7da_add_customers_phone_customers_tier.py`), modify 12 (customers and orders module files, `tests/test_customers.py`, `tests/test_orders.py`, `tests/test_migrations.py`, `README.md`, manifest), kept 1 (initial revision, byte-identical) |
+| Migration | `down_revision = 9dab920675b3`; `add_column phone nullable`, `add_column tier NOT NULL server_default 1`; downgrade drops both; no alter, no drop of existing objects |
+| Verification in the copy | audit 1 → 1 (informational), 0 blocking; routes 12 → 13 (`PATCH /tenants/{tenant_id}/orders/{order_id}` added), none missing or changed; 0 files touched outside the plan |
+| Tests on a throwaway PostgreSQL 16 (pytest-junit, nonce matched) | selected 40, executed 40, passed 40, failed 0, skipped 0 (`40 passed, 2 warnings in 6.07s`), including `test_update_order`, `test_migrated_schema_matches_the_models`, `test_upgrade_and_downgrade_are_repeatable` over the two-revision chain |
+| Applied | 13 files through the recoverable writer; discovery afterwards: 2 revisions, historical modified none |
+| Backfill control | initial revision applied, one customer inserted by hand, the evolved project's `alembic upgrade head` succeeds: `tier = 1`, `phone IS NULL`, `tier` NOT NULL; `alembic downgrade -1` removes both columns and the row survives |
+| Migration-failure control | a `tier text` column created by hand before the upgrade: `alembic upgrade head` fails (`DuplicateColumnError`), `alembic_version` stays at `9dab920675b3`, `phone` was not added (transactional DDL); the verification afterwards ends `noop`/`rejected`, never `verified` |
+| NOT NULL without backfill | `customers.Customer.vat` (required, no default) → `potentially_incompatible`, plan `blocked` (`backfill_strategy`) |
+| Whole opt-in module (increments 2 to 4, three clusters, six tests) | 40.9 s wall clock, 125 MB peak RSS |
+
+## Scenario A on the in-memory example: `inventory-service` + `../evolutions/inventory-add-product-fields.json`
+
+Plan: modify 6 (`models/catalog.py`, `schemas/catalog.py`, `services/catalog.py`, `tests/test_catalog.py`,
+`README.md`, manifest), create 0, unchanged 22; verification in the copy: audit 0 → 0, routes 6 → 6, 0 files
+touched outside the plan; 9 tests passed through the trust model; applied; second run `noop`; ruff clean.
+
+## Scenario B: `tests/fixtures/adoption20/handmade_shop` (hand-written)
+
+| Item | Value |
+|---|---|
+| `propose` | candidates `items` (router in `app/routers/items.py`, mounted at `/api/items`, 3 routes, related `app/schemas.py`) and `users`; 7 unassigned python files; nothing adopted |
+| `adopt` (`adopt-items.json`) | `.fastapi-architect/adoption.json` written and nothing else; ownership afterwards: 2 `adopted_unchanged`, 8 `unadopted` |
+| Evolution (`items-add-stats.json`) | `GET /stats` handler appended to `items.py`, `ItemIn.sku: str | None = None` appended to `schemas.py`; AST evidence: every pre-existing top-level node unchanged, one node added per file; comments (`# explicit 404`, `# sync on purpose`) and spacing byte-identical |
+| Verification in the copy | audit 1 → 1, 0 blocking; routes 6 → 7 (`GET /stats` added), none missing; 0 files touched outside the plan; the project's own 3 tests passed through the trust model |
+| Applied | `items.py`, `schemas.py`, `adoption.json`; `users.py` byte-identical |
+| Controls | unadopted `users` → `blocked` (`module_is_adopted`); manual edit of `items.py` after adoption → `blocked`; duplicate route / symbol / field → `blocked`; ambiguous class across adopted files → `blocked`; concurrent edit after the plan → `WriteError`, nothing written; a failing project test → not applied |
+
+## Recoverable writer (fault injection, `tests/test_evolve_v20_recovery.py`)
+
+A six-file operation on a copy of `inventory-service`: interrupted after 2 files → `rollback` restores the
+original tree, `forward` completes it; interrupted before cleanup → `forward` only cleans up; an interrupted
+recovery resumes; a file edited after the crash → `needs_attention`, the file untouched, the other restored; a
+concurrent change between `prepare` and `publish` → nothing published; unsafe paths and symlinks refused before
+staging; a staging I/O error leaves nothing behind. Through the engine: an interrupted `apply` reports
+`interrupted` with the pending operation, a new plan refuses until `recover`, and the same evolution applies
+cleanly afterwards.
+
+## Cost (`/usr/bin/time -l`, one run each, indicative)
+
+| Step | Time | Peak RSS |
+|---|---|---|
+| `propose` (hand-written shop) | 0.20 s | 39 MB |
+| `adopt` | 0.10 s | 32 MB |
+| `plan` shop (copy, audit, invariants) | 0.13 s | 31 MB |
+| `apply` shop with its 3 tests | 0.88 s | 77 MB |
+| `plan` inventory modify_modules | 0.42 s | 35 MB |
+| `apply` inventory modify_modules with 9 tests | 0.95 s | 80 MB |
+| `recover` (rollback of an interrupted 6-file operation) | 0.08 s | 30 MB |

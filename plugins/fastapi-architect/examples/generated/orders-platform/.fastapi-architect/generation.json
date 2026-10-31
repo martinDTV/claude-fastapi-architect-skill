@@ -2,7 +2,7 @@
   "files": {
     ".audit-fastapi.json": "332951001a6e6eaac17b432b1d5bf91ec93e7be220ab42cce6e5d1ade8d2d15d",
     ".env.example": "315589f1281784fa4bed89a2978a2682d85b15e9eb1863121e9c12023cbc178a",
-    ".gitignore": "45318973d0e83e04c6ae23d3c0155c48a60153d137ac800c413b4b974dee7b4f",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
     "README.md": "2bc5f1870f355cfea64a9c0cedc47943bd175c325f5da724333789e16fcdd700",
     "alembic.ini": "144140ca67ff0fafb128a3ad2ce1ab6c1611f6f55dbe853683e47e1d775d65fc",
     "migrations/env.py": "cb8723925ac6245a503afa7a58981f980ba2be85a2934dea1c9b050a942c644d",

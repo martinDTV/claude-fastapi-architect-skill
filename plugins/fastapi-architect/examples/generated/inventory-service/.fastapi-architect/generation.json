@@ -2,7 +2,7 @@
   "files": {
     ".audit-fastapi.json": "a04aa89d72d413184f1bc852847b6799060ac906288e8bf999a15cefde024b88",
     ".env.example": "0de5c729f2dcae100f551065219d373e71a5f5f35db9b3107c976d07d1243afc",
-    ".gitignore": "45318973d0e83e04c6ae23d3c0155c48a60153d137ac800c413b4b974dee7b4f",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
     "README.md": "2d24cd4b30405e1f91ebdee6739db5da2e83d8f139a2e7aa634ef5bec34e0d72",
     "pyproject.toml": "e9191d112bbab4cb54e97e78eaf12c2447355f19531df424e43db1879683f0b8",
     "src/inventory_service/__init__.py": "e7f3ed86667c8ad6e2d5bc94f508f7635d8eeb25181d28e0dcb2052858f46722",

@@ -1,0 +1,22 @@
+{
+  "schema": "fastapi-architect/evolution/1.1",
+  "project": {
+    "path": "../generated/inventory-service",
+    "package": "inventory_service"
+  },
+  "modify_modules": [
+    {
+      "name": "catalog",
+      "entities": [
+        {
+          "name": "Product",
+          "add_fields": [
+            {"name": "barcode", "type": "str", "max_length": 64, "required": false},
+            {"name": "active", "type": "bool", "required": true, "default": true}
+          ]
+        }
+      ]
+    }
+  ],
+  "x-note": "increment 4, scenario A on the in-memory example: a nullable field and a defaulted NOT NULL field on an existing entity; the catalog module files are regenerated from the merged contract"
+}

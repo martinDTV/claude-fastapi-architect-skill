@@ -13,8 +13,9 @@ regenerate (`--overwrite` is required to replace a differing file).
 Each generated project carries `.fastapi-architect/generation.json` (schema 1.1: contract document and digest,
 tool version, sha256 of every file, migration chain, operation history; no timestamps) and an `.audit-fastapi.json`
 that declares the design for the auditor. The manifest is what lets `scripts/evolve_fastapi.py` tell managed files
-from manual ones; the evolution contracts in `../evolutions/` add a module to each example (see
-[`VERIFICATION.md`](VERIFICATION.md), increment 3). What the
+from manual ones; the evolution contracts in `../evolutions/` add a module to each example (increment 3) and change an existing
+module of each (increment 4: `inventory-add-product-fields.json`, `orders-add-customer-columns.json`); see
+[`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in
 `references/design-contracts.md`.

@@ -1,0 +1,27 @@
+{
+  "schema": "fastapi-architect/evolution/1.1",
+  "project": {
+    "path": "../generated/orders-platform",
+    "package": "orders_platform"
+  },
+  "modify_modules": [
+    {
+      "name": "customers",
+      "entities": [
+        {
+          "name": "Customer",
+          "add_fields": [
+            {"name": "phone", "type": "str", "max_length": 30, "required": false},
+            {"name": "tier", "type": "int", "required": true, "default": 1, "min_value": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "orders",
+      "entities": [{"name": "Order", "add_operations": ["update"]}]
+    }
+  ],
+  "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "no_destructive_schema_change", "protected_files_unchanged"],
+  "x-note": "increment 4, scenario A on PostgreSQL: an additive revision adds a nullable column and a NOT NULL column with a server default (the backfill) to customers, and the orders module gains the update use case, route and tests"
+}
