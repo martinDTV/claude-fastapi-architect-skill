@@ -1,0 +1,66 @@
+{
+  "schema": "fastapi-architect/spec/1.2",
+  "name": "parcels",
+  "package": "parcels",
+  "description": "Parcel tracking for one depot: the smallest PostgreSQL backend that shows a schema evolving in phases (expand, backfill, verify, contract) without a maintenance window.",
+  "scope": {
+    "size": "small",
+    "team_size": 1,
+    "expected_rps": 5,
+    "data_volume": "small"
+  },
+  "functional": {
+    "modules": [
+      {
+        "name": "shipments",
+        "description": "Parcels registered at the depot with their declared weight.",
+        "entities": [
+          {
+            "name": "Shipment",
+            "fields": [
+              {
+                "name": "reference",
+                "type": "str",
+                "max_length": 40,
+                "description": "the label printed on the parcel"
+              },
+              {
+                "name": "weight_kg",
+                "type": "decimal",
+                "required": false,
+                "min_value": 0
+              }
+            ],
+            "operations": [
+              "create",
+              "get",
+              "list",
+              "update"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "persistence": {
+    "kind": "postgresql"
+  },
+  "security": {
+    "authentication": "api_key"
+  },
+  "architecture": {
+    "style_preference": "layered"
+  },
+  "decisions": [
+    {
+      "id": "ADR-001",
+      "title": "Schema changes ship in phases",
+      "status": "accepted",
+      "rationale": "Columns that existing rows cannot satisfy are added nullable, filled by a resumable backfill, verified on the target database and made NOT NULL only in an authorised contract phase; the evolution contracts next to this file show each step."
+    }
+  ],
+  "assumptions": [
+    "a single depot: no tenancy",
+    "the API key is shared by the depot's scanners"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "fastapi-architect/evolution/1.2",
+  "project": {
+    "path": "../generated/parcels",
+    "package": "parcels"
+  },
+  "modify_modules": [
+    {
+      "name": "shipments",
+      "entities": [
+        {
+          "name": "Shipment",
+          "contract_fields": [
+            {"name": "carrier", "operation": "66636e4277641692"},
+            {"name": "tracking_token", "operation": "5821fb0e87d4b355"}
+          ]
+        }
+      ]
+    }
+  ],
+  "authorization": {
+    "contract": {
+      "declared_by": "release manager of the parcels example (illustrative)",
+      "evidence": "parcels-migration-evidence.sample.json",
+      "max_evidence_age_hours": 24
+    }
+  },
+  "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "no_destructive_schema_change", "protected_files_unchanged"],
+  "x-note": "v2.1 increment 2, phase 2 of the parcels example: both columns become NOT NULL. The plan is blocked unless `evolve_fastapi.py plan|apply` is run with --authorize-contract and the evidence file (written by `python -m parcels.ops.backfill verify --application-version <digest>` against the target database, fresh, at the manifest head, backfills complete, zero pending rows, indexes valid) satisfies every precondition; the committed sample evidence is deliberately stale, so planning this contract from the repository alone is refused, as it should be. The contract revision re-checks the database and performs the NOT NULL transition online (CHECK NOT VALID, VALIDATE, SET NOT NULL); its downgrade is DROP NOT NULL. The operation ids are those the expand plan printed (sha1 of table, column, strategy, parameters and the head it was declared on)."
+}

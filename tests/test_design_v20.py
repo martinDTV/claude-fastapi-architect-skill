@@ -46,6 +46,8 @@ TEAM_NOTES = EXAMPLES / "specs" / "team-notes.json"
 TENANT_PROJECTS = EXAMPLES / "specs" / "tenant-projects.json"
 SNAPSHOT_TEAM_NOTES = EXAMPLES / "generated" / "team-notes"
 SNAPSHOT_TENANT_PROJECTS = EXAMPLES / "generated" / "tenant-projects"
+PARCELS = EXAMPLES / "specs" / "parcels.json"
+SNAPSHOT_PARCELS = EXAMPLES / "generated" / "parcels"
 ROOT_CLI = REPO_ROOT / "scripts" / "design_fastapi.py"
 SKILL_CLI = SKILL_SCRIPTS / "design_fastapi.py"
 
@@ -554,7 +556,7 @@ class PipelineTests(TempDirCase):
 
 
 class SnapshotTests(TempDirCase):
-    SNAPSHOTS = ((INVENTORY, SNAPSHOT), (ORDERS, SNAPSHOT_ORDERS), (TEAM_NOTES, SNAPSHOT_TEAM_NOTES), (TENANT_PROJECTS, SNAPSHOT_TENANT_PROJECTS))
+    SNAPSHOTS = ((INVENTORY, SNAPSHOT), (ORDERS, SNAPSHOT_ORDERS), (TEAM_NOTES, SNAPSHOT_TEAM_NOTES), (TENANT_PROJECTS, SNAPSHOT_TENANT_PROJECTS), (PARCELS, SNAPSHOT_PARCELS))
 
     def test_committed_examples_equal_a_fresh_generation(self) -> None:
         for spec_path, snapshot in self.SNAPSHOTS:

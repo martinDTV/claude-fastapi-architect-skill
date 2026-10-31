@@ -1,0 +1,150 @@
+{
+  "concurrent_indexes": [],
+  "files": {
+    ".audit-fastapi.json": "f3a5097700daa9d54f890ff1964403a84672a5855e9225f59275a26c92aea32f",
+    ".env.example": "8f2b053fa6d5a0a205fed2a08ddf7367b8cf1b56aad0f455d649877d78298412",
+    ".gitignore": "2a5ecca460e500d8093398320393afb91d8133066fd2de9050626886dc3065ab",
+    "README.md": "29f842766534af00fceecfb1c95eb6430ca7d6d89240114543d168aedf5f4923",
+    "alembic.ini": "f5de17a5b6ddfad91cd707ed2d2a0c0fa4f21336b0747ea894c04aabc092d78d",
+    "migrations/env.py": "fc19149235f3a05544ab997bff9d500942e0356a12f8c7034d6c0c733142df07",
+    "migrations/script.py.mako": "2cd523749515d0c0c53a6873ca3bb098d8db35b75d6ad080e8f629561a5c5623",
+    "migrations/versions/8154db01f010_initial_schema.py": "3f683c530ccf67bf3f514990146bde2d0e6f0f2fbaa962b91513176c884b45e2",
+    "pyproject.toml": "694014a62748f1d732480ab24c60f379b34919561b22883d1f5481f815a9e07d",
+    "src/parcels/__init__.py": "73b7fa11f493b0e7bbb5c8209ac83f0e38f650a87f5ac811523910da2c3801cd",
+    "src/parcels/api/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/api/router.py": "bfb9dee2c7d8e586177373c58db8d746fdf5a43c3ae3407f84b19b684570db86",
+    "src/parcels/api/shipments.py": "9923a270a2645b0ae7e0c5bfdf4bedd24c43cc06d8b4ee06d09983ea81bde968",
+    "src/parcels/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/core/config.py": "4b3b0cf9e6fa7ec341339044fc5e0d7b089199a0543b331eb753a20bfbb759f1",
+    "src/parcels/core/db.py": "f337509e4880130355222fe1a833c5aa283e665f9605b7889ae8bff40c929e0f",
+    "src/parcels/core/errors.py": "11d6475cfaeca833702657f0708788e6d8044255b1879b6dc4c6078901a81993",
+    "src/parcels/core/security.py": "801ddcd659ea6de3a3574b945724ad29bd0a3fb09303d8a6727ec2a1483b5938",
+    "src/parcels/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/dependencies/shipments.py": "1cf3b5b73bba56ed93e095c3d7cd7ffd5acf397081d64667da18561290340b0a",
+    "src/parcels/main.py": "e8249b1fe2f81d49a3eca400f1b1f7b382bc2a0cb023d43609de721dcd72085d",
+    "src/parcels/models/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/models/shipments.py": "d018bb500f1f5c7b5e515ced55ff21f1145816d6ea523c1f77779d8b910729a1",
+    "src/parcels/repositories/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/repositories/shipments.py": "18b2f2332800b1b976ee46f76ba2a7aacd6ed2142b6cf6d283dde6b352d08512",
+    "src/parcels/schemas/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/schemas/shipments.py": "147671443d7e232554908b664d0ae78ca7427ef702d458f393ba7817bacdab0a",
+    "src/parcels/services/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "src/parcels/services/shipments.py": "5778dba892a725f0492b58dce9d4ce24481efec20fe9ea0b145e56d87e2b6769",
+    "tests/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tests/conftest.py": "b1bd45b32225e947792c2aac18ac2d61d33896e98bed069dab73423fe05edac8",
+    "tests/test_migrations.py": "fd3ffcafa9c72801937e91653c5b30ae11a49ca37f768766aeff46e16b2f4254",
+    "tests/test_shipments.py": "e5aad878842a45877f4a8f9b494969534dddfdba9ab4f8c17b0a021ed435b052"
+  },
+  "history": [
+    {
+      "modules": [
+        "shipments"
+      ],
+      "operation": "generate",
+      "spec_digest": "498a527757ec65e661714fadc13b4b88f1fad833ad1d3eff926f6a855a3fcbd8"
+    }
+  ],
+  "migrations": [
+    {
+      "down_revision": null,
+      "file": "migrations/versions/8154db01f010_initial_schema.py",
+      "phase": "initial",
+      "reversible": true,
+      "revision": "8154db01f010",
+      "row_level_security": false,
+      "tables": [
+        "shipments"
+      ],
+      "transactional": true
+    }
+  ],
+  "package": "parcels",
+  "phased_changes": [],
+  "schema": "fastapi-architect/generation/1.3",
+  "security": {
+    "authentication": "api_key",
+    "authorization_declared": null,
+    "authorization_model": "none",
+    "identity": "shared_credential",
+    "row_level_security": false,
+    "tenant_binding": null,
+    "tenant_strategy_declared": null,
+    "tenant_strategy_implemented": null
+  },
+  "spec": {
+    "digest": "498a527757ec65e661714fadc13b4b88f1fad833ad1d3eff926f6a855a3fcbd8",
+    "name": "parcels",
+    "schema": "fastapi-architect/spec/1.2"
+  },
+  "spec_document": {
+    "architecture": {
+      "style_preference": "layered"
+    },
+    "assumptions": [
+      "a single depot: no tenancy",
+      "the API key is shared by the depot's scanners"
+    ],
+    "decisions": [
+      {
+        "id": "ADR-001",
+        "rationale": "Columns that existing rows cannot satisfy are added nullable, filled by a resumable backfill, verified on the target database and made NOT NULL only in an authorised contract phase; the evolution contracts next to this file show each step.",
+        "status": "accepted",
+        "title": "Schema changes ship in phases"
+      }
+    ],
+    "description": "Parcel tracking for one depot: the smallest PostgreSQL backend that shows a schema evolving in phases (expand, backfill, verify, contract) without a maintenance window.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Parcels registered at the depot with their declared weight.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "description": "the label printed on the parcel",
+                  "max_length": 40,
+                  "name": "reference",
+                  "type": "str"
+                },
+                {
+                  "min_value": 0,
+                  "name": "weight_kg",
+                  "required": false,
+                  "type": "decimal"
+                }
+              ],
+              "name": "Shipment",
+              "operations": [
+                "create",
+                "get",
+                "list",
+                "update"
+              ]
+            }
+          ],
+          "name": "shipments"
+        }
+      ]
+    },
+    "name": "parcels",
+    "package": "parcels",
+    "persistence": {
+      "kind": "postgresql"
+    },
+    "schema": "fastapi-architect/spec/1.2",
+    "scope": {
+      "data_volume": "small",
+      "expected_rps": 5,
+      "size": "small",
+      "team_size": 1
+    },
+    "security": {
+      "authentication": "api_key"
+    }
+  },
+  "style": "layered",
+  "tool": {
+    "name": "fastapi-architect design",
+    "version": "2.0.0"
+  }
+}

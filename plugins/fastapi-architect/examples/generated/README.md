@@ -11,14 +11,17 @@ regenerate (`--overwrite` is required to replace a differing file).
 | [`orders-platform/`](orders-platform/README.md) | `../specs/orders-platform.json` (multi-tenant B2B order intake, three modules, two integrations; schema 1.1, so its declared `shared_schema_rls` stays application scoping) | hexagonal | PostgreSQL + Alembic | API keys bound to tenants (`api_key_registry`, grants) | audited (one informational finding); 45 generated tests passed on a throwaway PostgreSQL 16 through the trust model, drift negative control failed as expected: [`VERIFICATION.md`](VERIFICATION.md) |
 | [`team-notes/`](team-notes/README.md) | `../specs/team-notes.json` (shared notes of a workspace; schema 1.2) | layered | in-memory | OIDC bearer tokens, tenant from the verified `workspace_id` claim (`principal_claim`), `roles_and_ownership` | audited clean, every protected route with visible authorization; 71 generated tests passed through the trust model, 17 of them the JWKS client against a local HTTPS provider (`tests/test_design_v20_security.py`, when PyJWT and cryptography are importable) |
 | [`tenant-projects/`](tenant-projects/README.md) | `../specs/tenant-projects.json` (projects and tasks of several organisations; schema 1.2) | modular monolith | PostgreSQL + Alembic + **row-level security** | API-key grants (`api_key_registry`), `roles_and_ownership` | audited (two informational findings); 53 generated tests passed on a throwaway PostgreSQL 16 **as the restricted role** `fa_app` (14 RLS demonstrations including the boundary of the mechanism, concurrency, 503 control); a BYPASSRLS role refused by the migration; evolution adds a protected table (64 tests): [`VERIFICATION.md`](VERIFICATION.md) |
+| [`parcels/`](parcels/README.md) | `../specs/parcels.json` (shipments of a small carrier, one module, PostgreSQL; schema 1.2) | layered | PostgreSQL + Alembic | API key (shared) | audited clean; **the phased-migrations example (v2.1)**: the snapshot is the baseline before `../evolutions/parcels-expand-carrier.json` (two NOT NULL columns with declarative backfills and a concurrent index) and `parcels-contract-carrier.json` (the authorised NOT NULL transition); the whole slice (2 500 live rows, resumable backfill, two workers, a SIGKILL, concurrent writes, evidence, contract) runs on a throwaway PostgreSQL 16 in `tests/test_migrations_v21_postgresql.py`: [`VERIFICATION.md`](VERIFICATION.md) |
 
-Each generated project carries `.fastapi-architect/generation.json` (schema 1.2: contract document and digest,
-tool version, sha256 of every file, migration chain, operation history, the implemented security model; no timestamps) and an `.audit-fastapi.json`
+Each generated project carries `.fastapi-architect/generation.json` (schema 1.3: contract document and digest,
+tool version, sha256 of every file, migration chain with the phase of every revision, phased changes and concurrent indexes, operation history, the implemented security model; no timestamps) and an `.audit-fastapi.json`
 that declares the design for the auditor. The manifest is what lets `scripts/evolve_fastapi.py` tell managed files
 from manual ones; the evolution contracts in `../evolutions/` add a module to each example (increment 3) and change an existing
 module of each (increment 4: `inventory-add-product-fields.json`, `orders-add-customer-columns.json`) and add a
-protected table to the row-level-security example (increment 5: `tenant-projects-add-milestones.json`); see
-[`VERIFICATION.md`](VERIFICATION.md). What the
+protected table to the row-level-security example (increment 5: `tenant-projects-add-milestones.json`) and take the
+fifth example through a phased migration (v2.1: `parcels-expand-carrier.json`, `parcels-contract-carrier.json`; the
+committed `parcels-migration-evidence.sample.json` is deliberately stale, so the contract is refused from the repository
+alone); see [`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in
 `references/design-contracts.md`.
