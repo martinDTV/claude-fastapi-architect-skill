@@ -1,0 +1,3 @@
+{
+  "x-purpose": "v2.0 security hardening: privilege changes and tenant routes guarded only by a policy-like name keep their question"
+}

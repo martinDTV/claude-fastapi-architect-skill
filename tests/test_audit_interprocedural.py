@@ -138,7 +138,11 @@ class NewRuleTests(unittest.TestCase):
 class HexagonalNoFalsePositiveTests(unittest.TestCase):
     def test_ports_and_unit_of_work_produce_no_findings(self) -> None:
         report = audit_fixture("hexagonal_sessions")
-        self.assertEqual(report["findings"], [])
+        # ports, adapters and the unit of work raise nothing. The one finding left is a security question, not a
+        # session or transaction one: since the v2.0 security hardening a router-level authentication dependency
+        # (`APIRouter(dependencies=[Depends(current_user)])`) is no longer counted as an authorization kind, and
+        # `post_order` acts on `order_id` through a service call that never receives a principal
+        self.assertEqual([(f["rule"], f["function"], f["confidence"], f["evidence_state"]) for f in report["findings"]], [("SEC_RESOURCE_AUTHZ_UNVERIFIED", "post_order", "low", "insufficient")])
         self.assertGreaterEqual(report["interprocedural"]["functions"], 10)
 
 

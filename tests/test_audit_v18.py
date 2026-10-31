@@ -877,7 +877,10 @@ class FactoryAliasTests(ProjectCase):
         self.assertEqual(cancel["authentication"], "present")
         self.assertTrue(cancel["authentication_evidence"][0].startswith("_: authenticated"), cancel["authentication_evidence"])
         self.assertEqual(cancel["bucket"], "authenticated_authorization_unknown")
-        self.assertEqual((admin["authorization"], admin["bucket"]), (["role"], "authenticated_authorization_visible"))
+        # v2.0 security hardening: `admin_authenticated() -> None: pass` is a name, not a policy; the alias no longer yields a
+        # role kind, the route's authorization is unknown and the name is recorded as named-only evidence
+        self.assertEqual((admin["authorization"], admin["bucket"]), ([], "authenticated_authorization_unknown"))
+        self.assertTrue(any("admin_authenticated" in n and "named like a policy" in n for n in admin["authorization_named_only"]), admin["authorization_named_only"])
         self.assertEqual((cancel["principal_kind"], admin["principal_kind"]), ("none", "none"))
         # `authenticated() -> None` validates a shared credential and hands the route no principal: nothing to bind, no question
         self.assertEqual(lines_of(report, "SEC_RESOURCE_AUTHZ_UNVERIFIED"), [])

@@ -310,7 +310,9 @@ class DeclaredContractTests(unittest.TestCase):
 
     def test_declared_contracts_fire_only_where_declared(self) -> None:
         self.assertEqual(lines_of(self.report, "CONTRACT_ROUTE_AUTH_REQUIRED"), [30])  # /api/orders without authentication
-        self.assertEqual(lines_of(self.report, "CONTRACT_MUTATION_AUTHZ_REQUIRED"), [35])  # POST /api/orders authenticated only
+        # POST /api/orders is authenticated only; POST /api/orders/{order_id}/cancel depends on Admin(), whose __call__ hands the
+        # user on without any decision: since the v2.0 security hardening a policy-like name is not an authorization kind
+        self.assertEqual(lines_of(self.report, "CONTRACT_MUTATION_AUTHZ_REQUIRED"), [35, 41])
         self.assertEqual(lines_of(self.report, "CONTRACT_IMPORT_FORBIDDEN"), [6])  # shop.api -> shop.infra
         self.assertEqual(lines_of(self.report, "CONTRACT_COMMIT_OUTSIDE_LAYER", "shop/api/orders.py"), [43])  # commit in a router file
         self.assertEqual(lines_of(self.report, "CONTRACT_COMMIT_OUTSIDE_LAYER", "shop/services/orders.py"), [])

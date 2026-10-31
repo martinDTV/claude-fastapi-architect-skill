@@ -1,0 +1,7 @@
+{
+  "contracts": {
+    "route_auth_required": ["/api/*"],
+    "mutation_authorization_required": ["/api/*"]
+  },
+  "x-purpose": "v2.0 security hardening: dependencies named like a policy (require_*, *_admin, *_owner) whose code shows no decision about the principal must not count as visible authorization"
+}
