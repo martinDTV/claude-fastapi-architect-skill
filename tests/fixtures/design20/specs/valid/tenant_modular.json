@@ -1,20 +1,128 @@
 {
-  "schema": "fastapi-architect/spec/1.0",
+  "schema": "fastapi-architect/spec/1.1",
   "name": "clinic-scheduling",
   "package": "clinic",
   "description": "Appointments, practitioners and rooms for several clinics.",
-  "scope": {"size": "medium", "team_size": 4},
+  "scope": {
+    "size": "medium",
+    "team_size": 4
+  },
   "functional": {
     "modules": [
-      {"name": "practitioners", "entities": [{"name": "Practitioner", "fields": [{"name": "full_name", "type": "str", "max_length": 120}, {"name": "speciality", "type": "str", "max_length": 60}]}]},
-      {"name": "rooms", "entities": [{"name": "Room", "fields": [{"name": "label", "type": "str", "max_length": 20}, {"name": "capacity", "type": "int", "min_value": 1, "max_value": 50}], "operations": ["create", "get", "list", "update"]}]},
-      {"name": "appointments", "depends_on": ["practitioners", "rooms"], "entities": [{"name": "Appointment", "fields": [{"name": "practitioner_id", "type": "uuid"}, {"name": "room_id", "type": "uuid"}, {"name": "starts_at", "type": "datetime"}, {"name": "confirmed", "type": "bool", "required": false}], "operations": ["create", "get", "list", "delete"]}]}
+      {
+        "name": "practitioners",
+        "entities": [
+          {
+            "name": "Practitioner",
+            "fields": [
+              {
+                "name": "full_name",
+                "type": "str",
+                "max_length": 120
+              },
+              {
+                "name": "speciality",
+                "type": "str",
+                "max_length": 60
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "rooms",
+        "entities": [
+          {
+            "name": "Room",
+            "fields": [
+              {
+                "name": "label",
+                "type": "str",
+                "max_length": 20
+              },
+              {
+                "name": "capacity",
+                "type": "int",
+                "min_value": 1,
+                "max_value": 50
+              }
+            ],
+            "operations": [
+              "create",
+              "get",
+              "list",
+              "update"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "appointments",
+        "depends_on": [
+          "practitioners",
+          "rooms"
+        ],
+        "entities": [
+          {
+            "name": "Appointment",
+            "fields": [
+              {
+                "name": "practitioner_id",
+                "type": "uuid",
+                "references": "practitioners.Practitioner"
+              },
+              {
+                "name": "room_id",
+                "type": "uuid",
+                "references": "rooms.Room",
+                "on_delete": "cascade"
+              },
+              {
+                "name": "starts_at",
+                "type": "datetime"
+              },
+              {
+                "name": "confirmed",
+                "type": "bool",
+                "required": false
+              }
+            ],
+            "operations": [
+              "create",
+              "get",
+              "list",
+              "delete"
+            ]
+          }
+        ]
+      }
     ]
   },
-  "persistence": {"kind": "memory"},
-  "security": {"authentication": "api_key", "multi_tenant": {"enabled": true, "tenant_param": "clinic_id"}},
-  "testing": {"levels": ["integration"]},
-  "decisions": [{"id": "D1", "title": "Reminder channel", "status": "pending"}],
-  "open_questions": ["Can a practitioner work in several clinics?"],
+  "persistence": {
+    "kind": "memory"
+  },
+  "security": {
+    "authentication": "api_key",
+    "multi_tenant": {
+      "enabled": true,
+      "tenant_param": "clinic_id",
+      "binding": "api_key_registry"
+    }
+  },
+  "testing": {
+    "levels": [
+      "integration"
+    ]
+  },
+  "decisions": [
+    {
+      "id": "D1",
+      "title": "Reminder channel",
+      "status": "pending"
+    }
+  ],
+  "open_questions": [
+    "Can a practitioner work in several clinics?"
+  ],
   "x-note": "annotations prefixed x- are accepted and ignored"
 }

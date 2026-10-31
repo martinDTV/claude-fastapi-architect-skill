@@ -150,12 +150,18 @@ def recommend(spec: Spec) -> Recommendation:
     pending = spec.pending_decisions()
 
     persistence_notes: List[str] = []
+    references = [(m.name, e.name, f.name, f.references) for m in spec.modules for e in m.entities for f in e.fields if f.references]
     if spec.persistence["kind"] == "memory":
         persistence_notes.append("in-memory repositories: suitable for a prototype or for the first vertical slice; data does not survive a restart")
+        if references:
+            persistence_notes.append(f"{len(references)} declared reference(s) are validated by the contract but not enforced by the in-memory repositories (foreign keys exist only in SQL persistence)")
     else:
-        persistence_notes.append("PostgreSQL through SQLAlchemy 2 async sessions provided per request; one commit per use case in the service")
+        persistence_notes.append("PostgreSQL through SQLAlchemy 2 async sessions provided per request; one commit per use case in the service; a constraint violation on commit is rolled back and answered as 409")
+        persistence_notes.append("Alembic environment and the initial migration are generated; tables are created only by `alembic upgrade head`, never by create_all")
+        if references:
+            persistence_notes.append(f"{len(references)} foreign key(s) from declared references" + ("; between tenant tables they are composite (tenant_id, id) so a row can never reference another tenant's row" if spec.multi_tenant else ""))
         if not spec.persistence["migrations"]:
-            pending.append("persistence: migrations are not enabled; the generated models have no Alembic environment yet (references/database-evolution.md)")
+            pending.append("persistence.migrations is false but PostgreSQL tables need migrations: the generated project includes Alembic anyway; set migrations: true to acknowledge it")
     if spec.nonfunctional["consistency"] == "eventual" or spec.infrastructure["broker"]:
         pending.append("eventual consistency or a broker is stated: outbox/inbox and idempotency need a decision (references/events-and-workflows.md); not generated")
     if spec.nonfunctional["auditability"]:
@@ -173,9 +179,15 @@ def recommend(spec: Spec) -> Recommendation:
         pending.append(f"authorization '{spec.security['authorization']}' needs a policy decision (role model or resource ownership); only authentication is generated")
     if spec.multi_tenant:
         strategy = spec.security["multi_tenant"]["strategy"]
-        security_notes.append(f"multi-tenant ({strategy}): the tenant id is a path parameter scoped into every repository call and declared as tenant_params for the auditor")
-        pending.append("multi-tenant: binding the tenant to the authenticated principal (membership) is a decision the generator does not take (references/authz-multitenancy.md); the auditor will ask about it")
-        if strategy != "shared_schema_rls":
+        binding = spec.security["multi_tenant"]["binding"]
+        if binding == "api_key_registry":
+            security_notes.append("multi-tenant binding api_key_registry: every API key maps to exactly one tenant (settings.api_keys); the tenant path parameter is resolved by a dependency that refuses any other tenant with 403, and every repository call is scoped by that tenant id")
+        else:
+            pending.append("multi-tenant: no principal-tenant binding is declared (security.multi_tenant.binding is 'none'); the generator refuses to emit tenant routes that would accept any tenant_id from an authenticated caller: declare binding 'api_key_registry' or disable multi-tenancy (references/authz-multitenancy.md)")
+        security_notes.append(f"tenant isolation generated: application-level scoping (tenant_id column, scoped queries{', composite foreign keys between tenant tables' if spec.persistence['kind'] == 'postgresql' else ''}); no row-level security, no schema or database per tenant")
+        if strategy == "shared_schema_rls":
+            pending.append("tenant strategy 'shared_schema_rls' is declared: row-level security policies and the session tenant context are not generated; until they are, the isolation is application scoping only (references/authz-multitenancy.md, tenant-ledger example)")
+        else:
             pending.append(f"tenant strategy '{strategy}' is recorded but the generated persistence uses one schema; schema or database per tenant needs its own provisioning design")
 
     testing_notes = [f"generated tests cover the {'unit' if 'unit' in spec.testing['levels'] else 'integration'} level of every operation through the HTTP boundary (create, validation, not found, list)"]

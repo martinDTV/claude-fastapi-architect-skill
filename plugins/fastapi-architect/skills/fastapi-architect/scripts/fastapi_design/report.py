@@ -43,6 +43,10 @@ def render_text(report: Dict[str, Any]) -> str:
             lines.append(f"tests: {run['outcome']} ({run['runner']}; " + ", ".join(f"{k} {counts[k]}" for k in ("executed", "passed", "failed", "errors", "skipped") if counts.get(k) is not None) + f") via executor {tests['executor']['name']} ({tests['executor']['isolation_level']})")
         else:
             lines.append(f"tests: not executed ({tests.get('denied_reason')})")
+    g = report.get("guarantees") or {}
+    if g:
+        mt = g["multi_tenant"]
+        lines.append(f"guarantees: authentication {g['authentication'].split(':')[0]}; multi-tenant {'requested' if mt['requested'] else 'not requested'}" + (f" (declared {mt['strategy_declared']}, implemented {mt['strategy_implemented']}, binding {str(mt['principal_tenant_binding']).split(':')[0]}, RLS {mt['row_level_security']})" if mt["requested"] else "") + f"; resource authorization {g['resource_authorization'].split(' (')[0]}; migrations {g['persistence']['migrations'].split(':')[0]}")
     lines.append(f"note: {report['note']}")
     return "\n".join(lines) + "\n"
 
@@ -68,6 +72,13 @@ def render_markdown(report: Dict[str, Any]) -> str:
     for key, title in (("persistence_notes", "Persistence"), ("security_notes", "Security"), ("testing_notes", "Testing")):
         if rec.get(key):
             out += ["", f"### {title}", ""] + [f"- {n}" for n in rec[key]]
+    g = report.get("guarantees") or {}
+    if g:
+        mt = g["multi_tenant"]
+        out += ["", "## Guarantees and limits", "", f"- Authentication: {g['authentication']}", f"- Resource authorization: {g['resource_authorization']}"]
+        if mt["requested"]:
+            out += [f"- Multi-tenant: declared strategy `{mt['strategy_declared']}`, implemented `{mt['strategy_implemented']}`; principal-tenant binding: {mt['principal_tenant_binding']}; storage isolation: {'; '.join(mt['storage_isolation'])}; row-level security: {mt['row_level_security']}; schema or database per tenant: {mt['schema_or_database_per_tenant']}"]
+        out += [f"- Persistence: {g['persistence']['migrations']}; create_all used: {g['persistence']['create_all_used']}; constraint violation on commit: {g['persistence']['constraint_violation_on_commit']}", f"- Execution: {g['execution']}", f"- Not claimed: {', '.join(g['not_claimed'])}"]
     if report.get("layout"):
         out += ["", "## Layout", "", "```", *report["layout"], "```"]
     if gen:

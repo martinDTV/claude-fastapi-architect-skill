@@ -15,13 +15,13 @@ Public surface:
 from .advisor import Recommendation, recommend
 from .blueprint import Blueprint, build
 from .generator import MANIFEST, MANIFEST_SCHEMA, GenerationError, GenerationResult, generate, verify_manifest
-from .pipeline import DesignError, DesignOptions, generation_refusal, run_design
+from .pipeline import DesignError, DesignOptions, generation_refusal, run_design, security_guarantees
 from .report import REPORT_SCHEMA, render_markdown, render_text, to_json
-from .spec import SPEC_SCHEMA, Spec, SpecError, load_spec, validate_spec
+from .spec import SPEC_SCHEMA, SPEC_SCHEMAS, Spec, SpecError, load_spec, validate_spec
 from .verify import audit_generated, run_generated_tests
 
 __all__ = [
     "Blueprint", "DesignError", "DesignOptions", "GenerationError", "GenerationResult", "MANIFEST", "MANIFEST_SCHEMA", "REPORT_SCHEMA",
-    "Recommendation", "SPEC_SCHEMA", "Spec", "SpecError", "audit_generated", "build", "generate", "generation_refusal", "load_spec",
-    "recommend", "render_markdown", "render_text", "run_design", "run_generated_tests", "to_json", "validate_spec", "verify_manifest",
+    "Recommendation", "SPEC_SCHEMA", "SPEC_SCHEMAS", "Spec", "SpecError", "audit_generated", "build", "generate", "generation_refusal", "load_spec",
+    "recommend", "render_markdown", "render_text", "run_design", "run_generated_tests", "security_guarantees", "to_json", "validate_spec", "verify_manifest",
 ]

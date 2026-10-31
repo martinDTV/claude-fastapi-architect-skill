@@ -12,10 +12,13 @@ Top-level keys (``schema`` is required):
 * ``name``, ``package`` (python identifier, defaults from the name), ``description``;
 * ``scope``: ``size`` (small | medium | large), ``team_size``, ``expected_rps``, ``data_volume`` (small | medium | large);
 * ``functional``: ``modules`` (at least one) with ``entities`` (at least one, with ``fields`` and ``operations``) and ``depends_on``;
+  a ``uuid`` field may declare ``references: "module.Entity"`` (plus ``on_delete`` restrict | cascade | set_null), a foreign key in SQL
+  persistence that must follow the module dependency direction (schema 1.1);
 * ``nonfunctional``: ``availability``, ``latency_p95_ms``, ``consistency`` (strong | eventual), ``auditability``, ``compliance``;
 * ``persistence``: ``kind`` (memory | postgresql), ``migrations``;
 * ``security``: ``authentication`` (none | api_key | oauth2_jwt | session), ``authorization`` (none | role | resource), ``multi_tenant``
-  (``enabled``, ``strategy`` shared_schema_rls | schema_per_tenant | database_per_tenant, ``tenant_param``);
+  (``enabled``, ``strategy`` shared_schema_rls | schema_per_tenant | database_per_tenant, ``tenant_param``, ``binding`` none |
+  api_key_registry: how the authenticated principal is bound to the tenant it addresses; schema 1.1);
 * ``integrations``: ``name``, ``kind`` (http | queue | smtp | storage | database), ``direction`` (outbound | inbound), ``criticality``;
 * ``infrastructure``: ``deployment`` (container | vm | serverless), ``cache``, ``broker``, ``regions``;
 * ``architecture``: ``style_preference`` (layered | modular_monolith | hexagonal | microservices), ``independent_deployment``;
@@ -34,7 +37,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-SPEC_SCHEMA = "fastapi-architect/spec/1.0"
+SPEC_SCHEMA = "fastapi-architect/spec/1.1"  # emitted for new contracts
+SPEC_SCHEMAS = ("fastapi-architect/spec/1.0", "fastapi-architect/spec/1.1")  # accepted: 1.1 adds field.references/on_delete and security.multi_tenant.binding
 IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 CLASS_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$")
@@ -46,6 +50,8 @@ PERSISTENCE = ("memory", "postgresql")
 AUTHENTICATION = ("none", "api_key", "oauth2_jwt", "session")
 AUTHORIZATION = ("none", "role", "resource")
 TENANT_STRATEGIES = ("shared_schema_rls", "schema_per_tenant", "database_per_tenant")
+TENANT_BINDINGS = ("none", "api_key_registry")  # how a principal is bound to a tenant; only api_key_registry is generated
+ON_DELETE = ("restrict", "cascade", "set_null")
 INTEGRATION_KINDS = ("http", "queue", "smtp", "storage", "database")
 DIRECTIONS = ("outbound", "inbound")
 CRITICALITY = ("low", "medium", "high")
@@ -79,6 +85,8 @@ class FieldSpec:
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     description: Optional[str] = None
+    references: Optional[str] = None  # "module.Entity" (uuid fields only): a foreign key in SQL persistence
+    on_delete: str = "restrict"
 
 
 @dataclass
@@ -172,7 +180,7 @@ class Spec:
             "functional": {"modules": [
                 {"name": m.name, "description": m.description, "depends_on": list(m.depends_on), "entities": [
                     {"name": e.name, "operations": list(e.operations), "fields": [
-                        {k: v for k, v in {"name": f.name, "type": f.type, "required": f.required, "max_length": f.max_length, "min_value": f.min_value, "max_value": f.max_value, "description": f.description}.items() if v is not None}
+                        {k: v for k, v in {"name": f.name, "type": f.type, "required": f.required, "max_length": f.max_length, "min_value": f.min_value, "max_value": f.max_value, "description": f.description, "references": f.references, "on_delete": f.on_delete if f.references else None}.items() if v is not None}
                         for f in e.fields
                     ]} for e in m.entities
                 ]} for m in self.modules
@@ -315,8 +323,8 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
         return None, ["top level: expected an object"]
     v.unknown(document, TOP_LEVEL, "spec")
     schema = document.get("schema")
-    if schema != SPEC_SCHEMA:
-        v.errors.append(f"spec.schema: expected {SPEC_SCHEMA!r}, got {schema!r}")
+    if schema not in SPEC_SCHEMAS:
+        v.errors.append(f"spec.schema: expected one of {', '.join(repr(x) for x in SPEC_SCHEMAS)}, got {schema!r}")
     name = v.text(document, "name", "spec", None, NAME_RE, required=True) or "service"
     default_package = re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_") or "service"
     if default_package[0].isdigit():
@@ -343,6 +351,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
         v.errors.append("spec.functional.modules: expected a non-empty list of modules")
         raw_modules = []
     module_names: List[str] = []
+    pending_refs: List[Tuple[str, Optional[str], str]] = []  # (field path, module, "module.Entity" or "Entity")
     for i, raw in enumerate(raw_modules):
         path = f"spec.functional.modules[{i}]"
         if not isinstance(raw, dict):
@@ -389,7 +398,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
                 if not isinstance(fld, dict):
                     v.errors.append(f"{fpath}: expected an object")
                     continue
-                v.unknown(fld, ("name", "type", "required", "max_length", "min_value", "max_value", "description"), fpath)
+                v.unknown(fld, ("name", "type", "required", "max_length", "min_value", "max_value", "description", "references", "on_delete"), fpath)
                 fname = _ident(v, fld.get("name"), f"{fpath}.name", "field name")
                 if fname in RESERVED_FIELD_NAMES:
                     v.errors.append(f"{fpath}.name: {fname!r} is generated automatically and cannot be declared")
@@ -418,8 +427,18 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
                 if isinstance(min_value, (int, float)) and isinstance(max_value, (int, float)) and not isinstance(min_value, bool) and min_value > max_value:
                     v.errors.append(f"{fpath}: min_value {min_value} is greater than max_value {max_value}")
                 fdesc = v.text(fld, "description", fpath, None)
+                references = v.text(fld, "references", fpath, None, re.compile(r"^(?:[a-z][a-z0-9_]*\.)?[A-Z][A-Za-z0-9]*$"))
+                on_delete = v.choice(fld, "on_delete", fpath, ON_DELETE, "restrict") or "restrict"
+                if references is not None and ftype != "uuid":
+                    v.errors.append(f"{fpath}.references: only valid for type 'uuid' (the referenced id)")
+                if "on_delete" in fld and references is None:
+                    v.errors.append(f"{fpath}.on_delete: only valid together with 'references'")
+                if on_delete == "set_null" and required:
+                    v.errors.append(f"{fpath}.on_delete: 'set_null' needs required: false")
+                if references is not None:
+                    pending_refs.append((fpath, mname, references))
                 if fname and ftype:
-                    fields.append(FieldSpec(fname, ftype, required, max_length, min_value if isinstance(min_value, (int, float)) else None, max_value if isinstance(max_value, (int, float)) else None, fdesc))
+                    fields.append(FieldSpec(fname, ftype, required, max_length, min_value if isinstance(min_value, (int, float)) else None, max_value if isinstance(max_value, (int, float)) else None, fdesc, references, on_delete))
             operations = v.strings(ent, "operations", epath, OPERATIONS) if "operations" in ent else list(OPERATIONS)
             if "operations" not in ent:
                 v.provenance[f"{epath}.operations"] = "assumed"
@@ -437,6 +456,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
             if d not in module_names:
                 v.errors.append(f"spec.functional.modules[{module_names.index(m.name)}].depends_on: unknown module {d!r}")
     _check_cycles(v, modules)
+    _check_references(v, modules, pending_refs)
 
     nf_in = v.obj(document, "nonfunctional", "spec.nonfunctional")
     v.unknown(nf_in, ("availability", "latency_p95_ms", "consistency", "auditability", "compliance"), "spec.nonfunctional")
@@ -457,7 +477,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
     s_in = v.obj(document, "security", "spec.security")
     v.unknown(s_in, ("authentication", "authorization", "multi_tenant"), "spec.security")
     mt_in = v.obj(s_in, "multi_tenant", "spec.security.multi_tenant")
-    v.unknown(mt_in, ("enabled", "strategy", "tenant_param"), "spec.security.multi_tenant")
+    v.unknown(mt_in, ("enabled", "strategy", "tenant_param", "binding"), "spec.security.multi_tenant")
     tenant_param = v.text(mt_in, "tenant_param", "spec.security.multi_tenant", "tenant_id")
     if tenant_param and (not IDENT_RE.match(tenant_param) or keyword.iskeyword(tenant_param)):
         v.errors.append(f"spec.security.multi_tenant.tenant_param: {tenant_param!r} must be a python identifier")
@@ -468,12 +488,17 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
             "enabled": v.boolean(mt_in, "enabled", "spec.security.multi_tenant", False),
             "strategy": v.choice(mt_in, "strategy", "spec.security.multi_tenant", TENANT_STRATEGIES, "shared_schema_rls"),
             "tenant_param": tenant_param,
+            "binding": v.choice(mt_in, "binding", "spec.security.multi_tenant", TENANT_BINDINGS, "none"),
         },
     }
     if security["authorization"] != "none" and security["authentication"] == "none":
         v.errors.append("spec.security.authorization: authorization requires an authentication kind other than 'none'")
     if security["multi_tenant"]["enabled"] and security["authentication"] == "none":
         v.errors.append("spec.security.multi_tenant.enabled: a multi-tenant API needs authentication (who is the member of the tenant?)")
+    if security["multi_tenant"]["binding"] == "api_key_registry" and security["authentication"] != "api_key":
+        v.errors.append("spec.security.multi_tenant.binding: 'api_key_registry' binds API keys to tenants and needs authentication 'api_key'")
+    if security["multi_tenant"]["binding"] != "none" and not security["multi_tenant"]["enabled"]:
+        v.errors.append("spec.security.multi_tenant.binding: a binding needs multi_tenant.enabled: true")
 
     integrations: List[IntegrationSpec] = []
     raw_int = document.get("integrations", [])
@@ -580,12 +605,36 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
     if v.errors:
         return None, sorted(set(v.errors))
     spec = Spec(
-        schema=SPEC_SCHEMA, name=name, package=package or default_package, description=description or "", scope=scope, modules=modules,
+        schema=str(schema), name=name, package=package or default_package, description=description or "", scope=scope, modules=modules,
         nonfunctional=nonfunctional, persistence=persistence, security=security, integrations=integrations, infrastructure=infrastructure,
         architecture=architecture, decisions=decisions, components=components, testing=testing, assumptions=assumptions,
         open_questions=open_questions, provenance=v.provenance, digest=canonical_digest(document), source=source,
     )
     return spec, []
+
+
+def _check_references(v: _V, modules: List[ModuleSpec], pending: List[Tuple[str, Optional[str], str]]) -> None:
+    """A reference names an existing entity, in the same module or in a declared dependency, and is normalised
+    to ``module.Entity`` on the field."""
+    by_module = {m.name: m for m in modules}
+    for fpath, module_name, raw in pending:
+        if module_name is None:
+            continue
+        target_module, _, entity = raw.rpartition(".")
+        target_module = target_module or module_name
+        module = by_module.get(module_name)
+        target = by_module.get(target_module)
+        if target is None or entity not in {e.name for e in target.entities}:
+            v.errors.append(f"{fpath}.references: unknown entity {raw!r}")
+            continue
+        if target_module != module_name and (module is None or target_module not in module.depends_on):
+            v.errors.append(f"{fpath}.references: {raw!r} lives in module {target_module!r}; declare it in depends_on of {module_name!r} (references follow the dependency direction)")
+            continue
+        if module is not None:
+            for e in module.entities:
+                for f in e.fields:
+                    if f.references == raw:
+                        f.references = f"{target_module}.{entity}"
 
 
 def _check_cycles(v: _V, modules: List[ModuleSpec]) -> None:

@@ -24,6 +24,7 @@ from .verify import audit_generated, run_generated_tests
 
 TOOL_NAME = "fastapi-architect design"
 UNSUPPORTED_AUTHENTICATION = ("oauth2_jwt", "session")
+IMPLEMENTED_TENANT_BINDINGS = ("api_key_registry",)
 
 
 class DesignError(RuntimeError):
@@ -67,7 +68,67 @@ def generation_refusal(spec: Spec) -> Optional[str]:
     auth = spec.security["authentication"]
     if auth in UNSUPPORTED_AUTHENTICATION:
         return f"authentication {auth!r} is accepted by the contract but this increment does not generate it; the generator refuses to emit a non-functional security stub (use api_key or none, and record the real scheme as a pending decision)"
+    if spec.multi_tenant and spec.security["multi_tenant"]["binding"] not in IMPLEMENTED_TENANT_BINDINGS:
+        return (
+            "multi-tenant contract without a principal-tenant binding (security.multi_tenant.binding is "
+            f"{spec.security['multi_tenant']['binding']!r}): the generated routes would accept any tenant_id from any authenticated caller, "
+            "which is not authorization; declare binding 'api_key_registry' (each API key is bound to one tenant) or disable multi-tenancy"
+        )
     return None
+
+
+def security_guarantees(spec: Spec) -> Dict[str, Any]:
+    """What the generated project does and does not guarantee, stated so the report can never be read as
+    'secure' when a property is declared but not implemented."""
+    mt = spec.security["multi_tenant"]
+    pg = spec.persistence["kind"] == "postgresql"
+    auth = spec.security["authentication"]
+    binding = mt["binding"] if spec.multi_tenant else None
+    if auth == "api_key" and binding == "api_key_registry":
+        authentication = "api_key_registry: X-API-Key compared in constant time against a registry of keys, each bound to one tenant"
+    elif auth == "api_key":
+        authentication = "api_key_shared: X-API-Key compared in constant time against one configured key (no per-caller identity)"
+    elif auth == "none":
+        authentication = "none: every route is public by design (declared in .audit-fastapi.json)"
+    else:
+        authentication = f"{auth}: accepted by the contract, not generated (generation refused)"
+    storage = []
+    if spec.multi_tenant:
+        storage.append("tenant_id column on every entity and a tenant filter on every repository query")
+        if pg:
+            storage.append("composite foreign keys (tenant_id, id) between tenant tables: a row cannot reference another tenant's row")
+    return {
+        "multi_tenant": {
+            "requested": spec.multi_tenant,
+            "strategy_declared": mt["strategy"] if spec.multi_tenant else None,
+            "strategy_implemented": "shared_schema_application_scoping" if spec.multi_tenant else None,
+            "principal_tenant_binding": (
+                "enforced: the tenant path parameter must equal the tenant bound to the presented API key, otherwise 403"
+                if binding == "api_key_registry" else ("none" if spec.multi_tenant else None)
+            ),
+            "storage_isolation": storage,
+            "row_level_security": False,
+            "schema_or_database_per_tenant": False,
+        },
+        "authentication": authentication,
+        "resource_authorization": (
+            "not generated" + (f" (spec.security.authorization = {spec.security['authorization']!r} is a pending decision)" if spec.security["authorization"] != "none" else "")
+        ),
+        "persistence": {
+            "kind": spec.persistence["kind"],
+            "migrations": "alembic: generated environment and initial migration; tables are created only by `alembic upgrade head`" if pg else "none (in-memory)",
+            "create_all_used": False,
+            "constraint_violation_on_commit": "rolled back and answered 409 (problem+json)" if pg else "not applicable",
+        },
+        "execution": "generated tests run only through the v1.9 trust model, in a copy of the project; the local executor is process hygiene, not a sandbox",
+        "not_claimed": [
+            "row-level security",
+            "schema or database per tenant",
+            "resource-level authorization",
+            "OAuth2/JWT or session authentication",
+            "network or filesystem isolation of executed tests",
+        ],
+    }
 
 
 def _next_steps(spec: Spec, rec: Recommendation, generation: Optional[GenerationResult], verification: Optional[Dict[str, Any]]) -> List[str]:
@@ -95,6 +156,7 @@ def run_design(spec_or_path: Union[str, Spec], options: Optional[DesignOptions] 
         "tool": {"name": TOOL_NAME, "version": TOOL_VERSION},
         "spec": _spec_summary(spec),
         "recommendation": rec.to_dict(),
+        "guarantees": security_guarantees(spec),
         "layout": [],
         "files": [],
         "generation": None,
@@ -130,4 +192,4 @@ def run_design(spec_or_path: Union[str, Spec], options: Optional[DesignOptions] 
     return report
 
 
-__all__ = ["DesignError", "DesignOptions", "GenerationError", "SpecError", "generation_refusal", "run_design"]
+__all__ = ["DesignError", "DesignOptions", "GenerationError", "SpecError", "generation_refusal", "run_design", "security_guarantees"]

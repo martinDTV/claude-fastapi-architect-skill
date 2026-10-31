@@ -1,0 +1,7 @@
+{
+  "schema": "fastapi-architect/spec/1.1",
+  "name": "unbound-tenants",
+  "functional": {"modules": [{"name": "widgets", "entities": [{"name": "Widget", "fields": [{"name": "label", "type": "str", "max_length": 40}]}]}]},
+  "security": {"authentication": "api_key", "multi_tenant": {"enabled": true, "strategy": "shared_schema_rls"}},
+  "x-note": "valid contract; the generator must refuse it because no principal-tenant binding is declared"
+}
