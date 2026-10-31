@@ -186,9 +186,11 @@ cleanup and during recovery.
 `apply` (and `plan` unless `--no-verify`) applies the plan to a **copy** of the project and audits it against
 the project by fingerprint (new high/critical findings reject), checks that every existing route keeps its path
 and authentication, checks that nothing outside the plan changed, and runs the tests only under the trust model
-(the operator's scope covers the project and is moved to the copy; `untrusted` fails closed; the local executor
-is process hygiene, not a sandbox). Then, and only after `verified` or `audit_clean`, the project is written
-through the recoverable writer.
+(the operator's scope covers the project and is moved to the copy; with the local executor `untrusted` fails
+closed and the executor is process hygiene, not a sandbox; with `--executor container` (v2.1) the tests run in an
+OCI container with restrictions verified per run, and `verification.tests.run.environment` records them; the
+report schema is `evolution_report/1.2`, additive over 1.1). Then, and only after `verified` or `audit_clean`,
+the project is written through the recoverable writer.
 
 | State | Meaning |
 |---|---|

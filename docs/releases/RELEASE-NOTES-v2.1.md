@@ -127,3 +127,100 @@ fingerprint and the comparison reports nothing new and nothing gone.
 | Holdout corpora (truth17/holdout, truth18/holdout) | not re-scored |
 
 Environment: macOS (Darwin 27.0.0), CPython 3.13.5 (`/opt/anaconda3`) and 3.9.6 (`/usr/bin/python3`), PostgreSQL 16.10 (Homebrew), uv 0.11.28, Ruff 0.17.3 through `uvx`.
+
+## Increment 1: Isolated Container Executor
+
+Untrusted code can now be verified. `--executor container` on `design_fastapi.py`, `evolve_fastapi.py` and
+`audit_remediate.py` runs the project's tests inside an OCI container (Docker first, through its CLI; the domain is
+runtime-neutral and a Podman adapter fits behind the same `ContainerRuntime` interface) and is the only executor
+that accepts the `untrusted` profile. The local executor keeps the `fixture` and `trusted` profiles with its
+documented limits. There is no fallback between them: without a usable daemon an untrusted project stays
+unverified. Decision record: `docs/architecture/adr-2.1-03-isolated-container-executor.md`; guide:
+`docs/guides/isolated-execution-with-containers.md`; contract: `references/safe-refactoring.md`.
+
+### Design
+
+- `fastapi_audit/remediate/containers.py`: `SandboxPolicy` and `ImagePolicy` (every field a restriction; the
+  mandatory ones cannot be weakened and a policy that tries is refused), `ContainerSpec`/`Mount` (runtime-neutral),
+  `ContainerRuntime` (the adapter interface) and `DockerCliRuntime` (argv lists, no shell, a minimal client
+  environment), `verify_effective` (the daemon's view of a created container against the specification),
+  `ContainerExecutor` (the `Executor` implementation), `reap_leftovers`.
+- `_sandbox_probe.py` runs as the container's command: it measures the controls from inside, records them, refuses
+  with exit 97 when one is absent and otherwise `exec`s the authorized command. `_prepare_env.py` builds the
+  virtual environment inside the preparation container from requirements files or `pyproject.toml` (dependencies
+  plus dev/test groups), never building the project.
+- The `Executor` contract gains two no-op hooks, `workspace_dir()` and `release(workspace)`, called by the three
+  consumers where they already create and destroy workspaces; `TestRun` gains an additive `environment` record;
+  the runner adapters accept a `mount_point` so the command sees the evidence directory where it is mounted while
+  the host reads the report from the workspace. Schemas bump additively: `remediation_run/1.3`,
+  `architecture_report/1.1`, `evolution_report/1.2`.
+- `fastapi_audit/remediate/container_cli.py`: the same `--container-*` options on the three tools;
+  `--container-reap` on the remediation tool removes what an interruption left behind.
+
+### Effective restrictions, verified twice per run
+
+Non-root user (`65534:65534`; `host` ids allowed, root refused), read-only root filesystem, every capability
+dropped, `no-new-privileges`, the runtime's seccomp profile (`unconfined` refused), `network: none` for the run,
+memory without swap, CPU quota, pids limit, `nofile`/`fsize`/`cpu` ulimits, wall-clock timeout that kills the
+container, `/tmp` as a size-limited `rw,noexec,nosuid,nodev` tmpfs, exactly three mounts (workspace copy rw,
+evidence rw, prepared environment ro; the Docker socket, the system directories, the home directory and its
+credential directories are refused as sources), an environment holding only the keys the executor sets. The
+created container's configuration as the daemon reports it is compared with the specification before it starts;
+the probe verifies uid, read-only root, bounding capabilities, `NoNewPrivs`, seccomp mode, interfaces and a
+connection attempt, cgroup limits, the socket, `HOME` and the environment from inside before the command runs.
+
+### Dependency preparation
+
+Inside a container, never on the host: a volume handed to the sandbox user by the image's `chown` (root with
+`CAP_CHOWN` only, nothing from the project mounted, no network), then a non-root container with the workspace
+read-only, the volume read-write, the network the policy allows (`bridge` by default, `none` on demand) installing
+the project's requirements files or its declared dependencies and dev/test groups; the project's build backend
+never runs; `pytest` is added when the command names it and the project does not declare it; the pip cache
+volume is shared only for `fixture`/`trusted` (an untrusted project could poison it); `pip freeze` of the result
+is recorded. The run container mounts the environment read-only.
+
+### Evidence
+
+`environment` on every run: executor, isolation level, trust profile, nonce, runtime identity (versions,
+operating system, kernel, cgroup version, security options, rootless, trust boundary), image identity (reference,
+id, repository digests, pinned or not, provenance note), the sandbox policy, the phases with their specifications,
+the daemon's view, exit codes, OOM flags, termination reasons and timings, the in-container record, the
+guarantees verified for this run, the limitations, the cleanup and any rejection. The outcome still comes from the
+nonce-bound runner report, never from the exit code.
+
+### Not provided, said on every run
+
+Protection against vulnerabilities of the container runtime or the kernel (shared); the daemon's trust boundary (a
+rootful daemon is root-equivalent on its host; on the development machine the daemon runs rootful inside a Colima
+VM); egress filtering during preparation; image provenance beyond the repository digest (signatures are not
+verified; pin a digest); user namespace remapping; a `noexec` workspace mount (Docker bind mounts cannot be
+`noexec`).
+
+### Deliberate differences from v2.0.0
+
+- `container` is registered next to `local`; `select_executor(..., name="container")` grants `untrusted`
+  (v2.0 answered `executor_unavailable`). The local executor's refusal names `--executor container`.
+- The design guarantees reword two claims to name the executor they depend on (`not_claimed`, `execution`); the
+  guarantees fixtures changed accordingly.
+- Every `TestRun` dictionary carries `environment` (the local executor records its host interpreter and platform).
+- Nothing else: rule ids, fingerprints, suppressions, SARIF, manifests, contracts, adoption, the CLI flags and exit
+  codes, and the evidence model are unchanged.
+
+### Verified on this machine
+
+Environment: macOS (Darwin 27.0.0) host; Docker client 29.9.2, daemon 29.5.2 **rootful inside a Colima VM** (Ubuntu
+24.04.4 LTS, kernel 6.8.0-117, aarch64, cgroup v2, security options `apparmor`, `seccomp profile=builtin`,
+`cgroupns`); image `python:3.13-slim` pinned at `sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb`
+(Python 3.13.18, linux/arm64); CPython 3.13.5 and 3.9.6 on the host.
+
+| Check | Result |
+|---|---|
+| Unit tests against the fake runtime (`tests/test_container_v21.py`, no daemon) | 19 OK: policy refusals, `docker create` arguments, `verify_effective` on 21 weakened documents, forbidden mount sources, selection without fallback, adapter path translation, additive schemas, CLI configuration, a passing run with its environment, preparation phases and cache rules, refusals before start, a tampered daemon view, the in-container probe refusing, infrastructure failures, timeout/OOM/failure/no-report, leftover reaping, the probe refusing on the host, the preparation script resolving dependencies without building |
+| Opt-in real Docker (`FA_CONTAINER=1`, 8 tests in one pass) | 8 OK in 77.0 s, 32 MB host RSS: controls from inside (uid 65534, root read-only, `CapBnd` 0, `NoNewPrivs` 1, seccomp mode 2, only `lo` and `ENETUNREACH`, no socket, no credentials, no secret-looking keys, `/tmp` noexec, `memory.max` 536870912, `pids.max` 256; daemon view consistent; 14 guarantees recorded; no leftovers); a 15 s timeout kills a 120 s sleep and reports `timeout`; a 128 MiB limit ends a 1 GiB allocation without a pass; a pids limit of 32 bounds process creation; three refusals create nothing (image outside the allow-list, `network_run: bridge`, a pinned digest that does not exist); an unreachable daemon is `infrastructure_error`; labelled leftovers are reaped |
+| Consumers through the container (same pass) | design of `inventory-service` as `untrusted`: dependencies prepared in a container (30 packages, no shared cache, network `bridge`), 10 tests passed in a `network: none` container, `architecture_report/1.1`; evolution `inventory-add-suppliers` as `fixture`: `verified`, shared pip cache, `evolution_report/1.2`; remediation of `remediation19` as `untrusted` with linked reproducers: 3 cases `verified` (each reproducer failed before and passed after, in containers), composition `verified`, `remediation_run/1.3`, project untouched; 32.2 s for the three |
+| Preparation cost (design flow, `inventory-service`, measured twice) | cold, untrusted, no cache: prepare 21.4 s, run 3.2 s, 26.1 s wall; warm, fixture, shared cache: prepare 17.7 s, run 2.7 s, 21.6 s wall |
+| Full suite, Python 3.13.5 | 603 tests OK, 19 skipped (11 as before plus the 8 Docker tests when `FA_CONTAINER` is unset); 108.0 s, 139 MB (increment 0: 576, 107.5 s, 136.5 MB) |
+| Full suite, Python 3.9.6 | 603 tests OK, 33 skipped; 121.3 s, 183 MB |
+| Compatibility | 59 rules, fingerprints, suppressions, JSON and SARIF, manifests 1.0 to 1.2, evolution 1.0/1.1, adoption 1.0, journal 1.0, the frozen v2.0.0 artefacts (`tests/test_compat_artifacts.py`) and the CLI flags unchanged; the only test expectations that changed are the two that asserted the container executor's absence and the run schema |
+| `scripts/validate_structure.py`, `claude plugin validate`, Ruff (committed configuration), `tests/test_docs_links.py`, `git diff --check`, secrets scan on the diff, Python 3.9 byte-compilation of the new modules | pass |
+| Not verified here | Podman (interface only); rootless Docker; Linux hosts with native bind-mount permissions (the mount probe and the `--container-user host` option exist for them); database-backed suites inside the container (sidecar deferred) |

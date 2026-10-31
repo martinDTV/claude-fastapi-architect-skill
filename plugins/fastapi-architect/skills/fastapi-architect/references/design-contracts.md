@@ -177,9 +177,12 @@ strategy for an implemented one.
   the mount chain (`effective_paths`, `path_resolution` in every route contract; see the release notes), the
   declared public routes and tenant parameters are honoured, and with `api_key_registry` the membership
   dependency is visible on every tenant route (`authorization_visible`).
-- **Tests**: only with `--authorize-execution` and a trust profile accepted by an executor of the v1.9 trust
+- **Tests**: only with `--authorize-execution` and a trust profile accepted by an executor of the trust
   model. The local executor provides process hygiene (no shell, allow-listed programs, fresh HOME, reduced
-  environment, closed stdin, timeouts, CPU/file-size limits), not a sandbox; it refuses `untrusted`. The run is
+  environment, closed stdin, timeouts, CPU/file-size limits), not a sandbox; it refuses `untrusted`. The
+  container executor (`--executor container`, v2.1) runs them in an OCI container with restrictions verified per
+  run and accepts `untrusted`; `verification.tests.run.environment` records which executor ran and what it
+  enforced (`docs/guides/isolated-execution-with-containers.md`). The run is
   bound to a runner adapter (`pytest-junit`, `unittest-json`) that produces structured evidence and happens in a
   **copy** of the generated project (`Workspace.create`), so the target is never touched by its own tests or by
   the tooling they pull in; the copy's Python digest is compared before and after and reported under
@@ -187,11 +190,11 @@ strategy for an implemented one.
   PostgreSQL project with `uv run` (see `docs/guides/generated-postgresql-projects.md`). Without authorization the
   report says `tests: not executed` and why.
 
-## 5. Report (`architecture_report/1.0`)
+## 5. Report (`architecture_report/1.1`; 1.0 readers keep working: the only change is the additive `environment` record inside `verification.tests.run`)
 
 ```json
 {
-  "schema": "architecture_report/1.0",
+  "schema": "architecture_report/1.1",
   "tool": {"name": "fastapi-architect design", "version": "2.0.0"},
   "spec": {"name", "schema", "digest", "source", "package", "modules", "entities", "persistence", "authentication", "multi_tenant", "explicit_paths", "assumed_paths", "document"},
   "recommendation": {"style", "rationale", "rejected", "assumptions", "pending", "signals", "ports_modules", "warnings", "persistence_notes", "security_notes", "testing_notes"},

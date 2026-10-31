@@ -60,7 +60,9 @@ python3 scripts/evolve_fastapi.py apply evolution.json \
 ```
 
 `apply` repeats the verification in a copy, this time with the tests (only with `--authorize-execution`; the
-local executor is process hygiene, not a sandbox, and `untrusted` fails closed), and writes the project only if
+local executor is process hygiene, not a sandbox, and refuses `untrusted`; `--executor container` runs them in an
+OCI container with verified restrictions and is the only executor that accepts `untrusted`, see
+`isolated-execution-with-containers.md`), and writes the project only if
 the verification did not reject the plan. Every write re-checks the digest recorded at plan time: a concurrent
 change aborts before anything is written. The manifest records the operation (`history`), the new file digests
 and the merged contract, so the next evolution starts from it. Running the same contract again is a `noop`.

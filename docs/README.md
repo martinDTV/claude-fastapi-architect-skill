@@ -18,6 +18,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 |---|---|
 | [`architecture/design-engine-v2.md`](architecture/design-engine-v2.md) | why the v2.0 design engine is a declarative contract, a conservative advisor, a pure blueprint and a guarded writer, and how it reuses the audit and remediation engines |
 | [`architecture/discovery-v2.1.md`](architecture/discovery-v2.1.md) | the v2.1.0 discovery: state of the five areas (phased migrations, evolution of existing code, isolated execution, compatibility, technical debt), ADRs, contracts that evolve, the increment plan, risks, the compatibility matrix, the acceptance criteria and the decisions taken on review |
+| [`architecture/adr-2.1-03-isolated-container-executor.md`](architecture/adr-2.1-03-isolated-container-executor.md) | why untrusted code runs only in an OCI container behind the existing executor seam (Docker first, runtime-neutral domain), what is mandatory and verified twice per run, how dependencies are prepared without the host, and what is not protected |
 
 ## Guides
 
@@ -26,6 +27,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | [`guides/generated-postgresql-projects.md`](guides/generated-postgresql-projects.md) | persistence, Alembic migrations, the generated test suite and the opt-in verification of a generated PostgreSQL backend against a throwaway cluster |
 | [`guides/evolving-generated-projects.md`](guides/evolving-generated-projects.md) | discover an existing project, write an evolution contract, preview the plan, approve and apply it with verification in a copy; changing existing modules (1.1), adopting a hand-written project, recovering an interrupted write; what the engine protects |
 | [`guides/identity-authorization-and-rls.md`](guides/identity-authorization-and-rls.md) | the five security layers of a schema 1.2 contract (OIDC or API-key grants, principal-tenant binding, per-operation roles, ownership, row-level security), what is generated for each, how to run the generated proofs with two database roles, how to read 401/403/404/503, evolving safely, limits |
+| [`guides/isolated-execution-with-containers.md`](guides/isolated-execution-with-containers.md) | using `--executor container` on the three tools, what a run does step by step, what the report records, what it does not protect against (runtime, kernel, daemon, preparation egress, provenance), and what was verified on this project's machine |
 
 ## Release notes
 

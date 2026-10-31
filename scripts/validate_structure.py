@@ -160,6 +160,16 @@ for rel in ('tests/fixtures/compat/README.md','tests/fixtures/compat/generation-
     assert (root/rel).is_file(), f'Missing {rel}'
 assert 'architecture/discovery-v2.1.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the v2.1 discovery record'
 assert 'releases/RELEASE-NOTES-v2.1.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the v2.1 release notes'
+# v2.1 increment 1: the container executor, its in-container scripts, the shared CLI surface, the fixture, the tests and the documents
+for mod in ('containers.py','container_cli.py','_sandbox_probe.py','_prepare_env.py'):
+    assert (package/'remediate'/mod).is_file(), f'Missing fastapi_audit/remediate/{mod}'
+    compile((package/'remediate'/mod).read_text(encoding='utf-8'),str(package/'remediate'/mod),'exec')
+for rel in ('tests/test_container_v21.py','tests/fixtures/container21/sandbox/tests/test_controls.py','docs/guides/isolated-execution-with-containers.md','docs/architecture/adr-2.1-03-isolated-container-executor.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+for rel in ('guides/isolated-execution-with-containers.md','architecture/adr-2.1-03-isolated-container-executor.md'):
+    assert rel in (root/'docs/README.md').read_text(encoding='utf-8'), f'docs/README.md does not index {rel}'
+assert 'Isolated executor: containers' in (base/'references/safe-refactoring.md').read_text(encoding='utf-8'), 'references/safe-refactoring.md does not document the container executor'
+assert '--executor container' in skill, 'SKILL.md does not mention the container executor'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'

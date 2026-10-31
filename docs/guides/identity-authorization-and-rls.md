@@ -164,7 +164,8 @@ validates, it does not manage identities) and the JWKS client is verified agains
 against a real one; the static JWKS used by the generated tests is refused outside the test environment; the
 throwaway-cluster verification uses the bootstrap superuser as the migrations owner (FORCE is verified through the
 catalog flags and through the restricted role, not through a non-superuser owner); the local executor is process
-hygiene, not a sandbox; the auditor counts a policy only where its code shows the decision, never by the name of a
+hygiene, not a sandbox, and the container executor (v2.1) does not protect against runtime or kernel
+vulnerabilities; the auditor counts a policy only where its code shows the decision, never by the name of a
 dependency, and says so in `authorization_named_only`.
 
 ## 8. Threat model of the row-level security
