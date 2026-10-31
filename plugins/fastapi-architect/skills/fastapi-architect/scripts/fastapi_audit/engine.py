@@ -7,18 +7,18 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
-from .discovery import DEFAULT_MAX_FILE_BYTES, classify_environment, iter_python_files
 from .config_schema import ConfigError, validate_config
+from .discovery import DEFAULT_MAX_FILE_BYTES, classify_environment, iter_python_files
 from .facts import ProjectFacts, collect_facts, load_config, module_name_for
 from .kinds import module_level_factories
 from .model import (
     CATEGORIES,
     CONFIDENCE_DOWNGRADE,
     DISCLAIMER,
-    EVIDENCE_STATES,
     ENV_APPLICATION,
     ENV_MIGRATION,
     ENV_TEST,
+    EVIDENCE_STATES,
     PYTHON_VERSION,
     RULES,
     SCHEMA_VERSION,
@@ -29,9 +29,9 @@ from .model import (
     evidence_state_for,
     new_finding,
 )
+from .remediation import REMEDIATIONS, build_remediation
 from .report import compare_with_baseline
 from .resolver import awaited_call_ids, collect_functions, module_imports, resolve_in_scopes
-from .remediation import REMEDIATIONS, build_remediation
 from .rules import FileContext, architecture, async_rules, declared, interprocedural, lifecycle, migrations, reliability, security, sqlalchemy_rules, transactions
 from .suppressions import line_comments, suppression_for
 

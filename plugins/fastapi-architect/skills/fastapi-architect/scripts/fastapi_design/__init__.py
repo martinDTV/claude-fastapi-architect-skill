@@ -17,16 +17,16 @@ Public surface:
 * ``adoption``: selective adoption of hand-written projects (increment 4).
 """
 
+from .adoption import ADOPTION_SCHEMA, AdoptionContract, AdoptionError, adopt, load_adoption_contract, propose_adoption
 from .advisor import Recommendation, recommend
 from .blueprint import Blueprint, build
+from .discovery import ProjectModel, discover
+from .evolution import EVOLUTION_SCHEMA, EvolutionContract, EvolutionError, EvolutionPlan, EvolveOptions, load_evolution, plan_evolution, run_evolution
 from .generator import MANIFEST, MANIFEST_SCHEMA, GenerationError, GenerationResult, generate, verify_manifest
+from .journal import FaultInjector, Operation, pending_operations, recover, unreadable_operations, write_recoverable
 from .pipeline import DesignError, DesignOptions, generation_refusal, run_design, security_guarantees
 from .report import REPORT_SCHEMA, render_markdown, render_text, to_json
 from .spec import SPEC_SCHEMA, SPEC_SCHEMAS, Spec, SpecError, load_spec, validate_spec
-from .adoption import ADOPTION_SCHEMA, AdoptionContract, AdoptionError, adopt, load_adoption_contract, propose_adoption
-from .discovery import ProjectModel, discover
-from .evolution import EVOLUTION_SCHEMA, EvolutionContract, EvolutionError, EvolutionPlan, EvolveOptions, load_evolution, plan_evolution, run_evolution
-from .journal import FaultInjector, Operation, pending_operations, recover, unreadable_operations, write_recoverable
 from .transforms import StructuralEdit, TransformError, ensure_import, insert_class_field, insert_function
 from .verify import audit_generated, run_generated_tests
 

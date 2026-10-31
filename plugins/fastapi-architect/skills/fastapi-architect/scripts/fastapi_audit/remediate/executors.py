@@ -20,12 +20,11 @@ a sandbox: no network isolation, no filesystem confinement, no memory limit.
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-
-import time
-import uuid
 
 from .isolation import ExecutionPolicy, Workspace, command_allowed, parse_command, run_argv
 from .model import TestRun
