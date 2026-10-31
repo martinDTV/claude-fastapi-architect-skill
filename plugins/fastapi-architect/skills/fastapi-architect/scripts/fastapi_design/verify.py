@@ -3,20 +3,21 @@
 * the audit never executes the generated code (``fastapi_audit.engine.audit_project``);
 * the generated tests run only with an explicit ``Authorization`` accepted by an executor (the local process
   executor accepts the ``fixture`` and ``trusted`` profiles and refuses ``untrusted``), through a runner adapter
-  that binds the report to the run (``fastapi_audit.remediate``), inside a workspace whose project directory is
-  the generated target (the target is the output of the tool, not a foreign project: it is not copied again).
+  that binds the report to the run (``fastapi_audit.remediate``), inside a **copy** of the generated target
+  (``Workspace.create``: no ``.git``, environments or caches), so the generated project is never modified by its own
+  tests or by the tooling they pull in (virtual environments, lock files, caches); the copy's Python digest is
+  compared before and after the run.
 """
 
 from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi_audit.engine import AuditOptions, audit_project
 from fastapi_audit.remediate.executors import Authorization, select_executor
-from fastapi_audit.remediate.isolation import ExecutionPolicy, Workspace
+from fastapi_audit.remediate.isolation import ExecutionPolicy, Workspace, digest_tree
 
 
 def audit_generated(target_dir: str) -> Dict[str, object]:
@@ -48,12 +49,19 @@ def run_generated_tests(target_dir: str, authorization: Authorization, policy: E
         return {"ran": False, "denied_reason": denial, "denied_code": code, "run": None}
     if not command:
         return {"ran": False, "denied_reason": "no test command given", "denied_code": "no_command", "run": None, "executor": executor.to_dict()}
-    scratch = Path(tempfile.mkdtemp(prefix="fa-design-verify-"))
-    home = scratch / "home"
-    home.mkdir()
-    workspace = Workspace(root=scratch, project=target, home=home, created=False)
+    workspace = Workspace.create(str(target))
     try:
+        before = digest_tree(str(workspace.project))
         run = executor.run(command, workspace, policy)
-        return {"ran": run.ran, "executor": executor.to_dict(), "run": run.to_dict(), "denied_reason": None, "denied_code": None}
+        after = digest_tree(str(workspace.project))
+        changed = sorted(set(k for k in set(before) | set(after) if before.get(k) != after.get(k)))
+        return {
+            "ran": run.ran,
+            "executor": executor.to_dict(),
+            "run": run.to_dict(),
+            "workspace": {"copied": True, "python_files_digested": len(before), "python_files_changed_by_the_run": changed},
+            "denied_reason": None,
+            "denied_code": None,
+        }
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(workspace.root, ignore_errors=True)
