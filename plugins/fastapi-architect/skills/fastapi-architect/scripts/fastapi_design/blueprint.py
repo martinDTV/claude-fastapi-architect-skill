@@ -55,6 +55,7 @@ class Lineage:
     files: List[str]  # relative paths of the existing migration files (never regenerated)
     tables: List[str]  # tables created by the existing chain
     revisions: List[Dict[str, object]] = field(default_factory=list)  # manifest entries of the existing chain
+    baseline: Optional[Spec] = None  # the contract the chain was generated from (column deltas are computed against it)
 
 
 @dataclass
@@ -204,6 +205,26 @@ def _changed_sample(f: FieldSpec) -> str:
     return '"19.99"'
 
 
+def _py_default(f: FieldSpec) -> str:
+    """Python literal for a field default (pydantic/dataclass)."""
+    if f.type == "decimal":
+        return f'Decimal("{f.default}")'
+    if f.type == "date":
+        return f'date.fromisoformat("{f.default}")'
+    if f.type == "datetime":
+        return f'datetime.fromisoformat("{str(f.default).replace("Z", "+00:00")}")'
+    return repr(f.default)
+
+
+def _sql_default(f: FieldSpec) -> str:
+    """SQL literal for a server default, as text()."""
+    if f.type == "bool":
+        return "true" if f.default else "false"
+    if f.type in ("int", "float", "decimal"):
+        return str(f.default)
+    return "'" + str(f.default).replace("'", "''") + "'"
+
+
 def _tenant(spec: Spec) -> str:
     return spec.security["multi_tenant"]["tenant_param"] if spec.multi_tenant else ""
 
@@ -349,7 +370,7 @@ def _audit_config(spec: Spec, rec: Recommendation) -> str:
 
 
 def _gitignore() -> str:
-    return ".venv/\n__pycache__/\n*.py[cod]\n.env\n.pytest_cache/\n.ruff_cache/\ndist/\n"
+    return ".venv/\n__pycache__/\n*.py[cod]\n.env\n.pytest_cache/\n.ruff_cache/\ndist/\n.fastapi-architect/ops/\n"
 
 
 def _env_example(spec: Spec) -> str:
@@ -831,9 +852,43 @@ def _fk_constraint(table: str, f: FieldSpec, referred: str, tenant: str, sa: str
     return lines
 
 
+def _column_sql(f: FieldSpec) -> str:
+    default = f', server_default=sa.text("{_sql_default(f)}")' if f.has_default else ""
+    return f'sa.Column("{f.name}", {_sa_type(f)}{default}, nullable={not f.required})'
+
+
+def _baseline_columns(lineage: Optional[Lineage]) -> Dict[str, List[str]]:
+    """``table -> column names`` already present according to the lineage's baseline contract."""
+    if lineage is None or lineage.baseline is None:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for m in lineage.baseline.modules:
+        for e in m.entities:
+            out[e.plural] = [f.name for f in e.fields]
+    return out
+
+
+def added_columns(spec: Spec, lineage: Optional[Lineage]) -> List[Tuple[str, FieldSpec, Optional[str]]]:
+    """``(table, field, referred table)`` for fields of existing tables that the baseline did not have."""
+    existing = set(lineage.tables) if lineage else set()
+    baseline_cols = _baseline_columns(lineage)
+    index = _entity_index(spec)
+    out: List[Tuple[str, FieldSpec, Optional[str]]] = []
+    for _m, e in _ordered_entities(spec):
+        if e.plural not in existing:
+            continue
+        for f in e.fields:
+            if f.name not in baseline_cols.get(e.plural, []):
+                referred = index[f.references][1].plural if f.references and f.references in index else None
+                out.append((e.plural, f, referred))
+    return out
+
+
 def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
-    """The initial migration (every table), or, with a lineage, the additive migration of the tables the existing
-    chain does not create yet (``down_revision`` = current head; existing files are never touched)."""
+    """The initial migration (every table), or, with a lineage, the additive migration: the tables the existing
+    chain does not create yet plus the columns added to existing tables (``down_revision`` = current head;
+    existing files are never touched). Columns added to existing tables are nullable or carry a server default,
+    which is the backfill strategy; anything else is refused by the planner before this runs."""
     tenant = _tenant(spec)
     index = _entity_index(spec)
     revision = delta_revision(lineage, spec) if lineage else initial_revision(spec)
@@ -848,7 +903,7 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
         if tenant:
             cols.append(f'        sa.Column("{tenant}", sa.Uuid(), nullable=False),')
         for f in e.fields:
-            cols.append(f'        sa.Column("{f.name}", {_sa_type(f)}, nullable={not f.required}),')
+            cols.append(f"        {_column_sql(f)},")
         cols.append('        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),')
         cols.append(f'        sa.PrimaryKeyConstraint("id", name="pk_{table}"),')
         if tenant:
@@ -867,8 +922,24 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
         if tenant:
             drop.insert(0, f'    op.drop_index("ix_{table}_{tenant}", table_name="{table}")')
         down = drop + down
+    columns = added_columns(spec, lineage)
+    for table, f, referred in columns:
+        up.append(f"    op.add_column({json.dumps(table)}, {_column_sql(f)})")
+        if referred:
+            cols = [tenant, f.name] if tenant else [f.name]
+            refs = [f"{tenant}" if c == tenant else "id" for c in cols]
+            up.append(f'    op.create_foreign_key({json.dumps(_fk_name(table, cols, referred))}, {json.dumps(table)}, {json.dumps(referred)}, {json.dumps(cols)}, {json.dumps(refs)}, ondelete="{f.on_delete.upper().replace("_", " ")}")')
+            up.append(f'    op.create_index("ix_{table}_{f.name}", "{table}", ["{f.name}"], unique=False)')
+    for table, f, referred in reversed(columns):
+        if referred:
+            down.insert(0, f'    op.drop_column("{table}", "{f.name}")')
+            down.insert(0, f'    op.drop_constraint({json.dumps(_fk_name(table, [tenant, f.name] if tenant else [f.name], referred))}, "{table}", type_="foreignkey")')
+            down.insert(0, f'    op.drop_index("ix_{table}_{f.name}", table_name="{table}")')
+        else:
+            down.insert(0, f'    op.drop_column("{table}", "{f.name}")')
     new_tables = [e.plural for _m, e in _ordered_entities(spec) if e.plural not in existing]
-    title = f"Initial schema of {spec.name}" if not lineage else f"Add {', '.join(new_tables)} to {spec.name}"
+    changes = new_tables + [f"{t}.{f.name}" for t, f, _r in columns]
+    title = f"Initial schema of {spec.name}" if not lineage else f"Add {', '.join(changes)} to {spec.name}"
     lines = [
         f'"""{title}: generated from the architecture contract (digest {spec.digest[:12]}).',
         "",
@@ -920,7 +991,10 @@ def _schemas(spec: Spec, module: ModuleSpec) -> str:
             create_lines = []
             for f in e.fields:
                 constraints = _constraints(f)
-                if f.required and not constraints:
+                if f.has_default:
+                    args = [f"default={_py_default(f)}"] + ([constraints] if constraints else [])
+                    create_lines += _call(f"{f.name}: {_annotation(f)} = Field(", args, ")", "    ")
+                elif f.required and not constraints:
                     create_lines.append(f"    {f.name}: {_annotation(f)}")
                 else:
                     args = ([] if f.required else ["default=None"]) + ([constraints] if constraints else [])
@@ -949,13 +1023,15 @@ def _models(spec: Spec, module: ModuleSpec, layout: Layout) -> str:
             stdlib.append(line)
         lines = _header("Entities of the module (plain dataclasses; the in-memory repository stores them as they are).", stdlib=stdlib)
         for e in module.entities:
-            body = ([f"    {tenant}: UUID"] if tenant else []) + [f"    {f.name}: {_annotation(f)}" for f in e.fields if f.required]
-            body += [f"    {f.name}: {_annotation(f)} = None" for f in e.fields if not f.required]
+            body = ([f"    {tenant}: UUID"] if tenant else []) + [f"    {f.name}: {_annotation(f)}" for f in e.fields if f.required and not f.has_default]
+            body += [f"    {f.name}: {_annotation(f)} = {_py_default(f) if f.has_default else 'None'}" for f in e.fields if not f.required or f.has_default]
             body += ["    id: UUID = field(default_factory=uuid4)", "    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))"]
             lines += ["", "@dataclass", f"class {e.name}:", *body, ""]
         return "\n".join(lines).rstrip("\n") + "\n"
     index = _entity_index(spec)
     sa_names = {SA_TYPES[f.type] for f in all_fields} | {"DateTime", "Uuid"}
+    if any(f.has_default for f in all_fields):
+        sa_names.add("text")
     if any(_fk_fields(e) for e in module.entities):
         sa_names.add("ForeignKeyConstraint")
     if tenant:
@@ -984,6 +1060,8 @@ def _models(spec: Spec, module: ModuleSpec, layout: Layout) -> str:
             col = SA_TYPES[f.type]
             arg = f"String({f.max_length or 255})" if f.type == "str" else ("Numeric(18, 2)" if f.type == "decimal" else ("DateTime(timezone=True)" if f.type == "datetime" else col))
             extras = ("" if f.required else ", nullable=True") + (", index=True" if f.references else "")
+            if f.has_default:
+                extras += f", default={_py_default(f)}, server_default=text(\"{_sql_default(f)}\")"
             body.append(f"    {f.name}: Mapped[{_annotation(f)}] = mapped_column({arg}{extras})")
         body.append("    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())")
         lines += ["", f"class {e.name}(Base):", *body, ""]
@@ -1447,14 +1525,16 @@ def migration_file(spec: Spec, lineage: Optional[Lineage] = None) -> str:
     if lineage is None:
         return f"migrations/versions/{initial_revision(spec)}_initial_schema.py"
     new_tables = [e.plural for _m, e in _ordered_entities(spec) if e.plural not in set(lineage.tables)]
-    slug = "add_" + "_".join(new_tables) if new_tables else "noop"
+    changes = new_tables + [f"{t}_{f.name}" for t, f, _r in added_columns(spec, lineage)]
+    slug = "add_" + "_".join(changes) if changes else "noop"
     return f"migrations/versions/{delta_revision(lineage, spec)}_{slug[:60]}.py"
 
 
 def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None) -> str:
     tenant = _tenant(spec)
     index = _entity_index(spec)
-    revision = delta_revision(lineage, spec) if lineage else initial_revision(spec)
+    has_delta = bool(lineage) and (any(e.plural not in set(lineage.tables) for _m, e in _ordered_entities(spec)) or bool(added_columns(spec, lineage)))
+    revision = delta_revision(lineage, spec) if has_delta else (lineage.head if lineage else initial_revision(spec))
     tables = sorted(e.plural for _m, e in _ordered_entities(spec))
     fks = []
     for _m, e in _ordered_entities(spec):
@@ -1636,11 +1716,12 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None) ->
             migrations.append({"revision": initial_revision(spec), "down_revision": None, "file": migration_file(spec), "tables": all_tables})
         else:
             new_tables = [t for t in all_tables if t not in set(lineage.tables)]
+            new_columns = added_columns(spec, lineage)
             migrations.extend(lineage.revisions)
-            if new_tables:
+            if new_tables or new_columns:
                 files[migration_file(spec, lineage)] = _migration(spec, lineage)
-                migrations.append({"revision": delta_revision(lineage, spec), "down_revision": lineage.head, "file": migration_file(spec, lineage), "tables": new_tables})
-        files["tests/test_migrations.py"] = _migration_tests(spec, lineage if (lineage and any(t not in set(lineage.tables) for t in all_tables)) else (lineage if lineage else None))
+                migrations.append({"revision": delta_revision(lineage, spec), "down_revision": lineage.head, "file": migration_file(spec, lineage), "tables": new_tables, "columns": [f"{t}.{f.name}" for t, f, _r in new_columns]})
+        files["tests/test_migrations.py"] = _migration_tests(spec, lineage)
     files[f"src/{pkg}/api/__init__.py"] = ""
     files[f"src/{pkg}/api/router.py"] = _api_router(spec, layout)
     if not layout.by_layer:

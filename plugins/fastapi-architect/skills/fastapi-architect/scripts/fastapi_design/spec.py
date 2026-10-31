@@ -13,7 +13,8 @@ Top-level keys (``schema`` is required):
 * ``scope``: ``size`` (small | medium | large), ``team_size``, ``expected_rps``, ``data_volume`` (small | medium | large);
 * ``functional``: ``modules`` (at least one) with ``entities`` (at least one, with ``fields`` and ``operations``) and ``depends_on``;
   a ``uuid`` field may declare ``references: "module.Entity"`` (plus ``on_delete`` restrict | cascade | set_null), a foreign key in SQL
-  persistence that must follow the module dependency direction (schema 1.1);
+  persistence that must follow the module dependency direction (schema 1.1); a field may carry an explicit ``default``
+  (schema, model and server default; the backfill strategy of a NOT NULL column added later);
 * ``nonfunctional``: ``availability``, ``latency_p95_ms``, ``consistency`` (strong | eventual), ``auditability``, ``compliance``;
 * ``persistence``: ``kind`` (memory | postgresql), ``migrations``;
 * ``security``: ``authentication`` (none | api_key | oauth2_jwt | session), ``authorization`` (none | role | resource), ``multi_tenant``
@@ -87,6 +88,8 @@ class FieldSpec:
     description: Optional[str] = None
     references: Optional[str] = None  # "module.Entity" (uuid fields only): a foreign key in SQL persistence
     on_delete: str = "restrict"
+    default: Optional[object] = None  # explicit default (schema, model and server default); required fields may carry one
+    has_default: bool = False
 
 
 @dataclass
@@ -181,7 +184,7 @@ class Spec:
             "functional": {"modules": [
                 {"name": m.name, "description": m.description, "depends_on": list(m.depends_on), "entities": [
                     {"name": e.name, "operations": list(e.operations), "fields": [
-                        {k: v for k, v in {"name": f.name, "type": f.type, "required": f.required, "max_length": f.max_length, "min_value": f.min_value, "max_value": f.max_value, "description": f.description, "references": f.references, "on_delete": f.on_delete if f.references else None}.items() if v is not None}
+                        {k: v for k, v in {"name": f.name, "type": f.type, "required": f.required, "max_length": f.max_length, "min_value": f.min_value, "max_value": f.max_value, "description": f.description, "references": f.references, "on_delete": f.on_delete if f.references else None, "default": f.default if f.has_default else None}.items() if v is not None}
                         for f in e.fields
                     ]} for e in m.entities
                 ]} for m in self.modules
@@ -301,6 +304,24 @@ class _V:
         return out
 
 
+def _default_matches(ftype: Optional[str], value: Any) -> bool:
+    if isinstance(value, bool):
+        return ftype == "bool"
+    if ftype == "str":
+        return isinstance(value, str)
+    if ftype == "int":
+        return isinstance(value, int)
+    if ftype == "float":
+        return isinstance(value, (int, float))
+    if ftype == "decimal":
+        return isinstance(value, str) and re.match(r"^-?\d+(\.\d+)?$", value) is not None
+    if ftype == "date":
+        return isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", value) is not None
+    if ftype == "datetime":
+        return isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$", value) is not None
+    return False
+
+
 def _ident(v: _V, value: Any, path: str, what: str) -> Optional[str]:
     if not isinstance(value, str) or not IDENT_RE.match(value) or keyword.iskeyword(value):
         v.errors.append(f"{path}: {what} must be a lowercase python identifier (a-z, 0-9, _), got {value!r}")
@@ -399,7 +420,7 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
                 if not isinstance(fld, dict):
                     v.errors.append(f"{fpath}: expected an object")
                     continue
-                v.unknown(fld, ("name", "type", "required", "max_length", "min_value", "max_value", "description", "references", "on_delete"), fpath)
+                v.unknown(fld, ("name", "type", "required", "max_length", "min_value", "max_value", "description", "references", "on_delete", "default"), fpath)
                 fname = _ident(v, fld.get("name"), f"{fpath}.name", "field name")
                 if fname in RESERVED_FIELD_NAMES:
                     v.errors.append(f"{fpath}.name: {fname!r} is generated automatically and cannot be declared")
@@ -438,8 +459,22 @@ def validate_spec(document: Any, source: Optional[str] = None) -> Tuple[Optional
                     v.errors.append(f"{fpath}.on_delete: 'set_null' needs required: false")
                 if references is not None:
                     pending_refs.append((fpath, mname, references))
+                has_default = "default" in fld
+                default = fld.get("default")
+                if has_default:
+                    if default is None:
+                        v.errors.append(f"{fpath}.default: null is not a default; use required: false for a nullable field")
+                        has_default = False
+                    elif not _default_matches(ftype, default):
+                        v.errors.append(f"{fpath}.default: {default!r} is not a valid default for type {ftype!r} (str, int, float, bool, decimal as a string, date/datetime as ISO strings; uuid defaults are not supported)")
+                        has_default = False
+                    elif references is not None:
+                        v.errors.append(f"{fpath}.default: a reference cannot have a default")
+                        has_default = False
+                    else:
+                        v.provenance[f"{fpath}.default"] = "explicit"
                 if fname and ftype:
-                    fields.append(FieldSpec(fname, ftype, required, max_length, min_value if isinstance(min_value, (int, float)) else None, max_value if isinstance(max_value, (int, float)) else None, fdesc, references, on_delete))
+                    fields.append(FieldSpec(fname, ftype, required, max_length, min_value if isinstance(min_value, (int, float)) else None, max_value if isinstance(max_value, (int, float)) else None, fdesc, references, on_delete, default if has_default else None, has_default))
             operations = v.strings(ent, "operations", epath, OPERATIONS) if "operations" in ent else list(OPERATIONS)
             if "operations" not in ent:
                 v.provenance[f"{epath}.operations"] = "assumed"
