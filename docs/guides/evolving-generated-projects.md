@@ -152,5 +152,8 @@ A file edited by hand after the crash is a conflict: recovery leaves it alone, r
 and keeps the journal (`needs_attention`) until you decide. A journal that cannot be read at all (missing, truncated,
 another schema) is reported as `needs_attention` too, with its staged files kept, and blocks new plans until you look
 at it. There is no atomicity across files; the renames are atomic per file; the journal is what makes the whole
-operation recoverable. Nothing here claims durability against power loss: files are written and renamed, not
-synced to stable storage, and the staging directory must live on the project's filesystem.
+operation recoverable. Since v2.1 every write of the protocol is synced to stable storage (the file before the rename, the directory
+entry after it), so once `apply` or `recover` returns, a crash or a power loss keeps what it wrote on a filesystem
+that honours `fsync`. What that does not cover: the drive's own cache on macOS, directory entries on Windows, and
+filesystems that refuse to sync directories (the file is synced, the entry is not). A sync failure is reported as
+`write_failed` or `interrupted`, never hidden. The staging directory must live on the project's filesystem.

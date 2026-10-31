@@ -43,6 +43,7 @@ from fastapi_audit.model import TOOL_VERSION
 from fastapi_audit.remediate.executors import Authorization
 from fastapi_audit.remediate.isolation import ExecutionPolicy, Workspace
 from fastapi_audit.report import compare_reports
+from fastapi_common.fs import resolve_against
 
 from .adoption import ADOPTION
 from .advisor import recommend
@@ -429,10 +430,7 @@ def _routes_of(spec: Spec, modules: List[str]) -> List[Dict[str, str]]:
 
 
 def _resolve_project(contract: EvolutionContract) -> Path:
-    raw = Path(contract.project_path)
-    if not raw.is_absolute() and contract.source:
-        raw = Path(contract.source).resolve().parent / raw
-    return raw
+    return resolve_against(contract.project_path, contract.source)
 
 
 def _module_files(layout: Layout, pkg: str, module: str) -> List[str]:
@@ -928,8 +926,8 @@ class EvolveOptions:
     faults: Optional[FaultInjector] = None  # tests: interrupt the publication of the real project
 
 
-def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None) -> Operation:
-    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults)
+def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None, *, durable: bool = True) -> Operation:
+    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable)
 
 
 def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any]:
@@ -939,7 +937,7 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
     workspace = Workspace.create(str(project))
     result: Dict[str, Any] = {"copy": str(workspace.project), "state": STATE_INCONCLUSIVE, "reasons": []}
     try:
-        op = _write_plan(workspace.project, plan)
+        op = _write_plan(workspace.project, plan, durable=False)  # a throwaway copy: no fsync
         result["written_in_copy"] = [f.path for f in op.files]
         before_report = audit_project(str(project))
         after_report = audit_project(str(workspace.project))

@@ -172,7 +172,13 @@ An operation directory whose journal is missing, truncated, not JSON or of anoth
 content and the backups. Limits, stated plainly: there is no global atomicity across files; a crash between two renames leaves a mixed
 tree until `recover` runs (a new `plan` refuses while a journal is pending); the staging directory must be on
 the same filesystem as the project for the renames to be atomic; nothing protects against a writer that ignores
-the journal. The tests inject failures before publication, after the n-th file, after the last file, before
+the journal. Durability (v2.1): every write of the protocol is fsync'ed, the file before the rename and the directory
+entry after it, and the operation directories when they are created, so once `apply` or `recover` returns its effects
+survive a crash or a power loss on a filesystem that honours `fsync`. Not guaranteed: the drive's own cache on macOS
+(`F_FULLFSYNC` is not issued), directory entries on Windows, and filesystems that refuse to sync a directory (the file
+is synced, the entry is not, nothing fails). A failed sync of a file is an error, never a silent downgrade: `apply`
+reports `write_failed` (nothing landed) or `interrupted` (the journal is kept for `recover`). The verification copy is
+written without fsync. The tests inject failures before publication, after the n-th file, after the last file, before
 cleanup and during recovery.
 
 ## 7. Verification and states

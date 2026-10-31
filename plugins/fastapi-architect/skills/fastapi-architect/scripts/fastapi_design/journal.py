@@ -28,19 +28,30 @@ interrupted after any number of them. This module does not pretend otherwise; it
 Limits, stated plainly: there is no global atomicity; a crash between two renames leaves a mixed tree until
 ``recover`` runs; a crash during ``prepare`` leaves only staging files under ``.fastapi-architect/ops`` and nothing
 else; the staging directory must be on the same filesystem as the project for the renames to be atomic; nothing
-here protects against another writer that ignores the journal. Fault injection points (``FaultInjector``) exist so
-the tests can interrupt the protocol before, during and after publication and during recovery.
+here protects against another writer that ignores the journal.
+
+Durability (v2.1, increment 0): every write of the protocol (staged content, backups, each journal state, each
+landed file, each restored file, the cleanup) goes through ``fastapi_common.fs.atomic_write(durable=True)``: the file is
+fsync'ed before the rename and the directory entry after it, and the directories that hold a new operation are
+synced too. Once a call returns, its effects survive a crash or a power loss on a filesystem that honours ``fsync``.
+Not guaranteed: the drive's own cache on macOS (``F_FULLFSYNC`` is not issued), directory entries on Windows, and
+filesystems that refuse to sync a directory (the file is synced, the entry is not, and the writer reports it rather
+than failing). ``durable=False`` exists for throwaway verification copies only; a failed fsync of a file is an error.
+
+Fault injection points (``FaultInjector``) exist so the tests can interrupt the protocol before, during and after
+publication and during recovery.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from fastapi_common.fs import atomic_write, fsync_directory, sha256_bytes, sha256_path, symlink_on_path
 
 from .generator import GenerationError, WriteError, safe_join
 
@@ -116,14 +127,8 @@ class RecoveryReport:
         return {"op_id": self.op_id, "strategy": self.strategy, "restored": list(self.restored), "published": list(self.published), "already_done": list(self.already_done), "conflicts": dict(self.conflicts), "state": self.state}
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _digest(path: Path) -> Optional[str]:
-    if not path.is_file():
-        return None
-    return sha256_bytes(path.read_bytes())
+    return sha256_path(path)
 
 
 def operation_id(files: Dict[str, str], expected: Dict[str, Optional[str]], kind: str, description: str) -> str:
@@ -131,23 +136,27 @@ def operation_id(files: Dict[str, str], expected: Dict[str, Optional[str]], kind
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".fa-tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+def _write_atomic(path: Path, data: bytes, *, durable: bool) -> None:
+    """Temporary sibling + rename; with ``durable`` the file and its directory entry are fsync'ed (``fastapi_common.fs``)."""
+    atomic_write(path, data, durable=durable)
 
 
-def _save_journal(target: Path, op: Operation) -> None:
-    _write_atomic(target / op.directory / JOURNAL, (json.dumps(op.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8"))
+def _sync_directories(target: Path, op_dir: Path, durable: bool) -> None:
+    """Make the creation of the operation directory itself durable: its parents up to the project root."""
+    if not durable:
+        return
+    for directory in (op_dir.parent, op_dir.parent.parent, target):
+        if directory.is_dir():
+            fsync_directory(directory)
+
+
+def _save_journal(target: Path, op: Operation, *, durable: bool) -> None:
+    _write_atomic(target / op.directory / JOURNAL, (json.dumps(op.to_dict(), indent=2, sort_keys=True) + "\n").encode("utf-8"), durable=durable)
 
 
 def _no_symlink_on_path(target: Path, relpath: str) -> None:
-    current = target
-    for part in relpath.split("/"):
-        current = current / part
-        if current.is_symlink():
-            raise GenerationError(f"refusing to write through a symlink: {relpath!r}")
+    if symlink_on_path(target, relpath) is not None:
+        raise GenerationError(f"refusing to write through a symlink: {relpath!r}")
 
 
 def _check_preconditions(target: Path, files: List[FileEntry]) -> None:
@@ -165,9 +174,11 @@ def _check_preconditions(target: Path, files: List[FileEntry]) -> None:
             raise WriteError(f"concurrent change: {entry.path} changed after the plan was computed (expected {entry.expected[:12]}, found {str(current)[:12]})")
 
 
-def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str) -> Operation:
+def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, durable: bool = True) -> Operation:
     """Check every precondition, stage the new content and the backups, write the journal (state ``prepared``).
-    Nothing in the project is modified. Raises WriteError/GenerationError and leaves no staging behind on failure."""
+    Nothing in the project is modified. Raises WriteError/GenerationError and leaves no staging behind on failure.
+    With ``durable`` (the default) every staged file, the journal and the directories that hold them are fsync'ed
+    before returning, so an interruption after ``prepare`` finds a complete staging to recover from."""
     target = target.resolve()
     if target.is_symlink():
         raise GenerationError(f"the project is a symlink: {target}")
@@ -175,6 +186,7 @@ def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[st
     entries = [FileEntry(p, expected.get(p), sha256_bytes(files[p].encode("utf-8"))) for p in sorted(files)]
     _check_preconditions(target, entries)
     op_dir = target / OPS_DIR / op_id
+    created_dirs = [d for d in (op_dir.parent, op_dir.parent.parent) if not d.exists()]  # removed again if staging fails
     if op_dir.exists():
         existing = load_operation(target, op_id)
         if existing is not None and existing.state != "prepared":
@@ -183,21 +195,26 @@ def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[st
     op = Operation(op_id=op_id, kind=kind, description=description, files=entries)
     try:
         for entry in entries:
-            (op_dir / "new" / entry.path).parent.mkdir(parents=True, exist_ok=True)
-            (op_dir / "new" / entry.path).write_bytes(files[entry.path].encode("utf-8"))
+            _write_atomic(op_dir / "new" / entry.path, files[entry.path].encode("utf-8"), durable=durable)
             if entry.expected is not None:
-                (op_dir / "backup" / entry.path).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(target / entry.path, op_dir / "backup" / entry.path)
-        _save_journal(target, op)
+                _write_atomic(op_dir / "backup" / entry.path, (target / entry.path).read_bytes(), durable=durable)
+        _save_journal(target, op, durable=durable)
+        _sync_directories(target, op_dir, durable)
     except OSError as exc:
         shutil.rmtree(op_dir, ignore_errors=True)
+        for directory in created_dirs:  # innermost first: nothing of ours is left behind
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
         raise WriteError(f"could not stage the operation: {exc}") from exc
     return op
 
 
-def publish(target: Path, op: Operation, *, faults: Optional[FaultInjector] = None) -> List[str]:
+def publish(target: Path, op: Operation, *, faults: Optional[FaultInjector] = None, durable: bool = True) -> List[str]:
     """Rename every staged file into place, journaling each landing; then clean up. Raises on interruption; the
-    journal then describes exactly what landed (``recover`` finishes or undoes the rest)."""
+    journal then describes exactly what landed (``recover`` finishes or undoes the rest). With ``durable`` (the
+    default) each landed file, each journal state and the cleanup are fsync'ed as they happen."""
     target = target.resolve()
     faults = faults or FaultInjector()
     op_dir = target / op.directory
@@ -205,30 +222,35 @@ def publish(target: Path, op: Operation, *, faults: Optional[FaultInjector] = No
         _check_preconditions(target, op.files)  # the world may have moved since prepare
     faults.check("before_publish")
     op.state = "publishing"
-    _save_journal(target, op)
+    _save_journal(target, op, durable=durable)
     for index, entry in enumerate(op.files, start=1):
         if entry.path in op.published:
             continue
         full = safe_join(target, entry.path)
         _no_symlink_on_path(target, entry.path)
-        _write_atomic(full, (op_dir / "new" / entry.path).read_bytes())
+        _write_atomic(full, (op_dir / "new" / entry.path).read_bytes(), durable=durable)
         op.published.append(entry.path)
-        _save_journal(target, op)
+        _save_journal(target, op, durable=durable)
         faults.check(f"after_publish:{index}")
     faults.check("after_publish_all")
     op.state = "published"
-    _save_journal(target, op)
+    _save_journal(target, op, durable=durable)
     faults.check("before_cleanup")
-    complete(target, op)
+    complete(target, op, durable=durable)
     return [f.path for f in op.files]
 
 
-def complete(target: Path, op: Operation) -> None:
-    """Remove the staging directory and the journal of a fully published operation."""
+def complete(target: Path, op: Operation, *, durable: bool = True) -> None:
+    """Remove the staging directory and the journal of a fully published operation (fsync'ed when ``durable``, so a
+    completed operation does not come back as pending after a crash)."""
     shutil.rmtree(target / op.directory, ignore_errors=True)
     ops = target / OPS_DIR
     if ops.is_dir() and not any(ops.iterdir()):
         ops.rmdir()
+    if durable:
+        remaining = ops if ops.is_dir() else ops.parent
+        if remaining.is_dir():
+            fsync_directory(remaining)
 
 
 def load_operation(target: Path, op_id: str) -> Optional[Operation]:
@@ -304,9 +326,9 @@ def classify(target: Path, op: Operation) -> Dict[str, str]:
     return out
 
 
-def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: Optional[FaultInjector] = None) -> RecoveryReport:
+def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: Optional[FaultInjector] = None, durable: bool = True) -> RecoveryReport:
     """Finish (``forward``) or undo (``rollback``) an interrupted operation. Files in conflict are never touched.
-    Progress is journaled; calling it again continues or confirms (idempotent)."""
+    Progress is journaled; calling it again continues or confirms (idempotent). Durable like ``publish``."""
     if strategy not in ("rollback", "forward"):
         raise ValueError("strategy must be 'rollback' or 'forward'")
     target = Path(target).resolve()
@@ -314,11 +336,11 @@ def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: 
     op_dir = target / op.directory
     report = RecoveryReport(op_id=op.op_id, strategy=strategy)
     if op.state == "prepared":  # nothing was published: discarding the staging is the whole recovery
-        complete(target, op)
+        complete(target, op, durable=durable)
         report.state = "discarded"
         return report
     op.state = f"recovering_{strategy}"
-    _save_journal(target, op)
+    _save_journal(target, op, durable=durable)
     status = classify(target, op)
     handled = 0
     for entry in op.files:
@@ -332,36 +354,39 @@ def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: 
             if kind == "published":
                 if entry.expected is None:
                     full.unlink()  # created by this operation and still exactly what we wrote
+                    if durable:
+                        fsync_directory(full.parent)
                 else:
-                    _write_atomic(full, (op_dir / "backup" / entry.path).read_bytes())
+                    _write_atomic(full, (op_dir / "backup" / entry.path).read_bytes(), durable=durable)
                 report.restored.append(entry.path)
                 handled += 1
             else:
                 report.already_done.append(entry.path)
         else:
             if kind == "pending":
-                _write_atomic(full, (op_dir / "new" / entry.path).read_bytes())
+                _write_atomic(full, (op_dir / "new" / entry.path).read_bytes(), durable=durable)
                 report.published.append(entry.path)
                 handled += 1
             else:
                 report.already_done.append(entry.path)
         if entry.path not in op.recovered:
             op.recovered.append(entry.path)
-        _save_journal(target, op)
+        _save_journal(target, op, durable=durable)
         if handled:
             faults.check(f"recover_after:{handled}")
     if report.conflicts:
         op.state = "needs_attention"
-        _save_journal(target, op)
+        _save_journal(target, op, durable=durable)
         report.state = "needs_attention"
         return report
-    complete(target, op)
+    complete(target, op, durable=durable)
     report.state = "rolled_back" if strategy == "rollback" else "completed"
     return report
 
 
-def write_recoverable(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, faults: Optional[FaultInjector] = None) -> Operation:
-    """prepare + publish; on failure the journal stays for ``recover``. Returns the operation (state as left)."""
-    op = prepare(target, files, expected, kind=kind, description=description)
-    publish(target, op, faults=faults)
+def write_recoverable(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, faults: Optional[FaultInjector] = None, durable: bool = True) -> Operation:
+    """prepare + publish; on failure the journal stays for ``recover``. Returns the operation (state as left).
+    ``durable=False`` skips the fsyncs: for throwaway copies (verification) only, never for a project."""
+    op = prepare(target, files, expected, kind=kind, description=description, durable=durable)
+    publish(target, op, faults=faults, durable=durable)
     return op
