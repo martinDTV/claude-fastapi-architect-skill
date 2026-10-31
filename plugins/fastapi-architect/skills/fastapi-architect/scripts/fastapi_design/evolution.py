@@ -58,7 +58,7 @@ EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.1"
 EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1")
 REPORT_SCHEMA = "evolution_report/1.1"
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
-DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py")
+DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
 STATE_PLANNED = "planned"
 STATE_NOOP = "noop"
@@ -227,7 +227,13 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
         return None, ["top level: expected an object"]
     known = ("schema", "project", "add_modules", "modify_modules", "invariants", "files")
     for key in document:
-        if key not in known and not str(key).startswith("x-"):
+        if key in ("security", "persistence"):
+            errors.append(
+                f"evolution.{key}: not an evolution operation; authentication, the authorization policy, the tenant strategy and "
+                "row-level security are design decisions: change them in a reviewed design contract with new tests (moving a "
+                "project from application scoping to RLS, or back, is never done by an evolution)"
+            )
+        elif key not in known and not str(key).startswith("x-"):
             errors.append(f"evolution.{key}: unknown property (known: {', '.join(known)})")
     schema = document.get("schema")
     if schema not in EVOLUTION_SCHEMAS:
@@ -759,6 +765,11 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         plan.migration = {"required": False, "kind": "not applicable (in-memory persistence)" if not pg else "unknown"}
     if plan.style_warning:
         plan.risks.append(plan.style_warning)
+    if pg and plan.migration and plan.migration.get("required"):
+        if evolved.rls:
+            plan.risks.append("row-level security: every new table is protected in the additive revision (ENABLE + FORCE, policy, grants to the application role, which must exist and must not bypass RLS); run tests/test_rls.py against the migrated database before relying on it")
+        elif evolved.security["multi_tenant"]["strategy"] == "shared_schema_rls":
+            plan.risks.append(f"tenant strategy shared_schema_rls is declared in a {evolved.schema.rsplit('/', 1)[-1]} contract and stays unimplemented: the new tables get application scoping only, like the existing ones; adopting RLS is a reviewed design change, not an evolution")
     for m in evolved.modules:
         if m.name in plan.added_modules:
             for e in m.entities:
