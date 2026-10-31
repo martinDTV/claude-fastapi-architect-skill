@@ -1,4 +1,4 @@
-# Evolution contracts (v2.0, increments 3 and 4): discovery, adoption, planned change, recoverable writer, verification
+# Evolution contracts (v2.0, increments 3 and 4; v2.1 phased migrations): discovery, adoption, planned change, recoverable writer, verification
 
 How FastAPI Architect extends a project without regenerating it from scratch and without touching what the
 developer owns: **generated** projects grow by whole modules and by additive changes to existing modules;
@@ -71,7 +71,7 @@ evolution of the adopted modules only.
 
 Adoption does not convert the project: no file is rewritten, no layout is imposed, no manifest claims the rest.
 
-## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read)
+## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read; 1.2 adds the phased keys of section 9)
 
 ```json
 {
@@ -107,7 +107,7 @@ Classification of every requested change (reported under `plan.changes`):
 | Classification | Examples | Outcome |
 |---|---|---|
 | `compatible` | nullable field; required field with a default; new operation; new dependency without a cycle; new endpoint; optional field on an adopted class | planned |
-| `potentially_incompatible` | required field without default on an existing entity (existing callers would get 422; on PostgreSQL a NOT NULL column without backfill); required foreign key on an existing table | **blocked** until a safe form is declared |
+| `potentially_incompatible` | required field without default on an existing entity (existing callers would get 422; on PostgreSQL a NOT NULL column without backfill); required foreign key on an existing table | **blocked** until a safe form is declared (a `default`, or on PostgreSQL a `backfill`, section 9) |
 | `unsupported` | `remove_fields`, `rename_fields`, `change_fields`, `remove_operations`, `remove_entities`, `rename_entities`, `remove_endpoints`, `remove_depends_on`, new entities inside an existing module, changes of public contracts | contract error |
 
 Applying the same contract twice is a `noop` for generated projects (the merged contract equals the baseline);
@@ -138,7 +138,9 @@ for adopted projects the same endpoint again is a duplicate and blocks (nothing 
    tables, `add_column` (nullable, or NOT NULL with a server default) for new columns of existing tables,
    `create_foreign_key` + index for nullable references; `downgrade` drops them (the data of a dropped column goes
    with it, stated under risks). No `alter_column`, no drop of existing objects, no data migration, no merge of
-   heads. `tests/test_migrations.py` is regenerated with the new head.
+   heads. `tests/test_migrations.py` is regenerated with the new head. With contract 1.2 phased keys the revision
+   becomes an expand revision, an index revision and, in a later authorised evolution, a contract revision
+   (section 9); `tests/test_backfill.py` is generated with them.
 6. **Risks**, **tests required** and unified diffs of every modified file.
 
 ## 5. Structural transforms (adopted projects)
@@ -189,14 +191,15 @@ and authentication, checks that nothing outside the plan changed, and runs the t
 (the operator's scope covers the project and is moved to the copy; with the local executor `untrusted` fails
 closed and the executor is process hygiene, not a sandbox; with `--executor container` (v2.1) the tests run in an
 OCI container with restrictions verified per run, and `verification.tests.run.environment` records them; the
-report schema is `evolution_report/1.2`, additive over 1.1). Then, and only after `verified` or `audit_clean`,
+report schema is `evolution_report/1.3`, additive over 1.1 and 1.2: `contract_authorization` and the phased keys of
+`plan.migration`, section 9). Then, and only after `verified` or `audit_clean`,
 the project is written through the recoverable writer.
 
 | State | Meaning |
 |---|---|
 | `planned` | preview only (`--no-verify`) |
 | `noop` | already applied (generated) |
-| `blocked` | a precondition failed or a conflict exists; nothing was tried |
+| `blocked` | a precondition failed (the `contract_*` ones of section 9 among them) or a conflict exists; nothing was tried |
 | `verified` | copy audited, invariants hold, protected files untouched, tests executed and passed |
 | `audit_clean` | same without executed tests: not `verified` |
 | `inconclusive` | tests could not run (denied, refused command, unverifiable runner); never success |
@@ -210,5 +213,78 @@ the project is written through the recoverable writer.
 - Adopted projects: handlers that return a literal and optional fields on pydantic classes, inside adopted files
   only; no changes to existing handlers, no generated modules, no persistence.
 - Migrations: one additive revision per evolution (tables, nullable or defaulted columns, nullable foreign keys);
-  expand/contract, column changes, data migrations and merges of heads are not supported.
-- `verified` is as strong as the executed suite, through the local executor's process hygiene.
+  since v2.1 the phased form of section 9 (expand, concurrent index, declarative backfill, authorised contract);
+  renames, drops, column type changes, arbitrary data migrations and merges of heads are not supported.
+- `verified` is as strong as the executed suite, through the local executor's process hygiene or the container
+  executor's verified restrictions.
+
+## 9. Phased migrations (contract `fastapi-architect/evolution/1.2`, v2.1; PostgreSQL projects)
+
+A required column that existing rows cannot satisfy, or an index on a table with live rows, is not one additive
+revision. Contract 1.2 declares it as phases; the plan appends the revisions and the programs, and three states stay
+apart: **declared** (the contract and the manifest), **applied** (a concrete database) and **verified** (evidence
+written against that database). The plugin never connects to a database.
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.2",
+  "project": {"path": "../generated/parcels"},
+  "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+     "add_fields": [{"name": "carrier", "type": "str", "max_length": 30, "required": true,
+                     "backfill": {"strategy": "constant", "value": "unknown"}},
+                    {"name": "tracking_token", "type": "uuid", "required": true, "backfill": {"strategy": "uuid"}}],
+     "add_indexes": [{"columns": ["carrier"], "unique": false}]}]}]
+}
+```
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.2",
+  "project": {"path": "../generated/parcels"},
+  "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+     "contract_fields": [{"name": "carrier", "operation": "66636e4277641692"}]}]}],
+  "authorization": {"contract": {"declared_by": "release manager", "evidence": "evidence.json", "max_evidence_age_hours": 24}}
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `add_fields[].backfill` | `strategy`: `constant` (with `value`, a literal of the field's type, bound as a parameter), `copy_column` (with `source`, an existing column of the same entity and type), `uuid` (uuid fields), `now` (datetime fields). Incompatible with `default` and `references`. The field is classified `compatible` and planned as a phased change |
+| `add_indexes[]` | `columns` (exactly one existing or added column), optional `unique`; built `CONCURRENTLY` in a non-transactional revision |
+| `contract_fields[]` | `name` and the `operation` id (16 hex characters) the expand plan printed; declares the NOT NULL transition of a column whose manifest state is `expand` |
+| `authorization.contract` | `declared_by` (required for a contract), `evidence` (path of the migration evidence; `--evidence` on the command line overrides it), `max_evidence_age_hours` (24 by default) |
+
+Rejected with the path: these keys under 1.0 or 1.1; an unknown strategy; a value of the wrong type; a `source`
+that does not exist or has another type; a `backfill` on a non-PostgreSQL project; an index with several columns
+or an unknown column; a `contract_fields` entry whose operation is not pending in the manifest; any SQL (the contract
+never carries SQL; the generated runner builds its statements from validated identifiers and bound parameters).
+
+What the plan appends (`plan.migration`, keys additive over 1.1): `phases[]` (`phase`, `revision`, `transactional`,
+`reversible`, `lock_profile`, `preconditions`, `evidence_required`, `state_after`), `backfills[]` (operation id,
+table, column, strategy, parameters, the `application_version` that writes the column, the `run` and `verify`
+commands), `contract` (the operations contracted), `head_after` and `revisions`. The phases:
+
+| Phase | Revision | What it does | Lock profile |
+|---|---|---|---|
+| `expand` | transactional, reversible | `ADD COLUMN ... nullable`, no server default; the progress table `<pkg>_backfill_progress` the first time; the model nullable, the create schema requiring the value, the read schema optional | brief ACCESS EXCLUSIVE, no rewrite |
+| `index` | non-transactional (`autocommit_block`), reversible | `CREATE INDEX CONCURRENTLY`; compares `pg_get_indexdef` with the expected definition (a different definition fails), drops and rebuilds an invalid leftover, keeps a valid identical one, fails rather than end with `indisvalid = false` | SHARE UPDATE EXCLUSIVE, two scans |
+| backfill (not a revision) | `python -m <pkg>.ops.backfill run OP_ID` | keyset batches on the primary key, `FOR UPDATE SKIP LOCKED`, `UPDATE ... WHERE column IS NULL`, rows and checkpoint in one transaction, one worker per operation (advisory lock), checksum-guarded checkpoint, refuses RLS tables unless the role bypasses RLS, `complete` only after counting zero pending rows (up to three passes); a run on a complete operation re-counts and reopens it only for rows that appeared afterwards | row locks only |
+| verify (not a revision) | `python -m <pkg>.ops.backfill verify --application-version DIGEST --output FILE` | writes `fastapi-architect/migration-evidence/1.0`: database, `alembic_version` against the expected head, every operation (column present, nullable, pending rows, progress record, complete), every index (present, valid, definition), the declared application version, `ok` and `problems` | reads |
+| `contract` | non-transactional, reversible (`DROP NOT NULL`) | re-checks pending rows and the progress state on the live database (an empty table without a record counts as complete and records it), `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID`, `VALIDATE CONSTRAINT`, `SET NOT NULL`, `DROP CONSTRAINT`; idempotent step by step; the model and the read schema become non-optional | brief ACCESS EXCLUSIVE at the metadata steps, SHARE UPDATE EXCLUSIVE during validation |
+
+A contract plan (`plan` or `apply` with `--authorize-contract`) lists every precondition under `plan.preconditions` and
+blocks when one fails: `contract_authorized`, `contract_operation_pending`, `contract_evidence_present`,
+`contract_evidence_valid`, `contract_evidence_fresh`, `contract_database_at_head`, `contract_evidence_matches`,
+`contract_column_present`, `contract_backfill_complete`, `contract_no_pending_rows`,
+`contract_application_version_accredited`, `contract_indexes_valid`, `contract_reversible`. The report records
+`contract_authorization` (flag, evidence path, `declared_by`). A contract is never the automatic continuation of a
+backfill, and no contract phase drops a column, a table or an index.
+
+Exit codes of the runner: 0 done, 1 usage, 2 connection, 3 another worker holds the operation, 4 checkpoint refused
+(foreign definition or corrupt key), 5 row-level security without a bypassing role, 6 incomplete after the passes
+(an application version that does not write the column is live), 7 unknown operation or table.
+
+The manifest records the phased changes (`fastapi-architect/generation/1.3`, `references/design-contracts.md`),
+`docs/guides/phased-migrations-and-backfills.md` walks the fifth example through the four phases, and
+`docs/architecture/adr-2.1-01-phased-migrations.md` records the decisions and what stays deferred (renames with
+dual-write, drops, type changes, multi-column indexes, per-tenant backfills under RLS).

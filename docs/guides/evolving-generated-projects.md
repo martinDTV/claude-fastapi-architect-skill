@@ -94,6 +94,10 @@ FA_DESIGN_PG=1 python3 -m unittest tests.test_design_v20_postgresql -v
 The evidence of the run that accompanies this increment is in
 `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
 
+A required column that existing rows cannot satisfy, or an index on a table with live rows, is a phased change
+(contract 1.2): expand, backfill, verify, contract. `phased-migrations-and-backfills.md` walks the fifth example
+through it; the plan prints the commands to run between the two evolutions.
+
 ## 7. Changing an existing module (contract 1.1)
 
 ```json

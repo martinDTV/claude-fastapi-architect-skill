@@ -224,3 +224,81 @@ Environment: macOS (Darwin 27.0.0) host; Docker client 29.9.2, daemon 29.5.2 **r
 | Compatibility | 59 rules, fingerprints, suppressions, JSON and SARIF, manifests 1.0 to 1.2, evolution 1.0/1.1, adoption 1.0, journal 1.0, the frozen v2.0.0 artefacts (`tests/test_compat_artifacts.py`) and the CLI flags unchanged; the only test expectations that changed are the two that asserted the container executor's absence and the run schema |
 | `scripts/validate_structure.py`, `claude plugin validate`, Ruff (committed configuration), `tests/test_docs_links.py`, `git diff --check`, secrets scan on the diff, Python 3.9 byte-compilation of the new modules | pass |
 | Not verified here | Podman (interface only); rootless Docker; Linux hosts with native bind-mount permissions (the mount probe and the `--container-user host` option exist for them); database-backed suites inside the container (sidecar deferred) |
+
+## Increment 2: Expand/Contract & Safe Backfills
+
+A PostgreSQL project generated or evolved by the tool can now receive a column that existing rows cannot satisfy,
+or an index on a table with live rows, without a maintenance window and without a single big-bang revision. The
+change is declared in phases (contract `fastapi-architect/evolution/1.2`), the project ships the program that fills
+the rows, the state of a concrete database is measured and written down, and the NOT NULL transition is a separate,
+human-authorised evolution. The fifth example, `parcels`, exists for this; `docs/guides/phased-migrations-and-backfills.md`
+walks it through, `docs/architecture/adr-2.1-01-phased-migrations.md` records the decisions, and
+`references/evolution-contracts.md` section 9 is the contract.
+
+### Design
+
+- **Three states, never confused.** *Declared*: the contract and the manifest (`generation/1.3`:
+  `phased_changes[].state_declared`, `concurrent_indexes`, a `phase` per revision). *Applied*: a concrete database
+  (`alembic_version`, nullability, the progress table). *Verified*: the migration evidence
+  (`fastapi-architect/migration-evidence/1.0`) written by `python -m <pkg>.ops.backfill verify` for that database at
+  a time. The plugin never connects to a database; the plan reads evidence, and the contract revision re-checks the
+  live database when it runs.
+- **Expand** (transactional revision): `ADD COLUMN ... nullable` without a server default (no rewrite), the progress
+  table `<pkg>_backfill_progress` once; the model nullable, the create schema requiring the value, the read schema
+  optional. **Index** (non-transactional revision): `CREATE INDEX CONCURRENTLY`, the definition compared with
+  `pg_get_indexdef` (a different one fails), an invalid leftover dropped and rebuilt, a final `indisvalid` check.
+  **Contract** (non-transactional revision, after authorisation): re-check of pending rows and progress state on
+  the live database, `CHECK ... NOT VALID`, `VALIDATE CONSTRAINT`, `SET NOT NULL`, `DROP CONSTRAINT`, each step
+  idempotent; downgrade `DROP NOT NULL`. Online, not lock-free: the lock profile of every phase is printed in the plan.
+- **Declarative backfills only**: `constant`, `copy_column`, `uuid`, `now`. Identifiers come from names the contract
+  validated; values are typed literals bound as parameters; no SQL travels from the contract.
+- **The generated runner** (`src/<pkg>/ops/backfill.py`): keyset batches on the primary key with `FOR UPDATE SKIP
+  LOCKED`, `UPDATE ... WHERE column IS NULL`, rows and checkpoint in one transaction; `--max-batches`,
+  `--max-seconds`, `--batch-pause-ms`; one worker per operation (advisory lock plus worker record); a checksum of the
+  definition guards the checkpoint; a table with row-level security is refused unless the role bypasses it;
+  `complete` only after counting zero pending rows (up to three passes); a run on a complete operation re-counts and
+  reopens it for exactly the rows that appeared; exit codes 0–7 with a meaning each. Credentials come from
+  `<PKG>_MIGRATIONS_DATABASE_URL` or `<PKG>_DATABASE_URL`.
+- **Contract is a human decision**: `--authorize-contract` on the command line and `authorization.contract.declared_by`
+  in the contract, evidence no older than `max_evidence_age_hours` (24), and twelve named preconditions in the plan
+  (`contract_authorized` … `contract_indexes_valid`, `contract_reversible`); never the continuation of a backfill;
+  no contract phase drops anything.
+
+### Contracts and schemas (all additive)
+
+| Artefact | Change |
+|---|---|
+| `fastapi-architect/evolution/1.2` | `add_fields[].backfill`, `add_indexes`, `contract_fields`, `authorization.contract`; refused with the path under 1.0 and 1.1, which keep their meaning |
+| `fastapi-architect/generation/1.3` | `phased_changes`, `concurrent_indexes`, `migrations[].phase / transactional / reversible`; 1.0 to 1.2 still read |
+| `fastapi-architect/migration-evidence/1.0` | new: written by the generated runner, read by the plan |
+| `evolution_report/1.3` | `contract_authorization`; `plan.migration` gains `phases`, `backfills`, `contract`, `head_after`, `revisions`; `plan.phased` |
+| CLI | `evolve_fastapi.py plan|apply --authorize-contract [--evidence FILE]` |
+
+### Deliberate differences from v2.0.0
+
+- Every new manifest is `generation/1.3`; the four committed snapshots were regenerated and only their manifests
+  changed (the per-file oracle against the v2.0.0 engine shows every source file byte-identical).
+- A required field with a declared `backfill` is `compatible` and planned as a phased change; without it the plan is
+  blocked as before.
+- `tests/test_migrations.py` of a phased project treats the progress table as one of its own; `tests/test_backfill.py`
+  and the `ops` package exist only in projects with phased changes.
+- The two test expectations that asserted `generation/1.2` for fresh manifests now assert 1.3; the two that asserted
+  `evolution_report/1.2` assert 1.3.
+
+### Verified on this machine
+
+Environment: macOS (Darwin 27.0.0), CPython 3.13.5 and 3.9.6, PostgreSQL 16.10 (Homebrew) as throwaway clusters,
+uv 0.11.28, Ruff 0.17.3. Full detail and every measured number: `plugins/fastapi-architect/examples/generated/VERIFICATION.md`
+(section "v2.1 increment 2").
+
+| Check | Result |
+|---|---|
+| Unit module `tests/test_migrations_v21.py` (no database) | 18 OK on 3.13 (15 s) and on 3.9 (21 s): contract validation and refusals (SQL, wrong types, unknown strategies, phased keys under older schemas), planning of expand/index/contract, the generated runner and tests Ruff-clean, no SQL from contracts, in-memory refusals, manifest states, contract preconditions on evidence documents, the example files |
+| Real PostgreSQL, `FA_DESIGN_PG=1 tests/test_migrations_v21_postgresql.py` | 4 OK in 42.2 s, 127 MB peak RSS. The slice: 2 500 live rows; expand evolution verified (18 generated tests) and applied in 7.6 s; expand + concurrent index on the production database in 0.38 s; a clean stop after 3 batches of 200; two workers (`[0, 3]`, exactly one progressed to 800); a SIGKILL with the checkpoint equal to the rows filled; resumption to `complete` with 2 500 rows exactly once (0.32 s); concurrent writes: 3 application values preserved, 40 rows inserted by an old version during the run, 2 508 rows in 18 batches / 2 passes / 0.27 s, 29 late rows reopened and filled by the next run; the other column reopened through the CLI and filled (2 540 rows, 20 batches); corrupt and foreign checkpoints refused (exit 4), unknown operation (7); evidence `ok`; contract blocked without authorisation and with the stale sample; contract evolution verified (14 passed, 4 skipped) and applied in 7.6 s; the revision refuses a reappeared NULL (`still NULL`), then applies in 0.35 s (both columns `NOT NULL`, no transitional constraint left, one head); downgrade keeps every row; a fresh database applies the four revisions in 0.35 s with evidence `ok`. Index with a different definition refused, invalid index rebuilt (0.34 s). Connection failure exit 2; time limit never success. RLS table refused as the application role (exit 5), filled as the owner |
+| Opt-in PostgreSQL modules of v2.0 under the same cluster support (`tests/test_design_v20_postgresql.py`, `tests/test_acceptance_v20.py` with `FA_DESIGN_PG=1`) | 9 OK in 66.0 s, 132 MB; 3 OK in 36.4 s: the generated PostgreSQL backends and the v2.0 acceptance scenarios are unchanged by the phased machinery |
+| Full suite, Python 3.13.5 | 625 tests OK, 23 skipped (the 19 of increment 1 plus the 4 PostgreSQL phased tests when `FA_DESIGN_PG` is unset); 86.3 s, 133 MB (increment 1: 603 tests, 108.0 s, 139 MB) |
+| Full suite, Python 3.9.6 | 625 tests OK, 37 skipped; 91.2 s, 185 MB (increment 1: 603, 121.3 s, 183 MB) |
+| Defects the real cluster found before the slice passed | six in the generated runner or its generated tests (autobegin before the advisory lock; driver exceptions escaping with exit 1; `test_verify` running one operation; a complete operation ignoring late NULL rows; insert-based tests after the contract; the contract revision's empty-table record refused): all fixed in the template and listed in `VERIFICATION.md` |
+| Compatibility | 59 rules, fingerprints, SARIF, suppressions, the frozen v2.0.0 artefacts (`tests/test_compat_artifacts.py`), evolution contracts 1.0/1.1 and their examples, adoption, remediation, manifests 1.0 to 1.2, the journal, the local and container executors and the CLI flags unchanged; the auditor's code is untouched by this increment (no precision re-run needed; the holdout corpus was not re-scored) |
+| `scripts/validate_structure.py`, `claude plugin validate`, Ruff (committed configuration), `tests/test_docs_links.py`, `git diff --check`, secrets scan on the diff and the new files, Python 3.9 byte-compilation of the new modules and tests | pass |
+| Not verified here | tables beyond a few thousand rows; backfills as the application role under RLS (refused by design); two real application versions (a thread stood in for the old one); the database inside the container executor (sidecar deferred); Podman |

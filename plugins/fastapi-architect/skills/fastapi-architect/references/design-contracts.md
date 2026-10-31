@@ -162,11 +162,14 @@ and `--validate-only` still produces the recommendation and the guarantees block
 | path outside the target (`..`, absolute, backslash) | refused before anything is written |
 
 Files are written atomically (temporary file + rename). `.fastapi-architect/generation.json`
-(`fastapi-architect/generation/1.2`; 1.0 and 1.1 are still read) records the tool version, the spec name and
+(`fastapi-architect/generation/1.3`; 1.0 to 1.2 are still read) records the tool version, the spec name and
 digest, the contract document, the style, the package, the sha256 of every generated file, the migration chain
-(each revision with `row_level_security`), the operation history and a `security` record (authentication,
+(each revision with `row_level_security` and, since 1.3, its `phase` (`initial`, `additive`, `expand`, `index`,
+`contract`), `transactional` and `reversible`), the operation history, a `security` record (authentication,
 identity, authorization model and legacy declaration, tenant strategy declared and implemented, binding,
-`row_level_security`), without timestamps, so re-running the same contract changes nothing, `verify_manifest`
+`row_level_security`) and, since 1.3, `phased_changes` (every column added by an expand revision: operation id,
+backfill strategy, declared state `expand` or `contract`, revisions, the application version that writes it) and
+`concurrent_indexes` (`references/evolution-contracts.md`, section 9), without timestamps, so re-running the same contract changes nothing, `verify_manifest`
 can tell `identical`, `modified` and `missing` files apart, and a later evolution can never mistake a declared
 strategy for an implemented one.
 

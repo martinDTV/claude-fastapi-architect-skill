@@ -99,7 +99,7 @@ for spec_name in ('inventory-service.json','orders-platform.json','team-notes.js
     assert spec_doc.get('schema') in ('fastapi-architect/spec/1.0','fastapi-architect/spec/1.1','fastapi-architect/spec/1.2'), f'examples/specs/{spec_name}: unexpected schema'
 assert json.loads((base.parent.parent/'examples/specs/tenant-projects.json').read_text(encoding='utf-8'))['security']['multi_tenant']['strategy']=='shared_schema_rls', 'tenant-projects must be the row-level-security example'
 assert (base.parent.parent/'examples/generated/inventory-service/.fastapi-architect/generation.json').is_file(), 'Missing generated example manifest'
-for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects'):
+for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects','parcels'):
     assert (base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').is_file(), f'Missing generated example manifest: {snapshot}'
 assert (base.parent.parent/'examples/generated/tenant-projects/tests/test_rls.py').is_file() and (base.parent.parent/'examples/generated/team-notes/tests/test_auth.py').is_file() and (base.parent.parent/'examples/generated/team-notes/src/team_notes/core/authz.py').is_file(), 'Missing the security artefacts of the increment 5 examples'
 assert 'FORCE ROW LEVEL SECURITY' in next((base.parent.parent/'examples/generated/tenant-projects/migrations/versions').glob('*_initial_schema.py')).read_text(encoding='utf-8'), 'tenant-projects migration does not force row-level security'
@@ -124,9 +124,9 @@ assert json.loads((root/'tests/fixtures/adoption20/adopt-items.json').read_text(
 assert (base/'references/evolution-contracts.md').is_file(), 'Missing references/evolution-contracts.md'
 assert (root/'docs/guides/evolving-generated-projects.md').is_file(), 'Missing docs/guides/evolving-generated-projects.md'
 assert 'guides/evolving-generated-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the evolution guide'
-for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects'):
+for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects','parcels'):
     manifest_doc=json.loads((base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').read_text(encoding='utf-8'))
-    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.2' and 'spec_document' in manifest_doc and 'security' in manifest_doc, f'{snapshot}: manifest must be 1.2 with the embedded contract and the security record'
+    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.3' and 'spec_document' in manifest_doc and 'security' in manifest_doc and 'phased_changes' in manifest_doc, f'{snapshot}: manifest must be 1.3 with the embedded contract, the security record and the phased changes'
 assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
@@ -170,6 +170,22 @@ for rel in ('guides/isolated-execution-with-containers.md','architecture/adr-2.1
     assert rel in (root/'docs/README.md').read_text(encoding='utf-8'), f'docs/README.md does not index {rel}'
 assert 'Isolated executor: containers' in (base/'references/safe-refactoring.md').read_text(encoding='utf-8'), 'references/safe-refactoring.md does not document the container executor'
 assert '--executor container' in skill, 'SKILL.md does not mention the container executor'
+# v2.1 increment 2: phased migrations (expand, backfill, verify, contract), the fifth example, the tests and the documents
+for rel in ('scripts/fastapi_design/blueprint/phased.py','scripts/fastapi_design/migrations.py'):
+    assert (base/rel).is_file(), f'Missing {rel}'
+    compile((base/rel).read_text(encoding='utf-8'),str(base/rel),'exec')
+assert json.loads((base.parent.parent/'examples/specs/parcels.json').read_text(encoding='utf-8')).get('schema')=='fastapi-architect/spec/1.2', 'examples/specs/parcels.json: unexpected schema'
+for contract_name in ('parcels-expand-carrier.json','parcels-contract-carrier.json'):
+    assert json.loads((base.parent.parent/'examples/evolutions'/contract_name).read_text(encoding='utf-8')).get('schema')=='fastapi-architect/evolution/1.2', f'examples/evolutions/{contract_name}: must be an evolution 1.2 contract'
+assert json.loads((base.parent.parent/'examples/evolutions/parcels-migration-evidence.sample.json').read_text(encoding='utf-8')).get('schema')=='fastapi-architect/migration-evidence/1.0', 'the sample migration evidence must be migration-evidence/1.0'
+assert not (base.parent.parent/'examples/generated/parcels/src/parcels/ops').exists(), 'the parcels snapshot is the baseline before the expand evolution: no ops package'
+for rel in ('tests/test_migrations_v21.py','tests/test_migrations_v21_postgresql.py','docs/guides/phased-migrations-and-backfills.md','docs/architecture/adr-2.1-01-phased-migrations.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+for rel in ('guides/phased-migrations-and-backfills.md','architecture/adr-2.1-01-phased-migrations.md'):
+    assert rel in (root/'docs/README.md').read_text(encoding='utf-8'), f'docs/README.md does not index {rel}'
+assert 'fastapi-architect/evolution/1.2' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'migration-evidence/1.0' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8'), 'references/evolution-contracts.md does not document contract 1.2 and the migration evidence'
+assert 'phased-migrations-and-backfills.md' in skill, 'SKILL.md does not mention the phased migrations guide'
+assert 'parcels' in (base.parent.parent/'examples/generated/README.md').read_text(encoding='utf-8'), 'examples/generated/README.md does not list the parcels example'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'
