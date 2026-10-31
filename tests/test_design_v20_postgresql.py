@@ -149,3 +149,71 @@ class GeneratedPostgresBackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the evolved PostgreSQL backend against a throwaway cluster")
+@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
+class EvolvedPostgresBackendTests(unittest.TestCase):
+    """Increment 3: the committed orders-platform example, copied, evolved with the shipments module (additive
+    migration chained after the initial revision) and verified on a throwaway cluster through the trust model."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.cluster = ThrowawayCluster().__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.cluster.__exit__(None, None, None)
+
+    def test_evolution_with_additive_migration_passes_on_postgresql(self) -> None:
+        import tempfile
+
+        from fastapi_design import evolution
+
+        root = Path(tempfile.mkdtemp(prefix="fa-evolve-pg-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        project = root / "orders"
+        shutil.copytree(REPO_ROOT / "plugins" / "fastapi-architect" / "examples" / "generated" / "orders-platform", project, ignore=shutil.ignore_patterns("__pycache__", ".ruff_cache", ".venv"))
+        contract_doc = json.loads((REPO_ROOT / "plugins" / "fastapi-architect" / "examples" / "evolutions" / "orders-add-shipments.json").read_text(encoding="utf-8"))
+        contract_doc["project"]["path"] = str(project)
+        contract = root / "add-shipments.json"
+        contract.write_text(json.dumps(contract_doc), encoding="utf-8")
+        url = self.cluster.create_database("orders_platform_evolved")
+        command = "uv run --group dev pytest -q -p no:cacheprovider"
+        for key, value in _uv_env().items():
+            os.environ[key] = value
+        os.environ["DATABASE_URL"] = url
+        options = evolution.EvolveOptions(
+            apply=True,
+            authorization=Authorization(execution=True, trust="fixture", scope=str(project), declared_by="tests: FA_DESIGN_PG opt-in, evolved copy"),
+            policy=ExecutionPolicy(authorized=True, command=command, timeout_s=900, env_passthrough=tuple(DEFAULT_ENV_PASSTHROUGH) + ("DATABASE_URL", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR")),
+            test_command=command,
+        )
+        report = evolution.run_evolution(str(contract), options)
+        self._save("orders-platform-evolution-postgresql.json", report)
+        self.assertEqual(report["state"], "verified", report["verification"]["reasons"] if report.get("verification") else report["plan"]["blockers"])
+        plan = report["plan"]
+        self.assertTrue(plan["migration"]["required"])
+        run = report["verification"]["tests"]["run"]
+        self.assertEqual(run["outcome"], "passed", (run.get("stdout_tail") or "")[-2000:])
+        self.assertEqual(run["counts"]["failed"], 0)
+        self.assertEqual(run["counts"]["skipped"], 0)
+        self.assertGreater(run["counts"]["passed"], 39)  # the original 39 plus the shipments tests
+        passed = run["evidence"]["tests"]["passed"]
+        for name in ("test_upgrade_and_downgrade_are_repeatable", "test_migrated_schema_matches_the_models", "test_create_shipment", "test_create_shipment_with_unknown_order_id_is_a_conflict_and_leaves_no_row", "test_create_shipment_cannot_reference_a_order_id_of_another_tenant", "test_create_order"):
+            self.assertTrue(any(p.endswith(name) for p in passed), name)
+        self.assertEqual(report["applied"]["state"], "applied")
+        # the project now has two chained revisions; the historical file is byte-identical to the committed one
+        from fastapi_design.discovery import discover
+
+        model = discover(str(project), audit=False)
+        self.assertEqual(len(model.alembic["revisions"]), 2)
+        self.assertEqual(model.alembic["heads"], [plan["migration"]["new_revision"]])
+        self.assertEqual(model.alembic["historical_modified"], [])
+        self.assertEqual(model.modules, ["billing", "customers", "orders", "shipments"])
+        self.assertEqual(self.cluster.psql("SELECT string_agg(table_name, ',' ORDER BY table_name) FROM information_schema.tables WHERE table_schema = 'public'", db="orders_platform_evolved"), "alembic_version")
+
+    def _save(self, name: str, report: dict) -> None:
+        if EVIDENCE_DIR:
+            Path(EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
+            (Path(EVIDENCE_DIR) / name).write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
