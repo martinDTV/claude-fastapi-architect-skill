@@ -186,6 +186,10 @@ for rel in ('guides/phased-migrations-and-backfills.md','architecture/adr-2.1-01
 assert 'fastapi-architect/evolution/1.2' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'migration-evidence/1.0' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8'), 'references/evolution-contracts.md does not document contract 1.2 and the migration evidence'
 assert 'phased-migrations-and-backfills.md' in skill, 'SKILL.md does not mention the phased migrations guide'
 assert 'parcels' in (base.parent.parent/'examples/generated/README.md').read_text(encoding='utf-8'), 'examples/generated/README.md does not list the parcels example'
+# v2.1 increment 6: the acceptance of the release candidate
+assert (root/'tests/test_acceptance_v21.py').is_file(), 'Missing the v2.1.0 acceptance module'
+assert (root/'docs/releases/ACCEPTANCE-v2.1.0.md').is_file() and 'ACCEPTANCE-v2.1.0.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'Missing or unindexed acceptance report docs/releases/ACCEPTANCE-v2.1.0.md'
+assert 'Extension v2.1' in (root/'README.md').read_text(encoding='utf-8'), 'README does not describe v2.1'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'

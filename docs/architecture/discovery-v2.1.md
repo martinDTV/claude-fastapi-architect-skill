@@ -1,7 +1,7 @@
 # FastAPI Architect v2.1.0 — discovery and architecture proposal
 
 Status: **reviewed and decided** (proposal and decisions of 2026-10-31; the decisions are in section 10 and override
-anything above them; increments 0, 1 and 2 are implemented, see `docs/releases/RELEASE-NOTES-v2.1.md` and
+anything above them; increments 0, 1 and 2 are implemented and increment 6 (the acceptance) is recorded in `docs/releases/ACCEPTANCE-v2.1.0.md`, see `docs/releases/RELEASE-NOTES-v2.1.md` and
 `adr-2.1-03-isolated-container-executor.md`). Baseline: the published v2.0.0, commit
 `d2d50d7ba98e2f75b554b5616f2ef0c865fff7c2` (`origin/main`). Nothing in this document is implemented; every statement
 about the current state was checked read-only against that commit. The plugin stays universal: no project-specific
