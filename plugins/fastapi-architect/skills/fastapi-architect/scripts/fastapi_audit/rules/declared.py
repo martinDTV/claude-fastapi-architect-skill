@@ -55,7 +55,7 @@ def _route_contracts(ctx: FileContext, declared: Dict[str, Any], out: List[Findi
     if not auth_globs and not authz_globs:
         return
     for c in getattr(ctx, "contracts", []):
-        paths = [c.full_path or (c.path or ""), c.path or ""]
+        paths = [c.full_path or (c.path or ""), c.path or ""] + [p for p in getattr(c, "effective_paths", []) if getattr(c, "path_resolution", "") in ("resolved", "ambiguous")]  # v2.0: composed paths
         where = f"'{c.function}' ({c.method} {c.full_path or c.path or ''})".replace(" )", ")")
         g = _matches(paths, auth_globs)
         if g and c.authentication == "absent" and not c.public:

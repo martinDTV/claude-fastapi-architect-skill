@@ -67,6 +67,12 @@ class ProjectFacts:
     dependency_aliases: Dict[str, str] = field(default_factory=dict)  # dotted Annotated alias -> Depends target (dotted or bare name)
     protected_routers: Set[str] = field(default_factory=set)  # dotted router names
     router_inclusions: List[Tuple[Tuple[str, ...], Tuple[str, ...]]] = field(default_factory=list)  # (parent names, child names) per X.include_router(Y)
+    router_mounts: List[Tuple[Tuple[str, ...], Tuple[str, ...], Optional[str]]] = field(default_factory=list)  # v2.0: (parent, child, include prefix | None when not a constant)
+    router_prefixes: Dict[str, str] = field(default_factory=dict)  # dotted router -> prefix given to APIRouter(prefix=...)
+    router_prefix_unknown: Set[str] = field(default_factory=set)  # routers whose own prefix is not a string constant
+    app_bindings: Set[str] = field(default_factory=set)  # dotted names bound to FastAPI(...) instances
+    router_effective_prefixes: Dict[str, List[str]] = field(default_factory=dict)  # dotted router -> every mount prefix composed from an application
+    router_prefix_resolution: Dict[str, str] = field(default_factory=dict)  # dotted router -> resolved | ambiguous | unresolved
     global_auth_signal: bool = False
     global_auth_evidence: List[str] = field(default_factory=list)
     uses_fastapi: bool = False
@@ -428,6 +434,7 @@ def collect_facts(
 
     facts.parse_failures.sort()
     _propagate_protected_routers(facts)
+    _compose_router_prefixes(facts)
     if interprocedural:
         collect_summaries(facts, files, max_file_bytes=max_file_bytes, max_call_depth=max_call_depth, time_budget_s=time_budget_s)
     else:
@@ -449,6 +456,80 @@ def _router_names(node: ast.AST, resolve, qualified) -> Tuple[str, ...]:
     if len(parts) == 1:
         names.extend(qualified(parts[0]))
     return tuple(dict.fromkeys(names))
+
+
+def _constant_keyword(call: ast.Call, name: str) -> Optional[str]:
+    for kw in call.keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
+
+
+def _compose_router_prefixes(facts: ProjectFacts) -> None:
+    """Effective mount prefixes per router, composed from the applications down through ``include_router``
+    (v2.0): ``app.include_router(api, prefix="/api")`` with ``api = APIRouter(prefix="/v1")`` including ``items`` with
+    ``prefix="/items"`` gives ``items`` the prefix ``/api/v1/items``. A router mounted several times gets several
+    prefixes (``ambiguous``); a prefix that is not a string constant anywhere on the chain makes the router
+    ``unresolved`` (nothing is invented). Names are expanded to every import form of the defining module."""
+    source_roots = facts.config.get("source_roots") or ["src"]
+
+    def expand(dotted: str) -> Set[str]:
+        out = {dotted}
+        mod, _, attr = dotted.rpartition(".")
+        rel = facts.module_map.get(mod) if mod else None
+        if rel and attr:
+            out.update(f"{name}.{attr}" for name in module_name_for(rel, source_roots))
+        return out
+
+    def own_prefix(names: Set[str]) -> Tuple[str, bool]:
+        for n in names:
+            if n in facts.router_prefix_unknown:
+                return "", False
+        for n in names:
+            if n in facts.router_prefixes:
+                return facts.router_prefixes[n], True
+        return "", True
+
+    mounts: Dict[str, Set[str]] = {}
+    uncertain: Set[str] = set()
+    for _ in range(64):  # bounded fixpoint: chains are short, cycles are not valid FastAPI anyway
+        changed = False
+        for parents, children, include_prefix in facts.router_mounts:
+            parent_names: Set[str] = set()
+            for p in parents:
+                parent_names |= expand(p)
+            child_names: Set[str] = set()
+            for c in children:
+                child_names |= expand(c)
+            bases: Set[str] = set()
+            parent_uncertain = False
+            if parent_names & facts.app_bindings:
+                bases.add("")
+            for n in parent_names:
+                bases |= mounts.get(n, set())
+                if n in uncertain:
+                    parent_uncertain = True
+            if not bases and not parent_uncertain:
+                continue  # the parent is not mounted on anything known (yet)
+            prefix, known = own_prefix(child_names)
+            if include_prefix is None or not known or parent_uncertain:
+                if not child_names <= uncertain:
+                    uncertain |= child_names
+                    changed = True
+            for base in bases:
+                effective = base + (include_prefix or "") + prefix
+                for n in child_names:
+                    if effective not in mounts.setdefault(n, set()):
+                        mounts[n].add(effective)
+                        changed = True
+        if not changed:
+            break
+    for name, prefixes in mounts.items():
+        facts.router_effective_prefixes[name] = sorted(prefixes)
+        facts.router_prefix_resolution[name] = "unresolved" if name in uncertain else ("resolved" if len(prefixes) == 1 else "ambiguous")
+    for name in uncertain:
+        facts.router_effective_prefixes.setdefault(name, [])
+        facts.router_prefix_resolution[name] = "unresolved"
 
 
 def _propagate_protected_routers(facts: ProjectFacts) -> None:
@@ -653,13 +734,35 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
                     for key in qualified(t.id):
                         facts.factories[key] = FACTORY_KINDS[dotted]
                     facts.factory_last.setdefault(t.id, set()).add(FACTORY_KINDS[dotted])
-            elif dotted in {"fastapi.APIRouter", "fastapi.routing.APIRouter"} and _has_keyword(value, "dependencies"):
+            elif dotted in {"fastapi.APIRouter", "fastapi.routing.APIRouter"}:
+                if _has_keyword(value, "dependencies"):
+                    for t in targets:
+                        facts.protected_routers.update(qualified(t.id))
+                prefix = _constant_keyword(value, "prefix")
                 for t in targets:
-                    facts.protected_routers.update(qualified(t.id))
-            elif dotted in {"fastapi.FastAPI", "fastapi.applications.FastAPI"} and _has_keyword(value, "dependencies"):
-                facts.global_auth_signal = True
-                facts.global_auth_evidence.append(f"{rel}:{stmt.lineno} FastAPI(dependencies=...)")
+                    for key in qualified(t.id):
+                        if prefix is None and _has_keyword(value, "prefix"):
+                            facts.router_prefix_unknown.add(key)
+                        else:
+                            facts.router_prefixes[key] = prefix or ""
+            elif dotted in {"fastapi.FastAPI", "fastapi.applications.FastAPI"}:
+                for t in targets:
+                    facts.app_bindings.update(qualified(t.id))
+                if _has_keyword(value, "dependencies"):
+                    facts.global_auth_signal = True
+                    facts.global_auth_evidence.append(f"{rel}:{stmt.lineno} FastAPI(dependencies=...)")
         _ = annotation
+
+    # v2.0: applications created inside factories (``def create_app(): app = FastAPI(...)``) mount routers from
+    # there; register the binding under the module-qualified name so the mounts compose like module-level ones
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Call):
+            fparts = dotted_name(node.value.func)
+            fdotted = resolve(fparts) if fparts else None
+            if fdotted in {"fastapi.FastAPI", "fastapi.applications.FastAPI"}:
+                names = [t.id for t in node.targets if isinstance(t, ast.Name)] if isinstance(node, ast.Assign) else ([node.target.id] if isinstance(node.target, ast.Name) else [])
+                for name in names:
+                    facts.app_bindings.update(qualified(name))
 
     # global auth signals anywhere in the module
     for node in ast.walk(tree):
@@ -676,6 +779,8 @@ def _collect_from_tree(facts: ProjectFacts, rel: str, tree: ast.Module) -> None:
             child = _router_names(node.args[0], resolve, qualified)
             if parent and child:
                 facts.router_inclusions.append((parent, child))
+                include_prefix = _constant_keyword(node, "prefix")
+                facts.router_mounts.append((parent, child, None if (include_prefix is None and _has_keyword(node, "prefix")) else (include_prefix or "")))
         elif attr == "add_middleware" and node.args:
             mw = dotted_name(node.args[0])
             label = ".".join(mw) if mw else ""

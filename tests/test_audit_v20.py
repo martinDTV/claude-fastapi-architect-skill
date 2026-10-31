@@ -60,3 +60,64 @@ class NestedRouterProtectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouteCompositionTests(unittest.TestCase):
+    """v2.0 increment 2: effective paths composed through include_router prefixes.
+
+    Fixture ``route_composition``: ``app.include_router(api_router, prefix="/api")`` with ``api_router = APIRouter(prefix="/v1")``
+    including ``items`` (``prefix="/items"``) and ``orders`` (own prefix ``/orders``); ``reports`` mounted twice (``/internal`` and
+    ``/partner``); ``dynamic`` mounted with a prefix read from settings. ``public_routes`` declares the full paths of items,
+    the partner mount of reports and the dynamic route's assumed full path.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = audit.audit_project(str(FIXTURES / "regressions_v20" / "route_composition"))
+        cls.routes = {c["function"]: c for c in cls.report["contracts"]["routes"]}
+        cls.findings = [f for f in cls.report["findings"] if not f.get("suppressed")]
+
+    def test_prefixes_compose_through_two_levels_and_full_path_declarations_apply(self) -> None:
+        self.assertEqual(self.routes["list_items"]["effective_paths"], ["/api/v1/items"])
+        self.assertEqual(self.routes["get_item"]["effective_paths"], ["/api/v1/items/{item_id}"])
+        for name in ("list_items", "get_item"):
+            self.assertEqual(self.routes[name]["path_resolution"], "resolved")
+            self.assertTrue(self.routes[name]["public"])
+            self.assertEqual(self.routes[name]["public_source"], "config")
+        self.assertEqual([f["function"] for f in self.findings if f["file"] == "src/shop/api/items.py"], [])
+
+    def test_a_routers_own_prefix_is_kept_below_the_mount(self) -> None:
+        self.assertEqual(self.routes["get_order"]["effective_paths"], ["/api/v1/orders/{order_id}"])
+        self.assertEqual(self.routes["get_order"]["path_resolution"], "resolved")
+        self.assertFalse(self.routes["get_order"]["public"])
+        self.assertEqual([f["rule"] for f in self.findings if f["function"] == "get_order"], ["SEC_ROUTE_WITHOUT_AUTH_SIGNAL"])
+
+    def test_a_router_mounted_twice_is_ambiguous_and_public_only_if_every_mount_is_declared(self) -> None:
+        c = self.routes["get_report"]
+        self.assertEqual(c["effective_paths"], ["/internal/reports/{report_id}", "/partner/reports/{report_id}"])
+        self.assertEqual(c["path_resolution"], "ambiguous")
+        self.assertFalse(c["public"])  # /partner/reports/* is declared, /internal/reports/* is not
+        self.assertEqual(len([f for f in self.findings if f["function"] == "get_report"]), 1)  # one finding, not one per mount
+
+    def test_a_non_constant_prefix_is_unresolved_and_nothing_is_invented(self) -> None:
+        c = self.routes["dyn"]
+        self.assertEqual(c["path_resolution"], "unresolved")
+        self.assertEqual(c["effective_paths"], [])
+        self.assertFalse(c["public"])  # /dynamic/dyn is declared but the auditor cannot know the prefix
+        self.assertEqual([f["rule"] for f in self.findings if f["function"] == "dyn"], ["SEC_ROUTE_WITHOUT_AUTH_SIGNAL"])
+
+    def test_routes_on_the_application_resolve_to_their_own_path(self) -> None:
+        self.assertEqual(self.routes["health"]["effective_paths"], ["/health"])
+        self.assertEqual(self.routes["health"]["path_resolution"], "resolved")
+
+    def test_router_local_declarations_keep_working(self) -> None:
+        # the nested_routers fixture declares nothing; its contracts carry effective paths too
+        report = audit.audit_project(str(FIXTURES / "regressions_v20" / "nested_routers"))
+        routes = {c["function"]: c for c in report["contracts"]["routes"]}
+        self.assertEqual(routes["get_item"]["effective_paths"], ["/api/v1/items/{item_id}"])
+        self.assertEqual(routes["list_things"]["effective_paths"], ["/api/v1/tenants/{tenant_id}/things"])
+        self.assertEqual(routes["open_item"]["effective_paths"], ["/plain/open/items/{item_id}"])
+
+    def test_fingerprints_do_not_depend_on_effective_paths(self) -> None:
+        for f in self.findings:
+            self.assertNotIn("/api/v1", f["message"])  # messages keep the handler's own path: fingerprints are stable

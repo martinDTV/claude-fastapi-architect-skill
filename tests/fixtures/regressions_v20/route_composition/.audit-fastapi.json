@@ -1,0 +1,3 @@
+{
+  "public_routes": ["/api/v1/items", "/api/v1/items/*", "/partner/reports/*", "/dynamic/dyn"]
+}

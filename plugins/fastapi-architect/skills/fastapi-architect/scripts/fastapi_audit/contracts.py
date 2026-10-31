@@ -88,6 +88,8 @@ class RouteContract:
     evidence: str = "verified"
     full_path: str = ""  # router prefix (same file) + route path
     principal_kind: str = "unknown"  # v1.8 review: value | none | unknown (see principal_kind_of)
+    effective_paths: List[str] = field(default_factory=list)  # v2.0: paths composed through include_router from the application(s)
+    path_resolution: str = "unmounted"  # v2.0: resolved | ambiguous (several mounts) | unresolved (a prefix is not a constant) | unmounted
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -109,6 +111,8 @@ class RouteContract:
             "resource_params": list(self.resource_params),
             "evidence": self.evidence,
             "principal_kind": self.principal_kind,  # schema 1.6 (review)
+            "effective_paths": list(self.effective_paths),  # v2.0
+            "path_resolution": self.path_resolution,  # v2.0
         }
 
 
@@ -136,6 +140,12 @@ def route_public(ctx, func: FunctionInfo, comments: Optional[Dict[int, str]] = N
         for g in globs:
             if any(fnmatch.fnmatch(c, g) or fnmatch.fnmatch("/" + c.lstrip("/"), g) for c in candidates):
                 return "config"
+        # v2.0: effective paths composed through include_router; every mount must match (a router mounted both
+        # behind a public prefix and a private one is not public), and nothing is matched for unresolved routers
+        effective, resolution = effective_paths(ctx, func)
+        if effective and resolution in ("resolved", "ambiguous"):
+            if all(any(fnmatch.fnmatch(e, g) or fnmatch.fnmatch(e.rstrip("/") or "/", g) for g in globs) for e in effective):
+                return "config"
     comments = comments if comments is not None else line_comments(ctx.source)
     lines = {func.lineno, *[d.lineno for d in getattr(func.node, "decorator_list", [])]}
     if any(PUBLIC_MARKER_RE.search(comments.get(line, "") or "") for line in lines):
@@ -147,6 +157,36 @@ def route_public(ctx, func: FunctionInfo, comments: Optional[Dict[int, str]] = N
         if path.strip("/") or route.receiver.split(".")[0] in {"app", "application", "api"}:
             return "path"
     return None
+
+
+def effective_paths(ctx, func: FunctionInfo) -> Tuple[List[str], str]:
+    """``(paths, resolution)`` for a route: the paths a client actually calls, composed from the application(s)
+    through ``include_router`` prefixes (facts.router_effective_prefixes). Routes registered on an application
+    object resolve to their own path; routers that are never mounted are ``unmounted``; a non-constant prefix on
+    the chain yields ``unresolved`` and no paths (nothing is invented)."""
+    route = func.route
+    if route is None or ctx.facts is None:
+        return [], "unmounted"
+    root = route.receiver.split(".")[0]
+    path = route.path or ""
+    module = ctx.facts.file_module.get(ctx.relpath, "")
+    names = {n for n in (func.resolve([root]), f"{module}.{root}" if module else root) if n}
+    if names & ctx.facts.app_bindings:
+        return [path], "resolved"
+    for name in names:
+        if name in ctx.facts.router_prefix_resolution:
+            resolution = ctx.facts.router_prefix_resolution[name]
+            if resolution == "unresolved":
+                return [], "unresolved"
+            return sorted({_join(prefix, path) for prefix in ctx.facts.router_effective_prefixes.get(name, [])}), resolution
+    return [], "unmounted"
+
+
+def _join(prefix: str, path: str) -> str:
+    joined = (prefix.rstrip("/") + "/" + path.lstrip("/")) if path.strip("/") else (prefix or path)
+    if not joined.startswith("/"):
+        joined = "/" + joined
+    return joined or "/"
 
 
 def _router_prefix(ctx, receiver_root: str) -> str:
@@ -353,5 +393,6 @@ def build_contracts(ctx, providers_of, dependency_chain, dependency_record, para
         elif c.authentication == "absent" and not c.public:
             c.evidence = "unknown"  # includes the health-convention routes: convention is not evidence
         c.full_path = (_router_prefix(ctx, route.receiver.split(".")[0]) or "") + (route.path or "")
+        c.effective_paths, c.path_resolution = effective_paths(ctx, func)
         out.append(c)
     return out
