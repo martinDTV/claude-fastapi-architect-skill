@@ -388,3 +388,75 @@ named the owned entities in its docstring and an evolution adding an owned modul
 regenerate a non-integration file; the generated PostgreSQL conftest refused a database holding only the empty
 `alembic_version` table left by its own downgrade, so a second suite on the same disposable database failed before
 testing.
+
+# v2.1 increment 2: phased migrations on the fifth example (`parcels`, PostgreSQL 16)
+
+`FA_DESIGN_PG=1 python3 -m unittest discover -s tests -p test_migrations_v21_postgresql.py` on 2026-10-31: one
+throwaway PostgreSQL 16.10 cluster (`tests/_pg_support.py`), eight databases, four tests, **42.2 s wall clock,
+127 MB peak RSS** (`/usr/bin/time -l`), CPython 3.13.5 on the host, the generated project synced by uv from the local
+cache (SQLAlchemy 2.0.55, asyncpg 0.30.0, Alembic 1.20.1). Every number below was measured in that run; the
+evolution reports, the migration evidence and the timings were saved with `FA_DESIGN_PG_EVIDENCE`. The unit module
+`tests/test_migrations_v21.py` (18 tests, no database) covers the contract validation, the planning, the generated
+files, the refusal of SQL in contracts, the in-memory refusals, the manifest state machine, the contract
+preconditions against evidence documents and the example files.
+
+## The vertical slice (`test_01`)
+
+| Step | What happened | Measured |
+|---|---|---|
+| Baseline | `alembic upgrade head` on the committed `parcels` snapshot (one revision), 2 500 rows inserted with `reference` only | 2.45 s (uv startup included) |
+| Expand evolution (`parcels-expand-carrier.json`) | plan: create 6 (`ops/__init__.py`, `ops/backfill.py`, `ops/backfills.py`, `tests/test_backfill.py`, two revisions), modify 8, unchanged 25, kept 1 (the historical revision); routes 0 added / 0 changed / 0 removed; phases `expand` `8546a10c95ec` (transactional) and `index` `c863863c3d2c` (non-transactional); backfills `66636e4277641692` (`carrier`, `constant`) and `5821fb0e87d4b355` (`tracking_token`, `uuid`), application version `ba13f9bbb39e…`; verified in a copy against a separate empty database through the trust model: 18 generated tests selected, 18 passed (7 of them `tests/test_backfill.py`); written | `verified`, `applied`; 7.57 s plan + verification + write |
+| Expand and index revisions on the production database | `alembic upgrade head`: two nullable columns, the progress table, `ix_shipments_carrier` built `CONCURRENTLY` | 0.38 s |
+| Clean stop | `run 66636e4277641692 --batch-size 200 --max-batches 3` | 600 rows, 3 batches, state `running` |
+| Two workers | two `run --batch-size 50 --max-batches 4` started together | exit codes `[0, 3]`; exactly one progressed: 800 rows filled, checkpoint 800 |
+| SIGKILL | the runner (`.venv/bin/python -m parcels.ops.backfill run --batch-size 50 --batch-pause-ms 200`) killed after the checkpoint passed 1 000 | checkpoint == rows filled (they commit together), fewer than 2 500 |
+| Resume | `run --batch-size 200` | `complete`, `rows_processed` 2 500 exactly: every row once across the stop, the two workers, the kill and the resumption; `count(DISTINCT carrier)` 1; a second run processes 0 rows | 0.32 s |
+| Concurrent writes (`tracking_token`) | the application wrote 3 tokens before the run; an "old application" thread inserted 40 rows with NULLs while `run --batch-size 150 --batch-pause-ms 10` ran | the run processed 2 508 rows in 18 batches and 2 passes (0.267 s) and reported `complete`; the 3 application values were untouched; 29 rows inserted after the last count stayed NULL; the next run re-counted, reopened the operation and filled exactly those 29; final record 2 537 rows, 19 batches, 3 passes; 1.76 s for the concurrent phase |
+| The other column | the 40 late rows were NULL in `carrier` too: `run 66636e4277641692 --max-seconds 0.001` on the `complete` operation re-counted, reopened it and stopped before its first batch (`running`, 0 rows); the next run filled 40 | final record 2 540 rows, 20 batches, 2 passes |
+| Checkpoints that cannot be trusted | `last_key = 'garbage'` → exit 4 (`corrupt`); a foreign checksum → exit 4 (`another definition`); an unknown operation → exit 7 | nothing touched in the three cases |
+| Evidence | `verify --application-version ba13f9bbb39e… --output evidence.json` | `ok`; `alembic_version` at the expected head; both operations complete with 0 pending rows; `ix_shipments_carrier` valid |
+| Contract refused | `plan` of `parcels-contract-carrier.json` without `--authorize-contract` → `blocked` (`contract_authorized`); with the flag and the committed sample evidence → `blocked` (`contract_evidence_fresh`: the sample is dated 2026-10-01 by design) | nothing written |
+| Contract evolution | `apply --authorize-contract --evidence evidence.json`: the 12 preconditions true for each of the two operations; phase `contract` `a82f4c68b677` (non-transactional, reversible); verified in a copy on a fresh database: 18 generated tests selected, 14 passed, 4 skipped (the insert-based backfill tests skip once every change is contracted); written | `verified`, `applied`; 7.60 s |
+| The revision refuses a NULL that reappeared | `UPDATE shipments SET carrier = NULL` for one row, then `alembic upgrade head` | fails with `1 row(s) still NULL`; the column stays nullable |
+| Contract revision applied | the row fixed, `alembic upgrade head` | 0.35 s; `carrier` and `tracking_token` `NOT NULL`; no `ck_shipments_%_not_null` constraint left; one head |
+| Reversible | `alembic downgrade -1`, then `upgrade head` | `carrier` nullable again with every row kept (2 540), then `NOT NULL` again |
+| Final evidence and discovery | `verify`; `discover` | `ok`, no nullable operation; 4 revisions, no historical file modified |
+| Fresh environment | a new database: `alembic upgrade head` (all four revisions), `verify`, `run 66636e4277641692` | 0.35 s; both operations recorded `empty-table-at-contract` by the contract revision; evidence `ok`; the run reports `complete` with 0 rows |
+
+## Concurrent indexes (`test_02`)
+
+An index named `ix_shipments_carrier` with another definition (`(carrier, reference)`) created by hand: the index
+revision fails with `different definition` and leaves it alone. The same name with the expected definition but
+`indisvalid = false` (an interrupted build): the revision drops and rebuilds it (0.34 s); it is valid afterwards. A
+second `upgrade head` is a no-op; `downgrade -1` drops the index concurrently; `upgrade head` recreates it; one head.
+
+## Connection failure and time limit (`test_03`)
+
+A URL to a database that does not exist: exit 2, `database connection failed`, nothing written. 300 rows and
+`--max-seconds 0`: exit 0 with `running` and 0 batches, never success; the next run with `--batch-size 50`
+completes the 300.
+
+## Row-level security (`test_04`, `tenant-projects`)
+
+A `region` column with a constant backfill on the RLS example (`FORCE ROW LEVEL SECURITY`): the plan names the risk; as
+the restricted application role the runner exits 5 (`row-level security`) and the 20 rows stay NULL; as the owner it
+completes the 20.
+
+## Defects the scenarios found before passing (all in the generated runner or its tests, fixed in the template)
+
+1. The advisory lock and the RLS guard ran before the first explicit transaction and SQLAlchemy had already started one by autobegin: every generated backfill test failed on a real database (`InvalidRequestError`). The runner commits the autobegun transaction first; the session-level lock survives it.
+2. asyncpg raises its own exception classes while connecting and SQLAlchemy wraps them only once connected: a connection failure escaped with exit code 1 instead of 2. A `_connect` helper classifies anything raised while connecting as exit code 2; dropped connections map to 2 and other database errors to 7.
+3. The generated `test_verify_reports_the_state_of_this_database` ran only the first pending operation before asking for the evidence; with two phased columns the evidence was honestly not ok. The generated tests now run every pending operation.
+4. A `complete` operation ignored NULL rows an old application version inserted afterwards (a second run answered "already complete"). A run on a complete operation now re-counts and reopens it for exactly those rows; a run that finds nothing still processes nothing.
+5. After the contract phase the generated insert-based backfill tests still targeted the first (now `NOT NULL`) column. They skip once every change is contracted.
+6. The record the contract revision writes for an empty table (`empty-table-at-contract`) was refused by the runner as a foreign checkpoint and flagged by the evidence. Both recognise the sentinel; the fresh-environment step of the slice proves it.
+
+Three defects were in the test harness itself: psql's command tag parsed as a row, a SIGKILL sent to the `uv run`
+wrapper (the runner survived as an orphan and finished), and an INSERT naming columns the RLS example does not have.
+
+## What this does not show
+
+Tables larger than 2 540 rows (the batch loop is O(batch) per step by construction; the final count is a scan of
+the NULL rows of the column); primary keys other than the generated `uuid` `id`; backfills as the application role
+under RLS; a real deployment with two application versions (the thread above is a stand-in); Podman or a container
+sidecar for the database (deferred); renames, drops and type changes (not in v2.1).
