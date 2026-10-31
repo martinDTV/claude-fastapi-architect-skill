@@ -1,0 +1,54 @@
+{
+  "schema": "fastapi-architect/evolution/1.0",
+  "project": {
+    "path": "../generated/inventory-service",
+    "package": "inventory_service"
+  },
+  "add_modules": [
+    {
+      "name": "suppliers",
+      "description": "Suppliers the warehouse buys from.",
+      "entities": [
+        {
+          "name": "Supplier",
+          "fields": [
+            {
+              "name": "name",
+              "type": "str",
+              "max_length": 120
+            },
+            {
+              "name": "contact_email",
+              "type": "str",
+              "max_length": 254
+            },
+            {
+              "name": "lead_time_days",
+              "type": "int",
+              "min_value": 0,
+              "max_value": 365
+            },
+            {
+              "name": "preferred",
+              "type": "bool",
+              "required": false
+            }
+          ],
+          "operations": [
+            "create",
+            "get",
+            "list",
+            "update",
+            "delete"
+          ]
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    "existing_routes_unchanged",
+    "declared_contracts_unchanged",
+    "protected_files_unchanged"
+  ],
+  "x-note": "a second business module for the committed inventory-service example; integration points (api/router.py, main.py, README.md) are regenerated from the merged contract, everything else is created"
+}

@@ -28,12 +28,118 @@
     "tests/conftest.py": "8a48ada2f07b7be7bc6d57fed0273d6a72e7ef7beab231031c39c7091c01bdb8",
     "tests/test_catalog.py": "4fea98030320ed6a2c07ded87a10e41cb3fbbecb5b16571244facc337a97bf53"
   },
+  "history": [
+    {
+      "modules": [
+        "catalog"
+      ],
+      "operation": "generate",
+      "spec_digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c"
+    }
+  ],
+  "migrations": [],
   "package": "inventory_service",
-  "schema": "fastapi-architect/generation/1.0",
+  "schema": "fastapi-architect/generation/1.1",
   "spec": {
     "digest": "7627b87b0d9b0abfd8888a37f611263fe6ca3193926ed81a302555a65dbf216c",
     "name": "inventory-service",
     "schema": "fastapi-architect/spec/1.0"
+  },
+  "spec_document": {
+    "assumptions": [
+      "One warehouse per deployment; multi-warehouse is out of scope."
+    ],
+    "decisions": [
+      {
+        "id": "ADR-1",
+        "rationale": "The first increment validates the API contract; PostgreSQL follows once the catalogue shape is agreed.",
+        "status": "accepted",
+        "title": "In-memory persistence for the first slice"
+      }
+    ],
+    "description": "Stock catalogue for a small warehouse: products and their on-hand quantities.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Products that can be stocked and their current quantity.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "description": "Stock keeping unit, unique per warehouse",
+                  "max_length": 32,
+                  "name": "sku",
+                  "type": "str"
+                },
+                {
+                  "max_length": 120,
+                  "name": "name",
+                  "type": "str"
+                },
+                {
+                  "min_value": 0,
+                  "name": "quantity",
+                  "type": "int"
+                },
+                {
+                  "min_value": 0,
+                  "name": "unit_price",
+                  "type": "decimal"
+                },
+                {
+                  "max_length": 500,
+                  "name": "notes",
+                  "required": false,
+                  "type": "str"
+                }
+              ],
+              "name": "Product",
+              "operations": [
+                "create",
+                "get",
+                "list",
+                "update",
+                "delete"
+              ]
+            }
+          ],
+          "name": "catalog"
+        }
+      ]
+    },
+    "infrastructure": {
+      "deployment": "container"
+    },
+    "name": "inventory-service",
+    "nonfunctional": {
+      "availability": "99.5%",
+      "consistency": "strong",
+      "latency_p95_ms": 200
+    },
+    "open_questions": [
+      "Should SKU uniqueness be enforced by the API or by the upstream ERP?"
+    ],
+    "package": "inventory_service",
+    "persistence": {
+      "kind": "memory"
+    },
+    "schema": "fastapi-architect/spec/1.0",
+    "scope": {
+      "data_volume": "small",
+      "expected_rps": 20,
+      "size": "small",
+      "team_size": 2
+    },
+    "security": {
+      "authentication": "api_key"
+    },
+    "testing": {
+      "coverage_target": 80,
+      "levels": [
+        "unit",
+        "integration"
+      ]
+    }
   },
   "style": "layered",
   "tool": {

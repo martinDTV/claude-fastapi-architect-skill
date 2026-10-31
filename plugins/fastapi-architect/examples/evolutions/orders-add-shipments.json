@@ -1,0 +1,27 @@
+{
+  "schema": "fastapi-architect/evolution/1.0",
+  "project": {
+    "path": "../generated/orders-platform",
+    "package": "orders_platform"
+  },
+  "add_modules": [
+    {
+      "name": "shipments",
+      "description": "Shipments of placed orders.",
+      "depends_on": ["orders"],
+      "entities": [
+        {
+          "name": "Shipment",
+          "fields": [
+            {"name": "order_id", "type": "uuid", "references": "orders.Order"},
+            {"name": "carrier", "type": "str", "max_length": 40},
+            {"name": "tracking_code", "type": "str", "max_length": 60, "required": false},
+            {"name": "shipped_at", "type": "datetime", "required": false}
+          ],
+          "operations": ["create", "get", "list"]
+        }
+      ]
+    }
+  ],
+  "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "no_destructive_schema_change", "protected_files_unchanged"]
+}

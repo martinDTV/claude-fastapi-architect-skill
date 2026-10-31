@@ -53,12 +53,218 @@
     "tests/test_migrations.py": "2d9e1cd155782703c9a962bf4a8184c1f1302f72aeb81d9e5ba734bdf29125dc",
     "tests/test_orders.py": "8d9caad0f589408d46883a1cb99d6194a230ccad34c2f0f04250dc451eb56a81"
   },
+  "history": [
+    {
+      "modules": [
+        "customers",
+        "orders",
+        "billing"
+      ],
+      "operation": "generate",
+      "spec_digest": "f16d2acd4f57a1d3cf434931dc094ef044ec3fb78d0c6c8ada0c07eb2aeb843c"
+    }
+  ],
+  "migrations": [
+    {
+      "down_revision": null,
+      "file": "migrations/versions/9dab920675b3_initial_schema.py",
+      "revision": "9dab920675b3",
+      "tables": [
+        "customers",
+        "orders",
+        "invoices"
+      ]
+    }
+  ],
   "package": "orders_platform",
-  "schema": "fastapi-architect/generation/1.0",
+  "schema": "fastapi-architect/generation/1.1",
   "spec": {
     "digest": "f16d2acd4f57a1d3cf434931dc094ef044ec3fb78d0c6c8ada0c07eb2aeb843c",
     "name": "orders-platform",
     "schema": "fastapi-architect/spec/1.1"
+  },
+  "spec_document": {
+    "decisions": [
+      {
+        "id": "ADR-1",
+        "rationale": "Shared schema keeps operations simple for the first tenants; RLS policies are a later decision, so isolation is application scoping plus composite (tenant_id, id) foreign keys until then.",
+        "status": "accepted",
+        "title": "Single PostgreSQL database with tenant_id on every table and composite foreign keys"
+      },
+      {
+        "id": "ADR-2",
+        "rationale": "Two providers under evaluation; the port isolates the choice.",
+        "status": "pending",
+        "title": "Payment provider selection"
+      }
+    ],
+    "description": "Order intake for a multi-tenant B2B marketplace: customers, orders and payment notifications.",
+    "functional": {
+      "modules": [
+        {
+          "description": "Customer accounts of each tenant.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "max_length": 254,
+                  "name": "email",
+                  "type": "str"
+                },
+                {
+                  "max_length": 120,
+                  "name": "display_name",
+                  "type": "str"
+                },
+                {
+                  "name": "active",
+                  "required": false,
+                  "type": "bool"
+                }
+              ],
+              "name": "Customer"
+            }
+          ],
+          "name": "customers"
+        },
+        {
+          "depends_on": [
+            "customers"
+          ],
+          "description": "Orders placed by customers and their lifecycle.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "name": "customer_id",
+                  "references": "customers.Customer",
+                  "type": "uuid"
+                },
+                {
+                  "min_value": 0,
+                  "name": "total_amount",
+                  "type": "decimal"
+                },
+                {
+                  "max_length": 3,
+                  "name": "currency",
+                  "type": "str"
+                },
+                {
+                  "name": "placed_at",
+                  "type": "datetime"
+                }
+              ],
+              "name": "Order",
+              "operations": [
+                "create",
+                "get",
+                "list"
+              ]
+            }
+          ],
+          "name": "orders"
+        },
+        {
+          "depends_on": [
+            "orders"
+          ],
+          "description": "Invoices emitted for completed orders.",
+          "entities": [
+            {
+              "fields": [
+                {
+                  "name": "order_id",
+                  "references": "orders.Order",
+                  "type": "uuid"
+                },
+                {
+                  "min_value": 0,
+                  "name": "amount",
+                  "type": "decimal"
+                },
+                {
+                  "name": "issued_on",
+                  "type": "date"
+                }
+              ],
+              "name": "Invoice",
+              "operations": [
+                "create",
+                "get",
+                "list"
+              ]
+            }
+          ],
+          "name": "billing"
+        }
+      ]
+    },
+    "infrastructure": {
+      "broker": false,
+      "cache": false,
+      "deployment": "container",
+      "regions": 1
+    },
+    "integrations": [
+      {
+        "criticality": "high",
+        "direction": "outbound",
+        "kind": "http",
+        "module": "orders",
+        "name": "payments"
+      },
+      {
+        "criticality": "low",
+        "direction": "outbound",
+        "kind": "smtp",
+        "module": "billing",
+        "name": "notifications"
+      }
+    ],
+    "name": "orders-platform",
+    "nonfunctional": {
+      "auditability": true,
+      "availability": "99.9%",
+      "compliance": [
+        "GDPR"
+      ],
+      "consistency": "strong",
+      "latency_p95_ms": 300
+    },
+    "open_questions": [
+      "Do invoices need to be immutable once issued?"
+    ],
+    "package": "orders_platform",
+    "persistence": {
+      "kind": "postgresql",
+      "migrations": true
+    },
+    "schema": "fastapi-architect/spec/1.1",
+    "scope": {
+      "data_volume": "medium",
+      "expected_rps": 300,
+      "size": "medium",
+      "team_size": 5
+    },
+    "security": {
+      "authentication": "api_key",
+      "authorization": "resource",
+      "multi_tenant": {
+        "binding": "api_key_registry",
+        "enabled": true,
+        "strategy": "shared_schema_rls",
+        "tenant_param": "tenant_id"
+      }
+    },
+    "testing": {
+      "coverage_target": 85,
+      "levels": [
+        "unit",
+        "integration",
+        "contract"
+      ]
+    }
   },
   "style": "hexagonal",
   "tool": {

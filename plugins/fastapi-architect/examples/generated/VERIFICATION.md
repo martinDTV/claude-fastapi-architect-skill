@@ -99,3 +99,55 @@ in the control).
   are generated and linted by the suite but their tests were not run.
 - The run is reproducible with the command above on a machine with the PostgreSQL binaries and uv; the numbers
   (time, memory) are from one run on an Apple Silicon laptop and are indicative only.
+
+# Increment 3: evolution of the generated examples
+
+Status: **verified** for what is listed below, on 2026-10-30, on the developer's machine, through the v1.9 trust
+model (process hygiene, not a sandbox). The examples committed here are the baselines; the evolutions ran on
+temporary copies (`tests/test_evolve_v20.py`, `tests/test_design_v20_postgresql.py` with `FA_DESIGN_PG=1`).
+
+## `inventory-service` + `suppliers` (`../evolutions/inventory-add-suppliers.json`)
+
+| Item | Value |
+|---|---|
+| Plan | create 7 (`api/suppliers.py`, `dependencies/suppliers.py`, `models/suppliers.py`, `repositories/suppliers.py`, `schemas/suppliers.py`, `services/suppliers.py`, `tests/test_suppliers.py`), modify 4 (`api/router.py`, `main.py`, `README.md`, manifest), unchanged 24, conflicts 0 |
+| Public contracts | +5 routes (`/api/v1/suppliers`…), 0 removed, declared contracts unchanged |
+| Verification in the copy | audit 0 → 0 findings; routes 6 → 11, none missing or changed; 0 files touched outside the plan |
+| Tests (pytest-junit, nonce matched) | selected 18, executed 18, passed 18, failed 0, skipped 0 (9 `catalog` + 9 `suppliers`) |
+| Applied | 11 files; manifest history `generate`, `evolve` (`suppliers`); discovery afterwards: 34 managed files, all unchanged, modules `catalog, suppliers` |
+| Second run | `noop` (every requested module exists with the same definition), nothing written |
+| Manual change on `services/catalog.py` | preserved by a third evolution (`returns`), reported as `preserved manual changes`; discovery reports it `managed_modified` |
+| Manual change on `api/router.py` | fourth evolution `blocked`: `manual_change_on_integration_point` |
+| Hand-written project (`tests/fixtures/regressions_v20/nested_routers`) | discovered (routes, routers), evolution `blocked`: `generation_manifest_present` |
+| ruff on the evolved project | all checks passed |
+
+## `orders-platform` + `shipments` (`../evolutions/orders-add-shipments.json`), PostgreSQL
+
+| Item | Value |
+|---|---|
+| Plan | create 9 (module `shipments`, its tests, `migrations/versions/77d681cb65a8_add_shipments.py`), modify 7 (`.audit-fastapi.json`, manifest, `README.md`, `migrations/env.py`, `pyproject.toml`, `api/router.py`, `tests/test_migrations.py`), kept 1 (`migrations/versions/9dab920675b3_initial_schema.py`, byte-identical) |
+| Migration | additive: `create_table shipments` with `UniqueConstraint(tenant_id, id)` and the composite foreign key `(tenant_id, order_id) → orders(tenant_id, id)` `ondelete RESTRICT`, two indexes; `down_revision = 9dab920675b3`; no drop, no alter |
+| Verification in the copy | audit 1 → 1 (informational import-linter signal), 0 blocking; routes 12 → 15, none missing or changed; 0 files touched outside the plan |
+| Tests on a throwaway PostgreSQL 16 (pytest-junit, nonce `56ffe2fa…` matched) | selected 50, executed 50, passed 50, failed 0, skipped 0 (`50 passed, 2 warnings in 6.61s`); including `test_upgrade_and_downgrade_are_repeatable` over the two-revision chain, `test_migrated_schema_matches_the_models`, `test_create_shipment_with_unknown_order_id_is_a_conflict_and_leaves_no_row`, `test_create_shipment_cannot_reference_a_order_id_of_another_tenant` |
+| Applied | 16 files; discovery afterwards: 2 revisions, head `77d681cb65a8`, historical modified none, modules `billing, customers, orders, shipments` |
+| Database after the run | `alembic_version` only |
+| Whole opt-in module (two clusters, three runs) | 24.4 s wall clock, 123 MB peak RSS |
+
+## Cost of the evolution steps (`/usr/bin/time -l`, one run each, indicative)
+
+| Step | inventory-service | orders-platform |
+|---|---|---|
+| `discover` | 0.13 s, 31 MB | 0.28 s, 37 MB |
+| `plan --no-verify` | 0.13 s, 33 MB | 0.28 s, 36 MB |
+| `plan` (verification copy, audit, invariants, no tests) | 0.24 s, 32 MB | 0.65 s, 37 MB |
+| `apply` with tests through the trust model | 0.89 s, 82 MB (18 tests, in-process interpreter) | 24.4 s, 123 MB for the whole opt-in module (two clusters, `uv run`, three suites) |
+
+Versions as in the increment 2 table above (PostgreSQL 16.10, SQLAlchemy 2.0.55, asyncpg 0.30.0, Alembic 1.20.1,
+FastAPI 0.162.0, uv 0.11.28).
+
+## What this does not show
+
+- Evolution of hand-written projects, changes to existing modules, layout migrations and merges of Alembic heads
+  are refused by design, not tested as working.
+- The verification copy runs with the operator's privileges and network access; `verified` means the generated
+  suite passed there, nothing more.
