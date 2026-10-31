@@ -88,7 +88,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(model["source_root"], "src")
         self.assertEqual(model["layout"], "layered")
         self.assertEqual(model["modules"], ["catalog"])
-        self.assertEqual(model["generated"]["schema"], "fastapi-architect/generation/1.1")
+        self.assertEqual(model["generated"]["schema"], "fastapi-architect/generation/1.2")
         self.assertTrue(model["generated"]["has_spec_document"])
         self.assertEqual(model["baseline_contract"]["modules"], ["catalog"])
         self.assertEqual(set(model["ownership"].values()), {"managed_unchanged"})

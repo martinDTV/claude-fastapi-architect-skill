@@ -90,7 +90,15 @@ class ThrowawayCluster:
 
     def create_database(self, name: str) -> str:
         self.psql(f"CREATE DATABASE {name}")
-        return f"postgresql+asyncpg://{OWNER}@127.0.0.1:{self.port}/{name}"
+        return self.url_for(name)
+
+    def create_role(self, name: str, options: str = "LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOINHERIT") -> None:
+        """A login role on the throwaway cluster (trust authentication: no password); the default options are the
+        restricted application role of the generated row-level-security projects."""
+        self.psql(f"CREATE ROLE {name} {options}")
+
+    def url_for(self, name: str, role: str = OWNER) -> str:
+        return f"postgresql+asyncpg://{role}@127.0.0.1:{self.port}/{name}"
 
     def server_version(self) -> str:
         return self.psql("SHOW server_version")

@@ -41,6 +41,10 @@ INVENTORY = EXAMPLES / "specs" / "inventory-service.json"
 ORDERS = EXAMPLES / "specs" / "orders-platform.json"
 SNAPSHOT = EXAMPLES / "generated" / "inventory-service"
 SNAPSHOT_ORDERS = EXAMPLES / "generated" / "orders-platform"
+TEAM_NOTES = EXAMPLES / "specs" / "team-notes.json"
+TENANT_PROJECTS = EXAMPLES / "specs" / "tenant-projects.json"
+SNAPSHOT_TEAM_NOTES = EXAMPLES / "generated" / "team-notes"
+SNAPSHOT_TENANT_PROJECTS = EXAMPLES / "generated" / "tenant-projects"
 ROOT_CLI = REPO_ROOT / "scripts" / "design_fastapi.py"
 SKILL_CLI = SKILL_SCRIPTS / "design_fastapi.py"
 
@@ -302,10 +306,10 @@ class BlueprintTests(unittest.TestCase):
         self.assertIn("service.create(principal.tenant_id, payload)", router)
         self.assertIn("item.clinic_id == clinic_id", bp.files["src/clinic/modules/appointments/repository.py"])
         self.assertIn("def appointment_url(tenant: uuid.UUID)", bp.files["tests/test_appointments.py"])
-        self.assertIn("test_appointment_routes_refuse_another_tenant_for_the_same_key", bp.files["tests/test_appointments.py"])
+        self.assertIn("test_appointment_routes_refuse_another_tenant_for_the_same_principal", bp.files["tests/test_appointments.py"])
         self.assertIn("test_appointments_of_one_tenant_are_invisible_to_another", bp.files["tests/test_appointments.py"])
         security = bp.files["src/clinic/core/security.py"]
-        self.assertIn("def require_tenant_member(clinic_id: UUID, principal: Principal)", security)
+        self.assertIn("def require_tenant_member(clinic_id: UUID, principal: AuthenticatedPrincipal)", security)
         self.assertIn("HTTP_403_FORBIDDEN", security)
 
     def test_security_module_only_with_api_key_and_db_module_only_with_postgresql(self) -> None:
@@ -549,7 +553,7 @@ class PipelineTests(TempDirCase):
 
 
 class SnapshotTests(TempDirCase):
-    SNAPSHOTS = ((INVENTORY, SNAPSHOT), (ORDERS, SNAPSHOT_ORDERS))
+    SNAPSHOTS = ((INVENTORY, SNAPSHOT), (ORDERS, SNAPSHOT_ORDERS), (TEAM_NOTES, SNAPSHOT_TEAM_NOTES), (TENANT_PROJECTS, SNAPSHOT_TENANT_PROJECTS))
 
     def test_committed_examples_equal_a_fresh_generation(self) -> None:
         for spec_path, snapshot in self.SNAPSHOTS:
@@ -571,6 +575,13 @@ class SnapshotTests(TempDirCase):
         self.assertEqual([f["rule"] for f in orders["findings"]], ["ARCH_IMPORT_LINTER_PRESENT"])
         self.assertEqual(orders["contracts"]["unauthenticated_not_public"], 0)
         self.assertEqual(orders["contracts"]["authorization_visible"], 11)  # the tenant membership dependency is visible on every tenant route
+        notes = design.audit_generated(str(SNAPSHOT_TEAM_NOTES))
+        self.assertEqual(notes["findings_total"], 0, notes["findings"])
+        self.assertEqual((notes["contracts"]["authorization_unknown"], notes["contracts"]["unauthenticated_not_public"]), (0, 0))
+        projects = design.audit_generated(str(SNAPSHOT_TENANT_PROJECTS))
+        self.assertEqual(sorted(f["rule"] for f in projects["findings"]), ["ARCH_IMPORT_LINTER_PRESENT", "MIG_RAW_SQL"])  # the RLS policies are op.execute statements
+        self.assertLessEqual(set(projects["by_severity"]), {"info"})
+        self.assertEqual((projects["contracts"]["authorization_unknown"], projects["contracts"]["unauthenticated_not_public"]), (0, 0))
 
 
 # --------------------------------------------------------------------------- #
@@ -584,7 +595,8 @@ class Schema11Tests(unittest.TestCase):
         new = design.load_spec(str(ORDERS))
         self.assertEqual(old.schema, "fastapi-architect/spec/1.0")
         self.assertEqual(new.schema, "fastapi-architect/spec/1.1")
-        self.assertEqual(design.SPEC_SCHEMA, "fastapi-architect/spec/1.1")
+        self.assertEqual(design.SPEC_SCHEMA, "fastapi-architect/spec/1.2")
+        self.assertEqual(design.SPEC_SCHEMAS, ("fastapi-architect/spec/1.0", "fastapi-architect/spec/1.1", "fastapi-architect/spec/1.2"))
 
     def test_references_are_normalised_and_follow_the_dependency_direction(self) -> None:
         spec = design.load_spec(str(ORDERS))
