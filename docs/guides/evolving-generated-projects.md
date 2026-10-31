@@ -1,7 +1,7 @@
-# Evolving a generated project: discover, plan, approve, apply
+# Evolving a project: discover, (adopt,) plan, approve, apply, recover
 
-A walkthrough of `scripts/evolve_fastapi.py` on the committed examples. The contract reference is
-`plugins/fastapi-architect/skills/fastapi-architect/references/evolution-contracts.md`.
+A walkthrough of `scripts/evolve_fastapi.py` on the committed examples and on the hand-written fixture. The contract
+reference is `plugins/fastapi-architect/skills/fastapi-architect/references/evolution-contracts.md`.
 
 ## 1. Look before touching
 
@@ -91,3 +91,63 @@ FA_DESIGN_PG=1 python3 -m unittest tests.test_design_v20_postgresql -v
 
 The evidence of the run that accompanies this increment is in
 `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+## 7. Changing an existing module (contract 1.1)
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.1",
+  "project": {"path": "../generated/inventory-service"},
+  "modify_modules": [{"name": "catalog", "entities": [{"name": "Product",
+      "add_fields": [{"name": "barcode", "type": "str", "max_length": 64, "required": false},
+                     {"name": "active", "type": "bool", "required": true, "default": true}],
+      "add_operations": ["update"]}]}]
+}
+```
+
+The plan lists every change with its classification: `compatible` (nullable field, defaulted field, new
+operation, new dependency), `potentially_incompatible` (a required field without default: existing callers would
+get 422, and on PostgreSQL a NOT NULL column with no backfill) which blocks until a safe form is declared, and
+`unsupported` (removals, renames, type changes) which the contract rejects. The module's own files are regenerated
+from the merged contract; a manual change on any of them blocks (move it into the contract or restore the file).
+On PostgreSQL the plan adds one additive revision after the recorded head: `add_column(..., nullable=True)` or
+`add_column(..., server_default=..., nullable=False)`, `create_foreign_key` for nullable references; the risks
+state that a downgrade drops the column with its data.
+
+## 8. Adopting a hand-written project
+
+```
+python3 scripts/evolve_fastapi.py propose tests/fixtures/adoption20/handmade_shop
+```
+
+The proposal lists one candidate per router (`items`, `users`), their routes and related files, and the files
+nobody claims. Nothing is adopted. Write the contract naming the modules and the exact files:
+
+```json
+{"schema": "fastapi-architect/adoption/1.0", "project": {"path": "/path/to/handmade_shop"},
+ "modules": [{"name": "items", "router": {"file": "app/routers/items.py", "name": "router"}, "files": ["app/routers/items.py", "app/schemas.py"]}],
+ "notes": "users stays unadopted on purpose"}
+```
+
+`adopt` writes `.fastapi-architect/adoption.json` and nothing else. From then on an evolution contract may add a
+handler to the items router (`add_endpoints`: method, path, name, a literal `response`) or an optional field to a
+pydantic class in an adopted file (`add_fields`): the handler is appended at the end of the module, the field
+after the last one of the class, imports untouched, comments and spacing preserved byte-for-byte. The plan carries
+the diff and the AST evidence; the copy is audited and the project's own tests run under the trust model;
+`users.py` and every other unadopted file are never written. A manual change on an adopted file after adoption
+blocks any transform until you adopt again; a duplicate route or symbol blocks; an ambiguous class blocks.
+
+## 9. If something interrupts the write
+
+Every write goes through `.fastapi-architect/ops/<operation id>/`: the new content and a backup of each file are
+staged, a journal records the operation, then each file is renamed into place and the journal records it. A crash
+after some files landed leaves the journal; `plan` refuses until it is handled:
+
+```
+python3 scripts/evolve_fastapi.py recover /path/to/project            # roll back: restore the backups
+python3 scripts/evolve_fastapi.py recover /path/to/project --forward  # finish: publish the pending files
+```
+
+A file edited by hand after the crash is a conflict: recovery leaves it alone, restores or publishes the others,
+and keeps the journal (`needs_attention`) until you decide. There is no atomicity across files; the renames are
+atomic per file; the journal is what makes the whole operation recoverable.

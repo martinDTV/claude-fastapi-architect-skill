@@ -1,6 +1,6 @@
 # FastAPI Architect v2.0.0 — Architecture & Engineering Foundations
 
-**Status: increments 1, 2 and 3 implemented and validated locally; pending human review; not published.**
+**Status: increments 1 to 4 implemented and validated locally; pending human review; not published.**
 
 v2.0 turns FastAPI Architect from an auditor and remediator into a system that can also **design and build**
 professional backends, reusing the audit engine (v1.3–v1.8) and the remediation trust model (v1.9) instead of
@@ -220,6 +220,83 @@ them. Nothing cloud-native or distributed is started.
   `references/evolution-contracts.md`, `docs/guides/evolving-generated-projects.md`, the increment 3 section of
   `docs/architecture/design-engine-v2.md`, `evolve_fastapi.py` (skill + root shim), structure validator extended.
 
+## Increment 4: Safe Evolution & Project Adoption
+
+### Recoverable writer (`fastapi_design/journal.py`)
+
+- `prepare` (preconditions re-checked, new content and backups staged under `.fastapi-architect/ops/<id>/`,
+  journal with the plan identity: sha256 of paths, expected and new digests, kind and description), `publish`
+  (journal `publishing`, preconditions re-checked once more, per-file temporary + `os.replace`, every landing
+  journaled, then `published`, cleanup, journal deleted), `recover` (files classified `published` / `pending` /
+  `conflict` by digest; `rollback` restores backups and removes created files, `forward` publishes the pending
+  ones; conflicts are never touched and keep the journal as `needs_attention`; progress journaled, resumable,
+  idempotent). Limits stated: atomic per file, recoverable across files, no global atomicity, same filesystem.
+- Fault injection (`FaultInjector`: before publication, after the n-th file, after all, before cleanup, during
+  recovery). Every write of `apply` and `adopt` goes through it; a pending journal blocks new plans;
+  `evolve_fastapi.py recover PROJECT [--forward] [--op ID]`.
+
+### Evolution contract 1.1 (`fastapi-architect/evolution/1.1`; 1.0 still read)
+
+- `modify_modules`: `add_depends_on`, `entities[].add_fields` (nullable, or required with a `default` that becomes
+  the schema, model and server default), `entities[].add_operations`; for adopted projects `add_endpoints`
+  (method, path, name, summary, literal response) and `add_fields` on a pydantic class. Every change is classified
+  `compatible`, `potentially_incompatible` (required field without default; NOT NULL column or NOT NULL foreign key
+  on an existing table: blocked with the safe form spelled out) or `unsupported` (removals, renames, type changes,
+  new entities in an existing module: contract error). The changed module's own files are regenerated from the
+  merged contract; a manual change on them blocks. Field `default` added to the design contract (schema 1.1).
+
+### Additive column migrations
+
+- The lineage carries the baseline contract; the delta revision emits `add_column` (nullable, or NOT NULL with a
+  server default) and `create_foreign_key` + index for nullable references next to `create_table` for new
+  tables; downgrade drops them (data loss on rollback stated under risks). No `alter_column`, no drop of existing
+  objects, no data migration, no merge of heads: additive only, not expand/contract.
+
+### Structural transforms (`fastapi_design/transforms.py`)
+
+- `insert_function`, `insert_class_field`, `ensure_import`, `compose`: `ast` analysis, anchored insertion into the
+  original text (end of module, end of class body, end of the import block), AST comparison before and after
+  (every pre-existing top-level node unchanged and in order, exactly the inserted nodes added), unified diff and
+  evidence; refusals: duplicate symbol, duplicate route (method and path on the router), duplicate field, router or
+  class bound more than once (ambiguity), unparsable target or snippet. Standard library only; a CST dependency
+  would only be justified to rewrite existing nodes, which is refused.
+
+### Adoption (`fastapi_design/adoption.py`, `fastapi-architect/adoption/1.0`)
+
+- `propose` (candidates per router with routes and related files, unassigned files, uncertainties; nothing
+  adopted), the adoption contract (modules with router and exact files; no file in two modules), `adopt`
+  (refuses generated projects, unknown structures, missing or symlinked files, unparsable files, routers not bound
+  exactly once; writes only `.fastapi-architect/adoption.json` with digests, routers, routes, boundary and history).
+  Discovery reports `adopted_unchanged`, `adopted_modified`, `adopted_missing`, `unadopted`. Evolution of adopted
+  modules: only `add_endpoints` / `add_fields` through the transforms, only on adopted files unchanged since
+  adoption; unadopted files are protected; duplicates and ambiguity block.
+
+### Verified
+
+- Scenario A, generated: `inventory-service` + `inventory-add-product-fields.json` (two fields on Product; 9 tests
+  through the trust model, applied, `noop` on the second run); `orders-platform` +
+  `orders-add-customer-columns.json` on a throwaway PostgreSQL 16 (additive revision `e2dc0f95b7da` after
+  `9dab920675b3`: nullable `phone`, NOT NULL `tier` with server default, `update` operation on orders; 40 tests
+  passed through the trust model; backfill of existing rows by the server default and clean downgrade; a
+  conflicting column created by hand makes the upgrade fail with the schema left at the previous revision and the
+  verification never `verified`).
+- Scenario B, hand-written: `tests/fixtures/adoption20/handmade_shop` proposed, `items` adopted, an endpoint and
+  an optional field added through anchored transforms, the project's own 3 tests passed through the trust model,
+  `users.py` byte-identical; unadopted module, manual change after adoption, duplicate route/symbol/field,
+  ambiguous class, concurrent edit after the plan and a failing project test all refused.
+- Recoverable writer: interrupted after 2 of 6 files → rollback to the original tree or forward to the complete
+  one; interrupted recovery resumed; conflict left alone; concurrent change before publication → nothing
+  published; unsafe paths, symlinks and staging I/O errors leave nothing behind.
+
+### Tests, examples, docs
+
+- `tests/test_evolve_v20_recovery.py` (17 tests) and `tests/test_evolve_v20_adoption.py` (22 tests); the opt-in
+  PostgreSQL module gains three tests (column evolution, backfill, migration failure). Fixture
+  `tests/fixtures/adoption20/handmade_shop` with `adopt-items.json` and `items-add-stats.json`; examples
+  `inventory-add-product-fields.json`, `orders-add-customer-columns.json`; `references/evolution-contracts.md`,
+  `docs/guides/evolving-generated-projects.md`, the increment 4 section of `docs/architecture/design-engine-v2.md`,
+  `examples/generated/VERIFICATION.md`, structure validator extended.
+
 ## Compatibility
 
 - 59 rules, report schema 1.7, JSON/SARIF outputs, fingerprints, suppressions, declared contracts, the opt-in loop
@@ -241,12 +318,19 @@ them. Nothing cloud-native or distributed is started.
 - Full unit suite on Python 3.13 and 3.9, `tests/test_docs_links.py`, `scripts/validate_structure.py`
   (extended with the v2.0 artefacts), `claude plugin validate`, `git diff --check`: see the increment report.
 
-## Known limits (after increment 3)
+## Known limits (after increment 4)
 
-- Evolution adds whole modules to generated projects only: existing modules are not changed, hand-written projects
-  are discovered but refused, layouts are never migrated, integration points are regenerated (a manual change on
-  one must be moved into the contract first), one additive migration per evolution (no column changes, no data
-  migrations, no merge of heads).
+- Generated projects: new modules and additive changes to existing ones (nullable or defaulted fields,
+  operations, dependencies); no removals, renames, type changes, new entities in an existing module, or layout
+  migrations; integration points and changed module files are regenerated (a manual change on them must be moved
+  into the contract first).
+- Adopted projects: handlers returning a literal and optional fields on pydantic classes, inside adopted files
+  only; existing handlers are never rewritten; no generated modules or persistence for adopted projects.
+- Migrations: one additive revision per evolution (tables, nullable or defaulted columns, nullable foreign keys);
+  expand/contract, column changes, data migrations and merges of heads are not supported; a downgrade drops the
+  added columns with their data.
+- Writes: atomic per file and recoverable across files through the journal; no global atomicity; the staging
+  directory must share the project's filesystem; a writer that ignores the journal is not protected against.
 
 - Only the initial migration is generated; later migrations are the author's (`alembic revision --autogenerate`
   works on the generated metadata). `uv.lock` is not generated (resolution needs the index).
@@ -261,8 +345,9 @@ them. Nothing cloud-native or distributed is started.
 
 ## Roadmap for the next v2.0 increments
 
-1. Evolving existing modules (new fields and operations) with additive column migrations, and adopting
-   hand-written projects module by module under an explicit ownership declaration.
+1. Expand/contract migrations with explicit data steps (backfill scripts, NOT NULL after backfill, column renames
+   through add-copy-drop), and richer transforms for adopted modules (handlers with parameters and bodies declared
+   in the contract, imports of project symbols) under the same AST evidence.
 2. Authentication beyond API keys (OAuth2/JWT with the references' guidance) and resource-level authorization
    policies as declared decisions.
 3. Row-level security as an opt-in strategy implementation (policies, session tenant context, the tenant-ledger

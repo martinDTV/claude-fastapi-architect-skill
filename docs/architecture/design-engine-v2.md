@@ -1,6 +1,6 @@
 # Design engine (v2.0): architecture record
 
-Status: increments 1, 2 and 3 implemented and tested locally; not published.
+Status: increments 1 to 4 implemented and tested locally; not published.
 
 ## Decision
 
@@ -159,3 +159,49 @@ no-op on the second run, a manual change on `services/catalog.py` preserved by a
 revision, 50 generated tests on a throwaway PostgreSQL 16 through the trust model, database left with
 `alembic_version` only; the historical migration byte-identical. Evidence in
 `plugins/fastapi-architect/examples/generated/VERIFICATION.md`.
+
+## Increment 4: recoverable writes, changes to existing modules, adoption
+
+**A journal instead of a promise.** The two-phase writer of increment 3 checked every precondition and renamed
+files one by one; a crash between two renames left a mixed tree with nothing to say about it. The recoverable
+writer (`journal.py`) stages the new content and a backup of every existing file under
+`.fastapi-architect/ops/<id>/`, writes a journal (operation id = sha256 of the plan, files with expected and new
+digests, state), publishes file by file while recording each landing, and deletes the journal only after a clean
+cleanup. `recover` classifies each file by digest (published, pending, conflict), rolls back or rolls forward the
+first two kinds, never touches a conflict, journals its own progress and is idempotent. We say what we have: atomic
+renames per file, a recoverable protocol across files, no global atomicity. Fault injection points exist for the
+tests because a protocol that was never interrupted on purpose has not been tested.
+
+**Changing an existing module is still regeneration.** Contract 1.1 adds `modify_modules`: fields, operations and
+dependencies are merged into the baseline contract, the whole contract is validated again, and the module's own
+files are regenerated; a manual change on them blocks, as for integration points. Each change is classified and
+the potentially incompatible ones (a required field without default, a NOT NULL column without backfill, a NOT
+NULL foreign key on an existing table) are refused with the safe form spelled out. Field defaults became part of the
+design contract (schema, model and server default) because they are the only honest backfill strategy the
+generator can offer.
+
+**Additive column migrations, nothing more.** The migration lineage now carries the baseline contract, so the
+delta revision can emit `add_column` for existing tables next to `create_table` for new ones; downgrade drops
+them. Verified on a throwaway PostgreSQL: the evolved suite passes, a server default backfills existing rows and
+the additive revision rolls back without touching them, and a conflicting column created by hand makes the
+upgrade fail with the schema left at the previous revision (transactional DDL) and the verification never
+`verified`.
+
+**Adoption is a declaration, not a conversion.** A hand-written project has no manifest, so nothing in it is
+managed. `propose` describes candidates; the operator's adoption contract names modules and files; `adopt`
+records digests, routers and routes in an adoption baseline and writes nothing else. Evolution of an adopted
+module is limited to anchored structural edits (`transforms.py`: a handler appended to the router module, an
+optional field appended to a class body, an import after the last import), analysed with `ast`, verified by
+comparing the AST before and after (every pre-existing node unchanged, exactly the inserted nodes added), and
+refused on ambiguity or duplication. Unadopted files are protected; a manual change on an adopted file blocks
+until the baseline is refreshed. The standard library is enough for additive edits; a CST library would only be
+justified to rewrite existing nodes, which this increment refuses to do.
+
+**Verified in this increment.** Scenario A: inventory-service gains two fields on Product (verified with its 9
+tests through the trust model, applied, no-op on the second run); orders-platform gains two columns on customers
+and an update operation on orders, verified on a throwaway PostgreSQL 16 with its evolved suite, plus the
+backfill and migration-failure controls. Scenario B: the hand-written shop fixture is adopted module by module,
+gains an endpoint and an optional field, passes its own tests through the trust model, and keeps `users.py`
+byte-identical; a concurrent manual edit after the plan blocks the write. Fault injection: a publication
+interrupted after two of six files is rolled back to the original tree or rolled forward to the complete one; an
+interrupted recovery resumes; a file edited after the crash is reported and left alone.

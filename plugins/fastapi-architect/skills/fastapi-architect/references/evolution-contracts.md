@@ -1,25 +1,29 @@
-# Evolution contracts (v2.0, increment 3): discovery, planned change, safe writer, verification
+# Evolution contracts (v2.0, increments 3 and 4): discovery, adoption, planned change, recoverable writer, verification
 
-How FastAPI Architect extends a **generated** project with new business modules without regenerating it from
-scratch and without touching what the developer owns. The engine reuses the design contract, the blueprint, the
-manifest, the audit engine and the v1.9 trust model; nothing here uses text replacement: every written file is
-regenerated from the merged contract.
+How FastAPI Architect extends a project without regenerating it from scratch and without touching what the
+developer owns: **generated** projects grow by whole modules and by additive changes to existing modules;
+**hand-written** projects are first *adopted* module by module and then receive anchored structural edits. The
+engine reuses the design contract, the blueprint, the manifest, the audit engine and the v1.9 trust model.
 
 ```
 python3 scripts/evolve_fastapi.py discover PROJECT                     # static model of any FastAPI project
-python3 scripts/evolve_fastapi.py plan  CONTRACT.json                  # change set + verification in a copy, writes nothing
-python3 scripts/evolve_fastapi.py apply CONTRACT.json                  # verify in a copy, then write the project
+python3 scripts/evolve_fastapi.py propose  PROJECT                     # candidate modules of a hand-written project
+python3 scripts/evolve_fastapi.py adopt    ADOPTION.json               # record the adoption baseline (adoption/1.0)
+python3 scripts/evolve_fastapi.py plan     CONTRACT.json               # change set + verification in a copy, writes nothing
+python3 scripts/evolve_fastapi.py apply    CONTRACT.json               # verify in a copy, then write the project
        [--authorize-execution --trust fixture|trusted --test-command "python3 -m pytest -q"
         --env-passthrough DATABASE_URL,UV_CACHE_DIR,UV_PYTHON_INSTALL_DIR] [--format text|json] [--output FILE] [--strict]
+python3 scripts/evolve_fastapi.py recover  PROJECT [--forward]         # finish or undo an interrupted operation
 ```
 
 Exit codes: `0` planned / noop / audit_clean / verified (and, for `apply`, written); `1` blocked, rejected,
-inconclusive or refused; `2` invalid contract or arguments.
+inconclusive, interrupted or refused; `2` invalid contract or arguments.
 
 ## 1. Project discovery
 
 `discover` builds a model by parsing the project (`ast`), reading `pyproject.toml`, `alembic.ini`,
-`.audit-fastapi.json` and the generation manifest. It never imports or executes the project. It reports:
+`.audit-fastapi.json`, the generation manifest and the adoption baseline. It never imports or executes the
+project.
 
 | Aspect | Source | Notes |
 |---|---|---|
@@ -31,118 +35,169 @@ inconclusive or refused; `2` invalid contract or arguments.
 | SQLAlchemy models | bases resolved to `DeclarativeBase` subclasses found in the project (two passes) | the base itself is not a model |
 | services, repositories, dependency aliases, lifespan | class names, `Annotated[..., Depends(...)]` aliases, `FastAPI(lifespan=...)` | heuristic; reported, not relied upon |
 | Alembic | `alembic.ini` → `script_location/versions/*.py`: revisions, `down_revision`, heads, unknown parents, historical files changed since generation | |
-| ownership | manifest file table vs sha256 on disk | `managed_unchanged`, `managed_modified` (manual change), `unmanaged`, `missing_managed`; `unknown` for every file when there is no manifest |
+| ownership | manifest file table vs sha256 on disk | `managed_unchanged`, `managed_modified` (manual change), `unmanaged`, `missing_managed`; with an adoption baseline `adopted_unchanged`, `adopted_modified`, `adopted_missing`, `unadopted`; `unknown` for every file when there is neither |
 | baseline contract | `spec_document` embedded in a 1.1 manifest, digest-checked | a 1.0 manifest needs `--baseline-contract` |
 
 Nothing is inferred from file names alone: a file called like a generated one is `unmanaged` unless the manifest
-lists it, and a managed file with unexpected content is a manual change.
+lists it, and a managed or adopted file with unexpected content is a manual change.
 
-## 2. Evolution contract (`fastapi-architect/evolution/1.0`)
+## 2. Adoption of hand-written projects (`fastapi-architect/adoption/1.0`)
+
+Flow: `discover` → `propose` → the operator writes the contract → `adopt` → the baseline is recorded → controlled
+evolution of the adopted modules only.
 
 ```json
 {
-  "schema": "fastapi-architect/evolution/1.0",
+  "schema": "fastapi-architect/adoption/1.0",
+  "project": {"path": "/path/to/shop"},
+  "modules": [{"name": "items", "router": {"file": "app/routers/items.py", "name": "router"}, "files": ["app/routers/items.py", "app/schemas.py"]}],
+  "notes": "users stays unadopted on purpose"
+}
+```
+
+- `propose` lists one candidate per router file (router, own and effective prefixes, routes, the project files
+  it imports as related files), the python files nobody claims, and the uncertainties. **Nothing is adopted by a
+  proposal.**
+- `adopt` validates the contract against the project: a generated project is refused (use evolution), a project
+  without a single application package is refused (unknown structure), every file must exist inside the project,
+  not be (or sit under) a symlink, parse, belong to one module only; the module's router must be bound exactly once
+  in its file and be an `APIRouter` the discovery recognises. The only file written is
+  `.fastapi-architect/adoption.json` (through the recoverable writer): the adopted files with their sha256, the
+  router and routes of each module, the ownership boundary ("only the listed files may be transformed; every
+  other file is protected"), the notes and the history. Adopting again with the same files refreshes the baseline;
+  previously adopted modules stay adopted.
+- After adoption, a manual change on an adopted file (digest differs from the baseline) blocks any transform of
+  that module until the baseline is refreshed by adopting again. Unadopted files are never written.
+
+Adoption does not convert the project: no file is rewritten, no layout is imposed, no manifest claims the rest.
+
+## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read)
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.1",
   "project": {"path": "../generated/inventory-service", "package": "inventory_service", "expected_spec_digest": "7627b87b0d9b", "baseline_contract": null},
-  "add_modules": [ { "name": "suppliers", "description": "...", "depends_on": ["catalog"], "entities": [ ... same shape as spec.functional.modules ... ] } ],
+  "add_modules": [ { "name": "suppliers", "entities": [ ... same shape as spec.functional.modules ... ] } ],
+  "modify_modules": [
+    {"name": "catalog", "add_depends_on": ["suppliers"],
+     "entities": [{"name": "Product", "add_fields": [{"name": "barcode", "type": "str", "max_length": 64, "required": false},
+                                                      {"name": "active", "type": "bool", "required": true, "default": true}],
+                   "add_operations": ["update"]}]},
+    {"name": "items", "add_endpoints": [{"method": "GET", "path": "/stats", "name": "items_stats", "summary": "...", "response": {"module": "items"}}],
+                      "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": false}]}
+  ],
   "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged"],
-  "files": {"allow_modify": ["src/inventory_service/api/router.py", "..."], "preserve": ["README.md"]}
+  "files": {"allow_modify": ["..."], "preserve": ["README.md"]}
 }
 ```
 
 | Key | Meaning |
 |---|---|
-| `project.path` | the project (relative to the contract file or absolute); symlinks are refused |
-| `project.package` | checked against the manifest and the package on disk |
-| `project.expected_spec_digest` | prefix of the baseline contract digest the operator expects; a different baseline is `stale baseline` |
-| `project.baseline_contract` | the original contract, for manifests that predate 1.1; its digest must match the manifest |
-| `add_modules` | new modules, validated as part of the merged contract (identifiers, reserved names, cycles, references along the dependency direction, duplicates); errors are reported with `evolution.add_modules[i]...` paths |
-| `invariants` | checked by the plan (routes removed, historical migrations modified) and by the verification in the copy (routes changed, files touched outside the plan) |
-| `files.allow_modify` | globs of the files the evolution may regenerate; default: the integration points (`pyproject.toml`, `README.md`, `.env.example`, `.audit-fastapi.json`, `main.py`, `api/router.py`, `core/config.py`, `migrations/env.py`, `tests/conftest.py`, `tests/test_migrations.py`) plus the manifest |
-| `files.preserve` | globs that must never be written; a preserved file the evolution would need to change is a conflict |
+| `project.path` / `package` / `expected_spec_digest` / `baseline_contract` | as in 1.0: the project (symlinks refused), the package check, the baseline the operator expects (`stale baseline` otherwise), the original contract for 1.0 manifests |
+| `add_modules` | new modules of a generated project (regenerated from the merged contract) |
+| `modify_modules[].add_depends_on` | generated: a declared dependency (cycles are rejected by the merged contract) |
+| `modify_modules[].entities[].add_fields` | generated: fields appended to an existing entity; `required: false` (nullable) or `required: true` with `default` (server default = backfill); `references` only nullable |
+| `modify_modules[].entities[].add_operations` | generated: new use cases, routes and tests for an existing entity |
+| `modify_modules[].add_endpoints` | adopted: a handler appended to the module's router file (`method`, `path`, `name`, optional `summary`, a JSON `response` returned as is) |
+| `modify_modules[].add_fields` | adopted: `class`, `name`, `type` (str, int, float, bool), optional `required` with `default` |
+| `invariants`, `files.allow_modify`, `files.preserve` | as in 1.0 |
 
-Entities, operations, persistence, security, integrations and style are **inherited** from the baseline contract:
-the evolution adds modules to it, it does not reinterpret it. Applying the same contract twice is a `noop`;
-adding a module that exists with a different definition is refused (changing modules is not supported yet).
+Classification of every requested change (reported under `plan.changes`):
 
-## 3. The plan
+| Classification | Examples | Outcome |
+|---|---|---|
+| `compatible` | nullable field; required field with a default; new operation; new dependency without a cycle; new endpoint; optional field on an adopted class | planned |
+| `potentially_incompatible` | required field without default on an existing entity (existing callers would get 422; on PostgreSQL a NOT NULL column without backfill); required foreign key on an existing table | **blocked** until a safe form is declared |
+| `unsupported` | `remove_fields`, `rename_fields`, `change_fields`, `remove_operations`, `remove_entities`, `rename_entities`, `remove_endpoints`, `remove_depends_on`, new entities inside an existing module, changes of public contracts | contract error |
+
+Applying the same contract twice is a `noop` for generated projects (the merged contract equals the baseline);
+for adopted projects the same endpoint again is a duplicate and blocks (nothing is silently skipped).
+
+## 4. The plan
 
 `plan_evolution` computes, without writing:
 
-1. **Preconditions**: not a symlink, manifest present and known, baseline contract available and matching the
-   manifest digest, expected digest, package and layout matching the manifest, no missing managed file, merged
-   contract valid, unique routes across modules, Alembic chain linear with the head recorded in the manifest and
-   no historical migration modified (PostgreSQL).
-2. **Style**: the project keeps its layout. When the advisor would now recommend another style (three modules in a
-   layered project, for instance) the plan records a warning and pins `architecture.style_preference` in the
-   evolved contract; migrating the layout is a separate, explicit operation that this increment does not offer.
-3. **Files**, by comparing the baseline blueprint (what every managed file should contain now) with the evolved
-   blueprint (what it should become) and with the disk:
-   - `create`: files of the new modules (a file already there is `file_in_the_way`);
-   - `modify`: integration points whose generated content changes, only when managed, unchanged, allowed and not
-     preserved; otherwise `manual_change_on_integration_point`, `unmanaged_file_in_the_way`, `not_allowed_to_modify`,
-     `preserved_file_would_change` or `missing_managed_file`;
-   - `unchanged`: files whose generated content does not change are never written, whatever their state on disk;
-     managed files with manual changes among them are listed as `preserved_manual_changes`;
-   - `kept`: historical migration files, byte-identical;
-   - the manifest is always rewritten against its current digest (history, files, migrations, contract).
-4. **Public contracts**: routes added, removed (an invariant violation) and whether `.audit-fastapi.json` changes.
-5. **Migration** (PostgreSQL): one additive revision (`create_table`, foreign keys to existing tables, indexes;
-   no drop, no alter) with `down_revision` = current head and an id derived from the head and the evolved contract;
-   `tests/test_migrations.py` is regenerated with the new head and the full table list.
-6. **Risks** and **tests required**; unified diffs of every modified file for the preview.
+1. **Preconditions**: no interrupted operation pending (`.fastapi-architect/ops`), not a symlink, manifest or
+   adoption baseline present, baseline contract available and matching the manifest digest, expected digest,
+   package and layout matching the manifest, no missing managed file, merged contract valid, unique routes across
+   modules, linear Alembic chain with the recorded head and no historical migration modified (PostgreSQL); for
+   adopted projects: every referenced module adopted, adopted files unchanged since adoption.
+2. **Style**: the project keeps its layout; the advisor's new opinion is a warning and the evolved contract pins
+   `architecture.style_preference`.
+3. **Files** (generated): the baseline blueprint (what every managed file should contain now) against the evolved
+   blueprint (what it should become) and against the disk: `create`, `modify` (integration points and, for
+   `modify_modules`, the module's own files; only when managed, unchanged, allowed and not preserved), `unchanged`
+   (never written, manual changes among them listed as `preserved_manual_changes`), `kept` (historical migrations),
+   conflicts (`file_in_the_way`, `manual_change_on_integration_point`, `unmanaged_file_in_the_way`,
+   `not_allowed_to_modify`, `preserved_file_would_change`, `missing_managed_file`, `unsafe_path`); the manifest is
+   always rewritten against its current digest.
+   **Files** (adopted): the transformed router or schema files (`transforms` carry the inserted symbols, the AST
+   evidence and the digests before and after) and the refreshed adoption baseline.
+4. **Public contracts**: routes added, removed (an invariant violation), declared contracts changed.
+5. **Migration** (PostgreSQL): one additive revision with `down_revision` = current head: `create_table` for new
+   tables, `add_column` (nullable, or NOT NULL with a server default) for new columns of existing tables,
+   `create_foreign_key` + index for nullable references; `downgrade` drops them (the data of a dropped column goes
+   with it, stated under risks). No `alter_column`, no drop of existing objects, no data migration, no merge of
+   heads. `tests/test_migrations.py` is regenerated with the new head.
+6. **Risks**, **tests required** and unified diffs of every modified file.
 
-A plan with any conflict or failed precondition is `blocked` and lists why.
+## 5. Structural transforms (adopted projects)
 
-## 4. Safe writer
+`transforms.py` analyses with `ast` and edits by **anchored insertion** into the original text: the new handler
+is appended at the end of the router module (two blank lines), the new field after the last statement of the
+class body at its indentation, a missing import after the last head import. Everything else stays byte-for-byte:
+formatting, comments and hand-written code are never rewritten. For every transform: the target symbol is
+identified (router bound exactly once, class defined exactly once), preconditions are checked (duplicate symbol,
+duplicate route with the same method and path on the router, duplicate field), the result is parsed and its AST
+compared with the original (every pre-existing top-level node unchanged and in order, exactly the inserted nodes
+added), a unified diff is produced and the evidence (anchor, symbol, AST counts, digests) goes into the plan.
+Ambiguity refuses: two bindings of the router, two classes of the same name, a class defined in several adopted
+files. The standard library is enough for additive edits; a concrete-syntax-tree dependency would only be
+justified to rewrite existing nodes, which this increment does not do.
 
-`generator.write_files(target, files, expected)` is shared by generation and evolution:
+## 6. Recoverable writer
 
-| Guarantee | How |
-|---|---|
-| preview | `plan` (and `apply` before writing) report the full change set and diffs |
-| identity and digest | sha256 per file in the manifest; ownership derived from it |
-| baseline check | `expected_spec_digest`, manifest digest of the baseline contract, head revision |
-| atomic writes | temporary sibling files, then `os.replace`; the first failure removes the temporaries |
-| conflicts | every precondition digest re-checked immediately before writing: a concurrent change aborts before anything is written |
-| manual files | never regenerated: integration points with manual changes block, other managed files with manual changes are preserved |
-| idempotency | same contract twice → `noop`; no file written |
-| unsafe paths | absolute paths, `..`, backslashes, surrounding spaces refused; the resolved path must stay inside the project |
-| traversal / symlinks | a symlinked project is refused; writing through a symlinked directory or file inside the project is refused |
-| no silent overwrite | a file this evolution does not need to change is never written; a differing file is a conflict, not a replacement |
+`journal.py` replaces the plain two-phase writer in every path that writes a project (`apply`, `adopt`):
 
-## 5. Verification and states
+| Step | What happens | What it guarantees |
+|---|---|---|
+| plan identity | the operation id is the sha256 of (paths, expected digests, new digests, kind, description) | the same plan has the same id; a retry after completion is a different, no-op plan |
+| `prepare` | preconditions (paths inside the project, no symlink on the way, every expected digest or absence) re-checked; new content and backups of existing files staged under `.fastapi-architect/ops/<id>/`; journal written with state `prepared` | nothing in the project changes; a failure here leaves no staging |
+| `publish` | journal → `publishing`; preconditions re-checked once more (a concurrent change aborts with nothing published); each file written to a temporary sibling and renamed into place (`os.replace`, atomic per file on POSIX, same filesystem); the journal records every landed path; → `published`; staging removed; journal deleted | an interruption leaves a journal that says exactly which files landed |
+| `recover` | files classified by current digest: `published`, `pending`, `conflict`; `rollback` restores the backups of published files and removes files the operation created; `forward` publishes the pending files from the staging copies; conflicts (edited after the crash) are never touched and keep the journal (`needs_attention`); progress is journaled, so an interrupted recovery resumes and a repeated recovery changes nothing | a crash after any number of files is recoverable without losing anyone else's changes |
 
-`apply` (and `plan` unless `--no-verify`) applies the plan to a **copy** of the project (`Workspace.create`) and:
+Limits, stated plainly: there is no global atomicity across files; a crash between two renames leaves a mixed
+tree until `recover` runs (a new `plan` refuses while a journal is pending); the staging directory must be on
+the same filesystem as the project for the renames to be atomic; nothing protects against a writer that ignores
+the journal. The tests inject failures before publication, after the n-th file, after the last file, before
+cleanup and during recovery.
 
-- audits the copy with the static engine and compares it by fingerprint with the audit of the project
-  (`compare_reports`): new high/critical findings reject the plan;
-- checks the route invariants: every route of the baseline keeps its method, path, effective paths and
-  authentication; added routes are listed;
-- checks that no file outside the plan changed in the copy;
-- runs the tests only with `--authorize-execution` and a trust profile the executor accepts; the operator's scope
-  covers the project and is moved to the copy for the run (`untrusted` fails closed; the local executor is process
-  hygiene, not a sandbox); the report is nonce-bound through the runner adapter.
+## 7. Verification and states
+
+`apply` (and `plan` unless `--no-verify`) applies the plan to a **copy** of the project and audits it against
+the project by fingerprint (new high/critical findings reject), checks that every existing route keeps its path
+and authentication, checks that nothing outside the plan changed, and runs the tests only under the trust model
+(the operator's scope covers the project and is moved to the copy; `untrusted` fails closed; the local executor
+is process hygiene, not a sandbox). Then, and only after `verified` or `audit_clean`, the project is written
+through the recoverable writer.
 
 | State | Meaning |
 |---|---|
 | `planned` | preview only (`--no-verify`) |
-| `noop` | already applied |
+| `noop` | already applied (generated) |
 | `blocked` | a precondition failed or a conflict exists; nothing was tried |
 | `verified` | copy audited, invariants hold, protected files untouched, tests executed and passed |
-| `audit_clean` | same without executed tests (no authorization): not `verified` |
-| `inconclusive` | tests could not run (denied, refused command, unverifiable runner); never treated as success |
-| `rejected` | new blocking findings, changed routes, files touched outside the plan, or failing tests |
+| `audit_clean` | same without executed tests: not `verified` |
+| `inconclusive` | tests could not run (denied, refused command, unverifiable runner); never success |
+| `rejected` | new blocking findings, changed routes, files touched outside the plan, failing tests, or a write that failed before anything landed |
+| `interrupted` | the publication to the project stopped after some files landed; the journal is pending, `recover` finishes or undoes it |
 
-`apply` writes the project only after `verified` or `audit_clean`; `--strict` demands `verified`. The report
-(`evolution_report/1.0`) carries the discovery model, the plan, the verification and what was written.
+## 8. Limits of this increment
 
-## 6. Limits of this increment
-
-- Only generated projects (with a manifest) can be evolved; hand-written projects are discovered and refused.
-- Only new modules are added: entities, fields, operations, persistence, security and style of existing modules
-  are not changed (a different definition of an existing module is refused).
-- Integration points are regenerated, not merged: a manual change on one of them must be moved into the contract
-  (or the file restored) before the evolution can proceed.
-- Migrations: one additive revision per evolution; no column changes, no data migrations, no merges of heads.
-- `verified` is as strong as the executed suite: the generated tests of the new module and the existing suite,
-  through the local executor's process hygiene.
+- Generated projects: new modules, new nullable or defaulted fields, new operations and dependencies on existing
+  modules; no removals, renames, type changes, new entities inside an existing module, or layout migrations.
+- Adopted projects: handlers that return a literal and optional fields on pydantic classes, inside adopted files
+  only; no changes to existing handlers, no generated modules, no persistence.
+- Migrations: one additive revision per evolution (tables, nullable or defaulted columns, nullable foreign keys);
+  expand/contract, column changes, data migrations and merges of heads are not supported.
+- `verified` is as strong as the executed suite, through the local executor's process hygiene.

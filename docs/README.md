@@ -23,7 +23,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | Document | Purpose |
 |---|---|
 | [`guides/generated-postgresql-projects.md`](guides/generated-postgresql-projects.md) | persistence, Alembic migrations, the generated test suite and the opt-in verification of a generated PostgreSQL backend against a throwaway cluster |
-| [`guides/evolving-generated-projects.md`](guides/evolving-generated-projects.md) | discover an existing project, write an evolution contract, preview the plan, approve and apply it with verification in a copy; what the engine protects |
+| [`guides/evolving-generated-projects.md`](guides/evolving-generated-projects.md) | discover an existing project, write an evolution contract, preview the plan, approve and apply it with verification in a copy; changing existing modules (1.1), adopting a hand-written project, recovering an interrupted write; what the engine protects |
 
 ## Release notes
 
@@ -49,6 +49,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | [`tests/fixtures/remediation19/README.md`](../tests/fixtures/remediation19/README.md) | the fixture that reproduces the three remediation recipes |
 | `tests/fixtures/design20/specs/` | architecture contracts that must validate (`valid/`) and must be rejected with the listed JSON paths (`invalid/`, `x-expect`) |
 | `tests/fixtures/regressions_v20/nested_routers/`, `route_composition/` | router dependencies propagated through `include_router` (negative control) and route paths composed through nested, multiply-mounted and dynamically-prefixed routers |
+| [`tests/fixtures/adoption20/handmade_shop/`](../tests/fixtures/adoption20/handmade_shop/README.md) | a hand-written FastAPI application (no src layout, module-level storage, idiosyncratic formatting) used to test adoption and anchored transforms |
 | [`tests/schemas/README.md`](../tests/schemas/README.md) | the vendored SARIF 2.1.0 schema |
 
 Guides for operators (installation, auditing a repository, remediating in an isolated copy) are in the root README and in `SKILL.md`; `guides/` holds the ones that outgrew them.
