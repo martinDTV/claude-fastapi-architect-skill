@@ -17,6 +17,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 | Document | Purpose |
 |---|---|
 | [`architecture/design-engine-v2.md`](architecture/design-engine-v2.md) | why the v2.0 design engine is a declarative contract, a conservative advisor, a pure blueprint and a guarded writer, and how it reuses the audit and remediation engines |
+| [`architecture/discovery-v2.1.md`](architecture/discovery-v2.1.md) | the v2.1.0 discovery: state of the five areas (phased migrations, evolution of existing code, isolated execution, compatibility, technical debt), ADRs, contracts that evolve, the increment plan, risks, the compatibility matrix, the acceptance criteria and the decisions taken on review |
 
 ## Guides
 
@@ -30,6 +31,7 @@ The repository root holds the entry point (`README.md`); everything else lives h
 
 | Version | Title |
 |---|---|
+| [v2.1 (in progress)](releases/RELEASE-NOTES-v2.1.md) | Safe Change at Scale: increment 0 (engineering foundations and technical debt) implemented; increments 1, 2 and 6 pending |
 | [v2.0](releases/RELEASE-NOTES-v2.0.md) | Architecture & Engineering Foundations (increments 1 to 5: design engine, PostgreSQL, evolution, adoption, identity and tenant isolation) |
 | [v2.0.0 acceptance report](releases/ACCEPTANCE-v2.0.0.md) | release-candidate audit of the whole v2.0.0 range: integrity, capability matrix, end-to-end cycle, architecture, security limits, compatibility, recovery, executed validations, defects fixed, residual risks, verdict |
 | [v1.9](releases/RELEASE-NOTES-v1.9.md) | Verified Remediation & Safe Refactoring |

@@ -145,6 +145,21 @@ assert '## 8. Identity, authorization and tenant isolation' in (base/'references
 assert (base/'references/design-contracts.md').is_file(), 'Missing references/design-contracts.md'
 assert (root/'docs/architecture/design-engine-v2.md').is_file(), 'Missing docs/architecture/design-engine-v2.md'
 assert 'architecture/design-engine-v2.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the architecture record'
+# v2.1 increment 0: shared infrastructure, blueprint package, lint configuration, durable journal, compatibility fixtures
+common=base/'scripts/fastapi_common'
+for mod in ('__init__.py','artefacts.py','fs.py','version.py'):
+    assert (common/mod).is_file(), f'Missing fastapi_common/{mod}'
+    compile((common/mod).read_text(encoding='utf-8'),str(common/mod),'exec')
+assert not (design/'blueprint.py').exists(), 'blueprint.py must not coexist with the blueprint package'
+ruff_cfg=(root/'ruff.toml')
+assert ruff_cfg.is_file() and 'target-version = "py39"' in ruff_cfg.read_text(encoding='utf-8'), 'Missing ruff.toml with the Python 3.9 target'
+gitignore=(root/'.gitignore').read_text(encoding='utf-8').splitlines()
+for name in ('.ruff_cache/','.pytest_cache/','.mypy_cache/','__pycache__/','.DS_Store'):
+    assert name in gitignore, f'.gitignore does not list {name}'
+for rel in ('tests/fixtures/compat/README.md','tests/fixtures/compat/generation-1.0/inventory-service/.fastapi-architect/generation.json','tests/fixtures/compat/generation-1.0/inventory-service.spec.json','tests/fixtures/compat/generation-1.1/inventory-service/.fastapi-architect/generation.json','tests/fixtures/compat/evolution-1.0.json','tests/fixtures/compat/evolution-1.1.json','tests/fixtures/compat/operation-1.0/project/a.txt','tests/fixtures/compat/adoption-1.0.json','tests/fixtures/compat/audit-report-1.7.json','tests/test_foundations_v21.py','tests/test_compat_artifacts.py','docs/architecture/discovery-v2.1.md','docs/releases/RELEASE-NOTES-v2.1.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+assert 'architecture/discovery-v2.1.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the v2.1 discovery record'
+assert 'releases/RELEASE-NOTES-v2.1.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the v2.1 release notes'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'
