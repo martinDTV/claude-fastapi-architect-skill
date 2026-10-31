@@ -1,4 +1,5 @@
 {
+  "concurrent_indexes": [],
   "files": {
     ".audit-fastapi.json": "cf20265bcfd25b9421cb451fe7c045c7f91c924e48866086a49fda9cb4753b56",
     ".env.example": "f443db984439b2e6a9d70207eb12781d897e5245f0d886eeb6b96b5fbde82490",
@@ -42,7 +43,8 @@
   ],
   "migrations": [],
   "package": "team_notes",
-  "schema": "fastapi-architect/generation/1.2",
+  "phased_changes": [],
+  "schema": "fastapi-architect/generation/1.3",
   "security": {
     "authentication": "oauth2_jwt",
     "authorization_declared": null,

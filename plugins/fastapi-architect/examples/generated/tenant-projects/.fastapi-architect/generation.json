@@ -1,4 +1,5 @@
 {
+  "concurrent_indexes": [],
   "files": {
     ".audit-fastapi.json": "db9e7c18d6d7cfbc6ecc9005b768c8c45d9d6814fa40535c28e14e09f667e0c5",
     ".env.example": "5866b97dc9efae0ab1fe233f496f9933e0e1079ccd65e93462330184518b86b2",
@@ -55,16 +56,20 @@
     {
       "down_revision": null,
       "file": "migrations/versions/2b11be23cf88_initial_schema.py",
+      "phase": "initial",
+      "reversible": true,
       "revision": "2b11be23cf88",
       "row_level_security": true,
       "tables": [
         "projects",
         "tasks"
-      ]
+      ],
+      "transactional": true
     }
   ],
   "package": "tenant_projects",
-  "schema": "fastapi-architect/generation/1.2",
+  "phased_changes": [],
+  "schema": "fastapi-architect/generation/1.3",
   "security": {
     "authentication": "api_key",
     "authorization_declared": null,

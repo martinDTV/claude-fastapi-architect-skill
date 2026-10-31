@@ -45,6 +45,20 @@ class Lineage:
 
 
 @dataclass
+class PhaseState:
+    """Phased changes of a project (v2.1, increment 2): what the manifest records and what the current plan adds.
+    Columns of ``pending`` changes stay nullable in the models and read schemas until their contract phase."""
+
+    pending: List[Dict[str, object]] = field(default_factory=list)  # expand declared, contract not yet
+    all_phased: List[Dict[str, object]] = field(default_factory=list)  # every phased change ever declared (the runner's definitions)
+    all_indexes: List[Dict[str, object]] = field(default_factory=list)  # concurrent indexes that exist or are created now
+    new_phased: List[Dict[str, object]] = field(default_factory=list)  # introduced by this plan (expand revision)
+    new_indexes: List[Dict[str, object]] = field(default_factory=list)  # created by this plan (index revision)
+    contracting: List[Dict[str, object]] = field(default_factory=list)  # contracted by this plan (contract revision)
+    head: Optional[str] = None  # the head the runner expects when no chain is appended (baseline rebuilds)
+
+
+@dataclass
 class Blueprint:
     style: str
     package: str
@@ -52,6 +66,8 @@ class Blueprint:
     layout: List[str] = field(default_factory=list)  # tree lines for the report
     notes: List[str] = field(default_factory=list)
     migrations: List[Dict[str, object]] = field(default_factory=list)  # [{revision, down_revision, file, tables}] in chain order
+    phased: List[Dict[str, object]] = field(default_factory=list)  # v2.1: phased changes (expand/backfill/contract) recorded in the manifest
+    indexes: List[Dict[str, object]] = field(default_factory=list)  # v2.1: concurrent indexes recorded in the manifest
 
     def to_dict(self) -> Dict[str, object]:
         return {"style": self.style, "package": self.package, "files": sorted(self.files), "layout": list(self.layout), "notes": list(self.notes)}

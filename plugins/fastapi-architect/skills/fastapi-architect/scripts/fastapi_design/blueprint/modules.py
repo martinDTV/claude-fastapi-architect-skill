@@ -30,7 +30,7 @@ def _ops(e: EntitySpec) -> Dict[str, bool]:
     return {"create": "create" in ops, "get": bool(ops & {"get", "update", "delete"}), "get_route": "get" in ops, "list": "list" in ops, "update": "update" in ops, "delete": "delete" in ops}
 
 
-def _schemas(spec: Spec, module: ModuleSpec) -> str:
+def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset()) -> str:
     tenant = _tenant(spec)
     all_fields = [f for e in module.entities for f in e.fields]
     lines = _header(
@@ -58,12 +58,12 @@ def _schemas(spec: Spec, module: ModuleSpec) -> str:
             for f in e.fields:
                 update_lines += _call(f"{f.name}: {_annotation(f, optional=True)} = Field(", ["default=None"] + ([_constraints(f)] if _constraints(f) else []), ")", "    ")
             lines += ["", f"class {e.name}Update(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *update_lines, ""]
-        read_lines = ["    id: UUID"] + ([f"    {tenant}: UUID"] if tenant else []) + (["    owner_id: str"] if e.owned else []) + [f"    {f.name}: {_annotation(f)}" for f in e.fields] + ["    created_at: datetime"]
+        read_lines = ["    id: UUID"] + ([f"    {tenant}: UUID"] if tenant else []) + (["    owner_id: str"] if e.owned else []) + [f"    {f.name}: {_annotation(f, optional=(e.plural, f.name) in pending)}" for f in e.fields] + ["    created_at: datetime"]
         lines += ["", f"class {e.name}Read(BaseModel):", "    model_config = ConfigDict(from_attributes=True)", *read_lines, ""]
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _models(spec: Spec, module: ModuleSpec, layout: Layout) -> str:
+def _models(spec: Spec, module: ModuleSpec, layout: Layout, pending: frozenset = frozenset(), indexed: frozenset = frozenset()) -> str:
     pg = spec.persistence["kind"] == "postgresql"
     tenant = _tenant(spec)
     all_fields = [f for e in module.entities for f in e.fields]
@@ -116,10 +116,11 @@ def _models(spec: Spec, module: ModuleSpec, layout: Layout) -> str:
         for f in e.fields:
             col = SA_TYPES[f.type]
             arg = f"String({f.max_length or 255})" if f.type == "str" else ("Numeric(18, 2)" if f.type == "decimal" else ("DateTime(timezone=True)" if f.type == "datetime" else col))
-            extras = ("" if f.required else ", nullable=True") + (", index=True" if f.references else "")
+            phased = (table, f.name) in pending  # expand applied, contract not yet: nullable until the backfill is complete
+            extras = ("" if f.required and not phased else ", nullable=True") + (", index=True" if f.references or (table, f.name) in indexed else "")
             if f.has_default:
                 extras += f", default={_py_default(f)}, server_default=text(\"{_sql_default(f)}\")"
-            body.append(f"    {f.name}: Mapped[{_annotation(f)}] = mapped_column({arg}{extras})")
+            body.append(f"    {f.name}: Mapped[{_annotation(f, optional=phased)}] = mapped_column({arg}{extras})")
         body.append("    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())")
         lines += ["", f"class {e.name}(Base):", *body, ""]
     return "\n".join(lines).rstrip("\n") + "\n"

@@ -32,8 +32,8 @@ from .blueprint import Blueprint
 from .spec import Spec
 
 MANIFEST = ".fastapi-architect/generation.json"
-MANIFEST_SCHEMA = "fastapi-architect/generation/1.2"  # 1.2 records the implemented security model (increment 5)
-MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2")
+MANIFEST_SCHEMA = "fastapi-architect/generation/1.3"  # 1.2 records the implemented security model (increment 5); 1.3 (v2.1) records phased changes and concurrent indexes
+MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2", "fastapi-architect/generation/1.3")
 
 
 class GenerationError(RuntimeError):
@@ -115,6 +115,8 @@ def build_manifest(spec: Spec, blueprint: Blueprint, tool_version: str, *, histo
         "package": blueprint.package,
         "files": {path: _sha(content) for path, content in sorted(blueprint.files.items())},
         "migrations": list(blueprint.migrations),
+        "phased_changes": list(blueprint.phased),  # 1.3: expand/backfill/contract operations and their declared state
+        "concurrent_indexes": list(blueprint.indexes),  # 1.3
         "security": security,
         "history": list(history) if history is not None else [{"operation": "generate", "spec_digest": spec.digest, "modules": [m.name for m in spec.modules]}],
     }

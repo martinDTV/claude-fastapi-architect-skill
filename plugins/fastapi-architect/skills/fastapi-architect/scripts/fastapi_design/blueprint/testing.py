@@ -6,7 +6,7 @@ import json
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..spec import EntitySpec, IntegrationSpec, ModuleSpec, Spec
-from ._base import ECHOED_TYPES, TENANT_A, TENANT_B, WRONG, Layout, Lineage
+from ._base import ECHOED_TYPES, TENANT_A, TENANT_B, WRONG, Layout, Lineage, PhaseState
 from ._helpers import (
     _allowed,
     _authz,
@@ -32,6 +32,7 @@ from ._helpers import (
 )
 from .modules import _ops
 from .persistence import added_columns, delta_revision, initial_revision
+from .phased import progress_table
 
 
 def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layout: Layout) -> str:
@@ -485,12 +486,17 @@ def _group(pairs: Sequence[Tuple[str, str]]) -> List[Tuple[str, List[Tuple[str, 
     return sorted(out.items())
 
 
-def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None) -> str:
+def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[PhaseState] = None) -> str:
     tenant = _tenant(spec)
     index = _entity_index(spec)
     has_delta = bool(lineage) and (any(e.plural not in set(lineage.tables) for _m, e in _ordered_entities(spec)) or bool(added_columns(spec, lineage)))
     revision = delta_revision(lineage, spec) if has_delta else (lineage.head if lineage else initial_revision(spec))
+    if phases is not None and phases.head:
+        revision = phases.head  # the chain may end with an index or contract revision (v2.1)
     tables = sorted(e.plural for _m, e in _ordered_entities(spec))
+    progress = progress_table(spec) if phases is not None and (phases.all_phased or phases.new_phased) else None
+    if progress:
+        tables = sorted(tables + [progress])
     fks = []
     for _m, e in _ordered_entities(spec):
         for f in _fk_fields(e):
@@ -537,7 +543,7 @@ def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None) -> str:
         "    def constraints(sync):",
         "        inspector = inspect(sync)",
         "        found = []",
-        "        for table in TABLES:",
+        (f"        for table in [t for t in TABLES if t != {json.dumps(progress)}]:" if progress else "        for table in TABLES:"),
         '            found += [(table, fk["name"]) for fk in inspector.get_foreign_keys(table)]',
     ]
     if tenant:

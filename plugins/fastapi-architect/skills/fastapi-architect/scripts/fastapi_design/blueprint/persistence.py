@@ -7,8 +7,9 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 from ..spec import FieldSpec, Spec
-from ._base import SA_TYPES, Layout, Lineage
+from ._base import SA_TYPES, Layout, Lineage, PhaseState
 from ._helpers import _call, _entity_index, _fk_fields, _fk_name, _ordered_entities, _rls, _sql_default, _tenant
+from .phased import pending_columns, progress_table, progress_table_ddl
 
 
 def _db(spec: Spec) -> str:
@@ -137,9 +138,11 @@ format = %(levelname)-5.5s [%(name)s] %(message)s
 """
 
 
-def _alembic_env(spec: Spec, layout: Layout) -> str:
+def _alembic_env(spec: Spec, layout: Layout, phases: Optional[PhaseState] = None) -> str:
     prefix = spec.package.upper()
     model_imports = sorted(f"from {layout.imp('models', m.name)} import Base as _base_{m.name}  # noqa: F401" for m in spec.modules)
+    if phases is not None and (phases.all_phased or phases.new_phased):
+        model_imports.append(f"from {spec.package}.ops.backfill import PROGRESS as _progress_table  # noqa: F401")
     if _rls(spec):
         url_doc = f"URL from {prefix}_MIGRATIONS_DATABASE_URL (the owner)"
         url_body = f'    owner = os.environ.get("{prefix}_MIGRATIONS_DATABASE_URL")\n    return owner or os.environ.get("{prefix}_DATABASE_URL") or config.get_main_option("sqlalchemy.url")'
@@ -261,9 +264,10 @@ def _fk_constraint(table: str, f: FieldSpec, referred: str, tenant: str, sa: str
     return lines
 
 
-def _column_sql(f: FieldSpec) -> str:
-    default = f', server_default=sa.text("{_sql_default(f)}")' if f.has_default else ""
-    return f'sa.Column("{f.name}", {_sa_type(f)}{default}, nullable={not f.required})'
+def _column_sql(f: FieldSpec, nullable: Optional[bool] = None) -> str:
+    """``nullable`` overrides the field's requirement: a phased column is added nullable and without a default."""
+    default = f', server_default=sa.text("{_sql_default(f)}")' if f.has_default and nullable is None else ""
+    return f'sa.Column("{f.name}", {_sa_type(f)}{default}, nullable={(not f.required) if nullable is None else nullable})'
 
 
 def _baseline_columns(lineage: Optional[Lineage]) -> Dict[str, List[str]]:
@@ -293,7 +297,7 @@ def added_columns(spec: Spec, lineage: Optional[Lineage]) -> List[Tuple[str, Fie
     return out
 
 
-def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
+def _migration(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[PhaseState] = None) -> str:
     """The initial migration (every table), or, with a lineage, the additive migration: the tables the existing
     chain does not create yet plus the columns added to existing tables (``down_revision`` = current head;
     existing files are never touched). Columns added to existing tables are nullable or carry a server default,
@@ -348,8 +352,9 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
             drop.insert(0, f'    op.drop_index("ix_{table}_{tenant}", table_name="{table}")')
         down = drop + down
     columns = added_columns(spec, lineage)
+    phased_now = pending_columns(phases.new_phased) if phases is not None else frozenset()
     for table, f, referred in columns:
-        up.append(f"    op.add_column({json.dumps(table)}, {_column_sql(f)})")
+        up.append(f"    op.add_column({json.dumps(table)}, {_column_sql(f, True if (table, f.name) in phased_now else None)})")
         if referred:
             cols = [tenant, f.name] if tenant else [f.name]
             refs = [f"{tenant}" if c == tenant else "id" for c in cols]
@@ -362,8 +367,15 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
             down.insert(0, f'    op.drop_index("ix_{table}_{f.name}", table_name="{table}")')
         else:
             down.insert(0, f'    op.drop_column("{table}", "{f.name}")')
+    progress = progress_table(spec)
+    if phased_now and lineage is not None and progress not in set(lineage.tables):
+        up += progress_table_ddl(spec)
+        down.insert(0, f'    op.drop_table("{progress}")')
     changes = new_tables + [f"{t}.{f.name}" for t, f, _r in columns]
-    title = f"Initial schema of {spec.name}" if not lineage else f"Add {', '.join(changes)} to {spec.name}"
+    expand_title = f"Expand {', '.join(changes)} in phases"
+    if len(expand_title) > 60:
+        expand_title = f"Expand {len(changes)} column(s) in phases"
+    title = f"Initial schema of {spec.name}" if not lineage else (expand_title if phased_now else f"Add {', '.join(changes)} to {spec.name}")
     imports = ["import sqlalchemy as sa", "from alembic import op"]
     helpers: List[str] = []
     if rls:
@@ -408,7 +420,7 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
             '    op.execute(f"CREATE POLICY {table}_tenant_isolation ON {table} USING ({predicate}) WITH CHECK ({predicate})")',
         ]
     lines = [
-        f'"""{title}: generated from the architecture contract (digest {spec.digest[:12]}).',
+        *([f'"""{title}.', '', f'Generated from the architecture contract (digest {spec.digest[:12]}).'] if phased_now else [f'"""{title}: generated from the architecture contract (digest {spec.digest[:12]}).']),
         "",
         f"Revision ID: {revision}",
         f"Revises: {lineage.head if lineage else 'none (initial)'}",
@@ -434,10 +446,11 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def migration_file(spec: Spec, lineage: Optional[Lineage] = None) -> str:
+def migration_file(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[PhaseState] = None) -> str:
     if lineage is None:
         return f"migrations/versions/{initial_revision(spec)}_initial_schema.py"
     new_tables = [e.plural for _m, e in _ordered_entities(spec) if e.plural not in set(lineage.tables)]
     changes = new_tables + [f"{t}_{f.name}" for t, f, _r in added_columns(spec, lineage)]
-    slug = "add_" + "_".join(changes) if changes else "noop"
+    verb = "expand_" if (phases is not None and phases.new_phased) else "add_"
+    slug = verb + "_".join(changes) if changes else "noop"
     return f"migrations/versions/{delta_revision(lineage, spec)}_{slug[:60]}.py"

@@ -1,4 +1,5 @@
 {
+  "concurrent_indexes": [],
   "files": {
     ".audit-fastapi.json": "a04aa89d72d413184f1bc852847b6799060ac906288e8bf999a15cefde024b88",
     ".env.example": "0de5c729f2dcae100f551065219d373e71a5f5f35db9b3107c976d07d1243afc",
@@ -39,7 +40,8 @@
   ],
   "migrations": [],
   "package": "inventory_service",
-  "schema": "fastapi-architect/generation/1.2",
+  "phased_changes": [],
+  "schema": "fastapi-architect/generation/1.3",
   "security": {
     "authentication": "api_key",
     "authorization_declared": null,
