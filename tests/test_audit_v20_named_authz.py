@@ -75,6 +75,25 @@ class NamedAuthorizationTests(unittest.TestCase):
         self.assertIn("denial on HTTPException(403)", self.routes["patch_guard"]["authorization_evidence"][-1])
         self.assertIn("gate -> gate_outcome: line ", self.routes["patch_gate"]["authorization_evidence"][-1])  # the decision one call away
 
+    def test_decorators_and_policy_calls_follow_the_same_rule(self) -> None:
+        """v2.0 acceptance: `decorator` and `authorization_call` are kinds only with evidence (a framework decorator known by
+        its import origin, or project code that shows the decision); a policy-like name alone is named-only."""
+        known, fake, external = self.routes["patch_decorated_known"], self.routes["patch_decorated_fake"], self.routes["patch_decorated_external"]
+        self.assertIn("decorator", known["authorization"])
+        self.assertIn("starlette.authentication.requires", known["authorization_evidence"][-1])
+        self.assertEqual(fake["authorization"], [])
+        self.assertTrue(fake["authorization_named_only"] and "require_role" in fake["authorization_named_only"][0] and "no decision is visible" in fake["authorization_named_only"][0], fake["authorization_named_only"])
+        self.assertEqual(external["authorization"], [])
+        self.assertTrue(any("require_scope_decorator" in n and "not in the project" in n for n in external["authorization_named_only"]), external["authorization_named_only"])
+        call, fake_call = self.routes["patch_policy_call"], self.routes["patch_policy_call_fake"]
+        self.assertIn("authorization_call", call["authorization"])
+        self.assertTrue(any("authorize_user" in e and "line " in e for e in call["authorization_evidence"]), call["authorization_evidence"])
+        self.assertNotIn("authorization_call", fake_call["authorization"])
+        self.assertEqual(fake_call["evidence"], "unknown")
+        flagged = {f["line"] for f in self.findings if f["rule"] == "CONTRACT_MUTATION_AUTHZ_REQUIRED"}
+        self.assertTrue({fake["line"], external["line"], fake_call["line"]} <= flagged)
+        self.assertFalse({known["line"], call["line"]} & flagged)
+
     def test_router_level_dependencies_follow_the_same_rule(self) -> None:
         ops, named = self.routes["ops_patch"], self.routes["named_patch"]
         self.assertEqual(sorted(ops["authorization"]), ["role", "router_dependencies"])
@@ -85,7 +104,7 @@ class NamedAuthorizationTests(unittest.TestCase):
 
     def test_the_declared_contract_catches_every_named_only_mutation_and_no_verified_one(self) -> None:
         flagged = sorted(f["line"] for f in self.findings if f["rule"] == "CONTRACT_MUTATION_AUTHZ_REQUIRED")
-        expected = sorted(self.routes[name]["line"] for name in list(self.NEGATIVE) + ["named_patch"])
+        expected = sorted(self.routes[name]["line"] for name in list(self.NEGATIVE) + ["named_patch", "patch_decorated_fake", "patch_decorated_external", "patch_policy_call_fake"])
         self.assertEqual(flagged, expected)
         for f in self.findings:
             if f["rule"] == "CONTRACT_MUTATION_AUTHZ_REQUIRED":
@@ -94,7 +113,7 @@ class NamedAuthorizationTests(unittest.TestCase):
 
     def test_the_resource_question_is_asked_where_a_principal_exists(self) -> None:
         asked = sorted(f["line"] for f in self.findings if f["rule"] == "SEC_RESOURCE_AUTHZ_UNVERIFIED")
-        with_principal = [name for name in list(self.NEGATIVE) + ["named_patch"] if self.routes[name]["principal_kind"] != "none"]
+        with_principal = [name for name in list(self.NEGATIVE) + ["named_patch", "patch_decorated_fake", "patch_decorated_external", "patch_policy_call_fake"] if self.routes[name]["principal_kind"] != "none"]
         self.assertEqual(asked, sorted(self.routes[name]["line"] for name in with_principal))
         # `_: None = Depends(require_admin_none)`: a shared-credential check with no principal to bind (v1.8 rule), still a
         # declared-contract violation, never "authorization visible"
@@ -111,8 +130,8 @@ class NamedAuthorizationTests(unittest.TestCase):
 
     def test_summary_counts_the_uncertainty(self) -> None:
         summary = self.report["contracts"]["summary"]
-        self.assertEqual(summary["authorization_unknown"], len(self.NEGATIVE) + 1)
-        self.assertEqual(summary["authorization_visible"], len(self.POSITIVE) + 1)
+        self.assertEqual(summary["authorization_unknown"], len(self.NEGATIVE) + 1 + 3)  # + named router, fake decorator, external decorator, fake policy call
+        self.assertEqual(summary["authorization_visible"], len(self.POSITIVE) + 1 + 2)  # + ops router, known decorator, real policy call
         self.assertEqual(summary["unauthenticated_not_public"], 0)
         self.assertNotIn("named_only", self.report["contracts"]["authorization_kinds"])  # never aggregated as a kind
 

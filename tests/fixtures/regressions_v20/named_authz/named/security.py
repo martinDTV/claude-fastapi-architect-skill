@@ -106,6 +106,26 @@ def user_is_allowed(user: User) -> bool:
     return bool(set(user.scopes) & {"items:write"})
 
 
+def require_role(role: str):
+    """A decorator named like a policy that decorates nothing: the handler runs unchanged."""
+
+    def decorate(handler):
+        return handler
+
+    return decorate
+
+
+def authorize_user(user: User, item_id) -> None:
+    """A policy call that decides: the resource must belong to the caller's scope."""
+    if "items:write" not in user.scopes:
+        raise HTTPException(403)
+
+
+def check_access(user: User) -> bool:
+    """Named like a policy call, decides nothing."""
+    return True
+
+
 async def gate(user: User = Depends(get_current_user)) -> User:
     """Delegates the whole decision: nothing in this body raises or reads a privilege; the callee does."""
     return gate_outcome(user)

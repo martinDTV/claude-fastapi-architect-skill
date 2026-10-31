@@ -3,13 +3,19 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
+from starlette.authentication import requires
 
 from external_identity import current_superuser  # not part of this project: nothing about it can be verified
+from external_policy import require_scope_decorator  # a decorator from outside the project
 from named import service
 from named.security import (
     RoleChecker,
     User,
+    authorize_user,
+    check_access,
     gate,
+    get_current_user,
+    require_role,
     get_admin_ctx,
     get_ctx,
     guard,
@@ -95,6 +101,36 @@ async def patch_guard(item_id: UUID, payload: dict, user: User = Depends(guard))
 
 @router.patch("/{item_id}/gate")
 async def patch_gate(item_id: UUID, payload: dict, user: User = Depends(gate)) -> dict:
+    return await service.update(item_id, payload)
+
+
+@router.patch("/{item_id}/decorated-known")
+@requires("admin")
+async def patch_decorated_known(item_id: UUID, payload: dict, user: User = Depends(get_current_user)) -> dict:
+    return await service.update(item_id, payload)
+
+
+@router.patch("/{item_id}/decorated-fake")
+@require_role("admin")
+async def patch_decorated_fake(item_id: UUID, payload: dict, user: User = Depends(get_current_user)) -> dict:
+    return await service.update(item_id, payload)
+
+
+@router.patch("/{item_id}/decorated-external")
+@require_scope_decorator("items:write")
+async def patch_decorated_external(item_id: UUID, payload: dict, user: User = Depends(get_current_user)) -> dict:
+    return await service.update(item_id, payload)
+
+
+@router.patch("/{item_id}/policy-call")
+async def patch_policy_call(item_id: UUID, payload: dict, user: User = Depends(get_current_user)) -> dict:
+    authorize_user(user, item_id)
+    return await service.update(item_id, payload)
+
+
+@router.patch("/{item_id}/policy-call-fake")
+async def patch_policy_call_fake(item_id: UUID, payload: dict, user: User = Depends(get_current_user)) -> dict:
+    check_access(user)
     return await service.update(item_id, payload)
 
 

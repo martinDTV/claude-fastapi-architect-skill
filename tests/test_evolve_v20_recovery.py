@@ -67,6 +67,43 @@ class JournalCase(unittest.TestCase):
 
 
 class RecoverableWriterTests(JournalCase):
+    def test_a_corrupt_or_incomplete_journal_blocks_plans_and_is_reported_untouched(self) -> None:
+        """v2.0 acceptance: an operation directory whose journal is missing, truncated or of another schema is never
+        ignored (an interrupted write may hide behind it): plans are blocked, `recover` reports it as needs_attention
+        with the staged files kept, and nothing on disk changes."""
+        import subprocess
+
+        from fastapi_design import evolution
+
+        ops = self.project / journal.OPS_DIR
+        for op_id, body in (("deadbeef00000001", "{truncated"), ("deadbeef00000002", json.dumps({"schema": "somebody-else/1.0", "op_id": "x"})), ("deadbeef00000003", None)):
+            (ops / op_id / "new" / "src").mkdir(parents=True)
+            (ops / op_id / "new" / "src" / "staged.py").write_text("x = 1\n", encoding="utf-8")
+            if body is not None:
+                (ops / op_id / journal.JOURNAL).write_text(body, encoding="utf-8")
+        found = journal.unreadable_operations(self.project)
+        self.assertEqual([u["op_id"] for u in found], ["deadbeef00000001", "deadbeef00000002", "deadbeef00000003"])
+        self.assertEqual([u["reason"].split(" (")[0] for u in found], ["journal.json is unreadable", "journal.json has schema 'somebody-else/1.0' or no op_id", "journal.json is missing"])
+        self.assertEqual({u["staged_files"] for u in found}, {"1"})
+        self.assertEqual(journal.pending_operations(self.project), [])  # the readable set is empty: this is exactly the gap
+        contract = self.tmp / "evolve.json"
+        contract.write_text(json.dumps({"schema": evolution.EVOLUTION_SCHEMA, "project": {"path": str(self.project)}, "add_modules": [{"name": "suppliers", "entities": [{"name": "Supplier", "fields": [{"name": "name", "type": "str", "max_length": 80}]}]}]}), encoding="utf-8")
+        plan = evolution.plan_evolution(evolution.load_evolution(str(contract)))
+        self.assertEqual(plan.state, "blocked")
+        self.assertTrue(any("no_unreadable_operation" in b and "deadbeef00000001" in b for b in plan.blockers), plan.blockers)
+        cli = REPO_ROOT / "scripts" / "evolve_fastapi.py"
+        proc = subprocess.run([sys.executable, str(cli), "recover", str(self.project)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("needs_attention", proc.stdout)
+        self.assertIn("inspect by hand, nothing was touched", proc.stdout)
+        self.assert_original()  # project files untouched
+        for op_id in ("deadbeef00000001", "deadbeef00000002", "deadbeef00000003"):
+            self.assertTrue((ops / op_id / "new" / "src" / "staged.py").is_file())  # staged content kept for inspection
+        proc = subprocess.run([sys.executable, str(cli), "recover", str(self.project), "--format", "json"], capture_output=True, text=True)
+        payload = json.loads(proc.stdout)
+        self.assertEqual([u["op_id"] for u in payload["unreadable"]], ["deadbeef00000001", "deadbeef00000002", "deadbeef00000003"])
+        self.assertEqual(payload["recovered"], [])
+
     def test_prepare_publishes_nothing_and_stages_everything(self) -> None:
         op = journal.prepare(self.project, self.files, self.expected, kind="test", description="stage only")
         self.assertEqual(op.state, "prepared")
