@@ -8,18 +8,23 @@ contains the project) and **under which trust profile**:
 * ``trusted``: a project the operator declares trustworthy (the declaration is recorded as such; it is a
   statement by the operator, not a technical guarantee, and the report says so);
 * ``untrusted`` (default): no local execution. The run fails closed unless an executor whose
-  ``isolation_level`` is ``isolated`` is registered. None ships in this increment, so untrusted projects get
-  ``audit_clean`` at best with ``reason_code: executor_unavailable``.
+  ``isolation_level`` is ``isolated`` is selected: since v2.1 that is the ``container`` executor
+  (``fastapi_audit.remediate.containers``, Docker as the first runtime); with the local executor untrusted
+  projects get ``audit_clean`` at best with ``reason_code: executor_unavailable``. There is never a fallback from
+  one executor to another.
 
-``Executor`` is the seam for an isolated runner (container, microVM): it declares its isolation level, its
-guarantees and what it does not provide, decides which trust profiles it accepts, and runs a command in a
-workspace. ``LocalProcessExecutor`` is the only implementation: process hygiene (fresh HOME, reduced
+``Executor`` is the seam: it declares its isolation level, its guarantees and what it does not provide, decides
+which trust profiles it accepts, may name where its workspaces must live (``workspace_dir``) and releases what it
+prepared for a workspace (``release``), and runs a command in a workspace returning a ``TestRun`` whose
+``environment`` records what was in force. ``LocalProcessExecutor`` is process hygiene (fresh HOME, reduced
 environment, no shell, allow-listed programs, closed stdin, timeout, CPU/file-size limits), explicitly **not**
 a sandbox: no network isolation, no filesystem confinement, no memory limit.
 """
 
 from __future__ import annotations
 
+import platform
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -85,6 +90,15 @@ class Executor:
     def run(self, command: str, workspace: Workspace, policy: ExecutionPolicy) -> TestRun:  # pragma: no cover - interface
         raise NotImplementedError
 
+    def workspace_dir(self) -> Optional[str]:
+        """A fresh directory the workspace copy must be created in, or None for a temporary one (v2.1: an executor
+        whose runtime runs in a VM needs the copy under a shared path)."""
+        return None
+
+    def release(self, workspace: Workspace) -> None:
+        """Drop what the executor prepared for this workspace (v2.1: a container executor's environment volume)."""
+        return None
+
     def to_dict(self) -> Dict[str, object]:
         return {"name": self.name, "isolation_level": self.isolation_level, "guarantees": list(self.guarantees), "not_provided": list(self.not_provided)}
 
@@ -111,7 +125,7 @@ class LocalProcessExecutor(Executor):
             return None
         return (
             "the local executor provides process hygiene, not isolation; an untrusted project needs an executor "
-            "with isolation_level 'isolated' (none is registered in this version). Declare --trust trusted only "
+            "with isolation_level 'isolated' (--executor container, v2.1). Declare --trust trusted only "
             "for code you would run on this machine anyway."
         )
 
@@ -139,10 +153,11 @@ class LocalProcessExecutor(Executor):
         result.outcome = assess(result, evidence)
         result.passed = result.outcome == "passed"
         result.executor = self.name
+        result.environment = {"executor": self.name, "isolation_level": self.isolation_level, "host": {"python": sys.version.split()[0], "platform": platform.platform()}, "limitations": list(self.not_provided)}
         return result
 
 
-REGISTRY: Dict[str, Executor] = {LocalProcessExecutor.name: LocalProcessExecutor()}
+REGISTRY: Dict[str, Executor] = {LocalProcessExecutor.name: LocalProcessExecutor()}  # the container executor registers itself from the package __init__
 
 
 def select_executor(authorization: Authorization, project_root: str, name: str = LocalProcessExecutor.name) -> Tuple[Optional[Executor], Optional[str], str]:

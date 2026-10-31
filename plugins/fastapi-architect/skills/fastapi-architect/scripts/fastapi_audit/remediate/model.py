@@ -153,6 +153,7 @@ class TestRun:
     executor: Optional[str] = None
     instrumented_command: Optional[List[str]] = None
     evidence: Dict[str, object] = field(default_factory=dict)  # runners.Evidence.to_dict()
+    environment: Dict[str, object] = field(default_factory=dict)  # v2.1: executor, runtime, image, effective restrictions, phases, cleanup (additive)
 
     @property
     def verifiable(self) -> bool:
@@ -177,6 +178,7 @@ class TestRun:
             "counts": dict(self.counts),
             "text_counts": dict(self.text_counts),
             "evidence": dict(self.evidence),
+            "environment": dict(self.environment),
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
         }

@@ -87,7 +87,9 @@ class RunnerAdapter:
     def matches(self, argv: Sequence[str]) -> bool:  # pragma: no cover - interface
         return False
 
-    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str) -> Tuple[List[str], Path]:  # pragma: no cover - interface
+    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str, *, mount_point: Optional[Path] = None) -> Tuple[List[str], Path]:  # pragma: no cover - interface
+        """``(instrumented argv, report path on the host)``. ``mount_point`` (v2.1): the path at which the command
+        sees ``evidence_dir`` when it runs elsewhere (a container); the report is still read from the host path."""
         raise NotImplementedError
 
     def collect(self, report: Path, nonce: str, started_at: float) -> Evidence:  # pragma: no cover - interface
@@ -117,9 +119,10 @@ class PytestJUnitAdapter(RunnerAdapter):
         tokens = list(argv)
         return any(os.path.basename(t) == "pytest" for t in tokens) or any(tokens[i] == "-m" and tokens[i + 1] == "pytest" for i in range(len(tokens) - 1))
 
-    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str) -> Tuple[List[str], Path]:
+    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str, *, mount_point: Optional[Path] = None) -> Tuple[List[str], Path]:
         report = evidence_dir / f"pytest-{nonce}.xml"
-        return [*argv, f"--junit-xml={report}", "-o", "junit_family=xunit2", "-o", f"junit_suite_name={nonce}"], report
+        seen = (mount_point / report.name).as_posix() if mount_point is not None else str(report)
+        return [*argv, f"--junit-xml={seen}", "-o", "junit_family=xunit2", "-o", f"junit_suite_name={nonce}"], report
 
     def collect(self, report: Path, nonce: str, started_at: float) -> Evidence:
         evidence = Evidence(adapter=self.name)
@@ -178,14 +181,16 @@ class UnittestJsonAdapter(RunnerAdapter):
         tokens = list(argv)
         return any(tokens[i] == "-m" and tokens[i + 1] == "unittest" for i in range(len(tokens) - 1))
 
-    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str) -> Tuple[List[str], Path]:
+    def instrument(self, argv: Sequence[str], evidence_dir: Path, nonce: str, *, mount_point: Optional[Path] = None) -> Tuple[List[str], Path]:
         tokens = list(argv)
         index = next(i for i in range(len(tokens) - 1) if tokens[i] == "-m" and tokens[i + 1] == "unittest")
         runner = evidence_dir / "fa_unittest_runner.py"
         if not runner.exists():
             shutil.copyfile(self.script, runner)
         report = evidence_dir / f"unittest-{nonce}.json"
-        return [*tokens[:index], str(runner), "--output", str(report), "--nonce", nonce, *tokens[index + 2:]], report
+        seen_runner = (mount_point / runner.name).as_posix() if mount_point is not None else str(runner)
+        seen_report = (mount_point / report.name).as_posix() if mount_point is not None else str(report)
+        return [*tokens[:index], seen_runner, "--output", seen_report, "--nonce", nonce, *tokens[index + 2:]], report
 
     def collect(self, report: Path, nonce: str, started_at: float) -> Evidence:
         evidence = Evidence(adapter=self.name)

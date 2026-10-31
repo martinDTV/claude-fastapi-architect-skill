@@ -84,7 +84,7 @@ from .model import (
 )
 from .patches import RECIPE_META, Blocked, apply_edits, propose, recipe_for
 
-RUN_SCHEMA = "remediation_run/1.2"
+RUN_SCHEMA = "remediation_run/1.3"  # 1.3 (v2.1): every test run carries an `environment` record (additive)
 OUTCOME_TO_INCONCLUSIVE = {
     OUTCOME_SKIPPED_ONLY: (RC_TESTS_SKIPPED, "the linked tests were skipped"),
     OUTCOME_NO_TESTS: (RC_NO_TESTS, "no linked test was executed (empty collection)"),
@@ -197,7 +197,7 @@ def _flips(before: TestRun, after: TestRun) -> Tuple[List[str], List[str]]:
 
 def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, options: RunOptions, audit_options: AuditOptions, executor: Optional[Executor], denial: Optional[str], denial_code: str, all_cases: Optional[List[RemediationCase]] = None) -> None:
     all_cases = all_cases or [case]
-    workspace = Workspace.create(root, None if not options.workspace_dir else str(Path(options.workspace_dir) / case.fingerprint))
+    workspace = Workspace.create(root, str(Path(options.workspace_dir) / case.fingerprint) if options.workspace_dir else (executor.workspace_dir() if executor is not None else None))
     try:
         if options.keep_workspace:
             case.workspace_path = str(workspace.root)
@@ -296,6 +296,8 @@ def _run_case(case: RemediationCase, finding: Dict[str, object], root: str, opti
             code, text = OUTCOME_TO_INCONCLUSIVE.get(case.linked_after.outcome, (RC_INFRASTRUCTURE_ERROR, "the after-run produced no verdict"))
             case.transition(STATE_INCONCLUSIVE, f"after the patch: {text}", code)
     finally:
+        if executor is not None:
+            executor.release(workspace)
         if not options.keep_workspace:
             workspace.cleanup()
 
@@ -322,7 +324,7 @@ def _combined(cases: List[RemediationCase], root: str, options: RunOptions, audi
     }
     if not candidates:
         return result
-    workspace = Workspace.create(root, None if not options.workspace_dir else str(Path(options.workspace_dir) / "combined"))
+    workspace = Workspace.create(root, str(Path(options.workspace_dir) / "combined") if options.workspace_dir else (executor.workspace_dir() if executor is not None else None))
     try:
         baseline = audit_project(str(workspace.project), options=audit_options)
         if executor is not None and options.policy.command:
@@ -378,6 +380,8 @@ def _combined(cases: List[RemediationCase], root: str, options: RunOptions, audi
         if options.keep_workspace:
             result["workspace"] = str(workspace.root)
     finally:
+        if executor is not None:
+            executor.release(workspace)
         if not options.keep_workspace:
             workspace.cleanup()
     return result

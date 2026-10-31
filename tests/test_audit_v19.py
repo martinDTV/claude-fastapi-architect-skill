@@ -807,12 +807,14 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(select_executor(Authorization(execution=True, trust="trusted"), root)[2], "scope_mismatch")
         self.assertEqual(select_executor(Authorization(execution=True, trust="trusted", scope=str(FIXTURE / "shop")), root)[2], "scope_mismatch")
         self.assertEqual(select_executor(Authorization(execution=True, trust="weird", scope=root), root)[2], "executor_unavailable")
-        self.assertEqual(select_executor(Authorization(execution=True, trust="trusted", scope=root), root, name="container")[2], "executor_unavailable")
+        self.assertEqual(select_executor(Authorization(execution=True, trust="trusted", scope=root), root, name="microvm")[2], "executor_unavailable")
+        container, denial, code = select_executor(Authorization(execution=True, trust="untrusted", scope=root), root, name="container")  # v2.1: the isolated executor accepts untrusted
+        self.assertEqual((container.name, container.isolation_level, code), ("container", "isolated", ""), denial)
         for trust in ("fixture", "trusted"):
             executor, denial, code = select_executor(Authorization(execution=True, trust=trust, scope=str(FIXTURES)), root)
             self.assertIsNotNone(executor, denial)
             self.assertEqual((executor.name, executor.isolation_level, code), ("local", "process_hygiene", ""))
-        self.assertEqual(set(REGISTRY), {"local"})
+        self.assertEqual(set(REGISTRY), {"local", "container"})
         self.assertFalse(Authorization(execution=True, trust="trusted", scope=root).to_dict()["technical_guarantee"])
         self.assertTrue(LocalProcessExecutor.not_provided)
 
@@ -951,7 +953,7 @@ class CliTests(ProjectCase):
         proc = self.cli(".", "--format", "json", "--output", "run.json", "--patch-dir", "patches", script=REMEDIATE_SHIM)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         run = json.loads(proc.stdout)
-        self.assertEqual(run["schema"], "remediation_run/1.2")
+        self.assertEqual(run["schema"], "remediation_run/1.3")
         self.assertEqual(run["summary"]["by_state"], {"audit_clean": 3})
         self.assertEqual(json.loads((self.root / "run.json").read_text()), run)
         self.assertEqual(len(list((self.root / "patches").glob("*.diff"))), 3)
