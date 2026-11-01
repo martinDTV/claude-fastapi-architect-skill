@@ -33,17 +33,21 @@ import json
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..spec import Spec
-from ._helpers import _ordered_entities
+from ._helpers import _ordered_entities, _sql_default, field_from_doc
 
 BACKFILL_STRATEGIES = ("constant", "copy_column", "uuid", "now")  # declared by hand in a contract
 MIRROR_STRATEGY = "mirror_column"  # the backfill of a rename: never declared by hand, derived from rename_fields
 RENAME_STRATEGIES = ("expand_contract",)
 KIND_ADD, KIND_RENAME = "add", "rename"
-EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.1"  # 1.1 (v2.2): rename operations carry mismatch_rows, columns_agree and the sync trigger state
-EVIDENCE_SCHEMAS = ("fastapi-architect/migration-evidence/1.0", EVIDENCE_SCHEMA)
+EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.2"  # 1.2 (v2.2 inc. 2): the sync truth marker, the old column's state, catalog dependents, sessions  # 1.1: mismatch_rows, columns_agree, sync state
+EVIDENCE_SCHEMAS = ("fastapi-architect/migration-evidence/1.0", "fastapi-architect/migration-evidence/1.1", EVIDENCE_SCHEMA)
 PHASE_EXPAND = "expand"
 PHASE_INDEX = "index"
+PHASE_RETIRE = "retire"  # v2.2 inc. 2: the truth of a rename moves to the new column; code state C; nothing dropped
 PHASE_CONTRACT = "contract"
+STATE_TRANSITION_OF = {PHASE_EXPAND: "B", PHASE_RETIRE: "C"}  # the application state a rename's declared state generates
+SYNC_COMMENT_PREFIX = "fastapi-architect sync"  # the function comment: `fastapi-architect sync op=<id> truth=<column>[ retired_at=<iso>]`
+TOOL_SESSION_SUFFIX = ".ops.backfill"  # application_name of the runner's own connections
 
 
 def progress_table(spec: Spec) -> str:
@@ -75,6 +79,31 @@ def contract_revision(head: str, operations: Sequence[str]) -> str:
     return hashlib.sha1(f"contract|{head}|{','.join(sorted(operations))}".encode("utf-8")).hexdigest()[:12]
 
 
+def retire_revision(head: str, operations: Sequence[str]) -> str:
+    return hashlib.sha1(f"retire|{head}|{','.join(sorted(operations))}".encode("utf-8")).hexdigest()[:12]
+
+
+def drop_revision(head: str, operations: Sequence[str]) -> str:
+    return hashlib.sha1(f"drop|{head}|{','.join(sorted(operations))}".encode("utf-8")).hexdigest()[:12]
+
+
+def application_tag(spec: Spec, phased: Sequence[Dict[str, object]]) -> str:
+    """``<package>@<12 hex>``: the name every connection of a generated application announces to PostgreSQL
+    (``application_name``). It identifies a *phased generation*: the declared state of every phased change, so two
+    builds that map the columns differently (B and C of a rename) carry different tags, and an evolution that touches
+    no phased state leaves the tag, and ``core/db.py``, alone. The migration
+    evidence lists the tags connected to the database; the destructive contract of a rename refuses while a session
+    of a generation that still maps the old column, or an unidentified one, is connected."""
+    states = sorted((str(p.get("op_id")), str(p.get("state_declared"))) for p in phased)
+    payload = json.dumps({"package": spec.package, "phased": states}, sort_keys=True, separators=(",", ":"))
+    return f"{spec.package}@{hashlib.sha1(payload.encode('utf-8')).hexdigest()[:12]}"
+
+
+def sync_comment(op_id: str, truth: str, retired_at: Optional[str] = None) -> str:
+    """The comment the sync function carries: which column is the truth, and since when the rename is retired."""
+    return f"{SYNC_COMMENT_PREFIX} op={op_id} truth={truth}" + (f" retired_at={retired_at}" if retired_at else "")
+
+
 def pending_columns(pending: Sequence[Dict[str, object]]) -> frozenset:
     return frozenset((str(c["table"]), str(c["column"])) for c in pending)
 
@@ -90,23 +119,38 @@ def sync_names(table: str, op_id: str) -> Tuple[str, str]:
     return f"trg_{stem}_sync", f"fn_{stem}_sync"
 
 
-def rename_sync_ddl(table: str, old: str, new: str, op_id: str) -> Tuple[List[str], List[str]]:
-    """``op.execute`` lines that create (up) and drop (down) the sync trigger of a rename in transition.
-
-    A BEFORE INSERT OR UPDATE row trigger: whichever column a writer touched, the other follows inside the same
-    statement and transaction; the old column wins when a single statement sets both to different values (it is the
-    source of truth until the rename is retired). It only assigns to NEW, so it never issues another statement and
-    cannot recurse; it runs with the privileges of the writer (SECURITY INVOKER) and leaves row-level security to
-    the table's policies, which still check the final row."""
-    trigger, function = sync_names(table, op_id)
-    body = [
+def sync_function_sql(table: str, old: str, new: str, op_id: str, *, truth: str, has_default: bool) -> List[str]:
+    """The body of the sync function (``CREATE OR REPLACE``) as SQL lines. ``truth`` is the column that is the source
+    of truth in the declared state (the old one in transition, the new one once retired)."""
+    _trigger, function = sync_names(table, op_id)
+    other = new if truth == old else old
+    message = f"{table}: {old} and {new} set to different values in one statement"
+    if has_default:
+        insert_conflict = [
+            f'            NEW."{other}" := NEW."{truth}";  -- a column default made both non-NULL: the truth wins',
+        ]
+    else:
+        insert_conflict = [
+            "            RAISE EXCEPTION USING ERRCODE = 'check_violation',",
+            f"                MESSAGE = '{message}';",
+        ]
+    return [
         f"CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$",
         "BEGIN",
         "    IF TG_OP = 'INSERT' THEN",
-        f'        IF NEW."{old}" IS NOT NULL THEN',
+        f'        IF NEW."{old}" IS NOT NULL AND NEW."{new}" IS NOT NULL',
+        f'           AND NEW."{old}" IS DISTINCT FROM NEW."{new}" THEN',
+        *insert_conflict,
+        f'        ELSIF NEW."{old}" IS NOT NULL THEN',
         f'            NEW."{new}" := NEW."{old}";',
         f'        ELSIF NEW."{new}" IS NOT NULL THEN',
         f'            NEW."{old}" := NEW."{new}";',
+        "        END IF;",
+        f'    ELSIF NEW."{old}" IS DISTINCT FROM OLD."{old}"',
+        f'          AND NEW."{new}" IS DISTINCT FROM OLD."{new}" THEN',
+        f'        IF NEW."{old}" IS DISTINCT FROM NEW."{new}" THEN',
+        "            RAISE EXCEPTION USING ERRCODE = 'check_violation',",
+        f"                MESSAGE = '{message}';",
         "        END IF;",
         f'    ELSIF NEW."{old}" IS DISTINCT FROM OLD."{old}" THEN',
         f'        NEW."{new}" := NEW."{old}";',
@@ -117,11 +161,34 @@ def rename_sync_ddl(table: str, old: str, new: str, op_id: str) -> Tuple[List[st
         "END",
         "$$",
     ]
+
+
+def _execute_block(lines: Sequence[str], indent: str = "    ") -> List[str]:
+    return [f"{indent}op.execute(", f'{indent}    """', *[f"{indent}    {line}" for line in lines], f'{indent}    """', f"{indent})"]
+
+
+def rename_sync_ddl(table: str, old: str, new: str, op_id: str, *, truth: Optional[str] = None, has_default: bool = False) -> Tuple[List[str], List[str]]:
+    """``op.execute`` lines that create (up) and drop (down) the sync trigger of a rename in transition.
+
+    A BEFORE INSERT OR UPDATE row trigger: whichever column a writer touched, the other follows inside the same
+    statement and transaction. A statement that sets both names to *different* values is ambiguous and is refused
+    (SQLSTATE 23514, the writer's transaction rolls back); the one exception is an INSERT where a column default made
+    both non-NULL, where the declared source of truth wins. It only assigns to NEW, so it never issues another
+    statement and cannot recurse; it runs with the privileges of the writer (SECURITY INVOKER) and leaves row-level
+    security to the table's policies, which still check the final row. The function's comment records the operation
+    and the truth column; ``verify`` reads it back."""
+    trigger, function = sync_names(table, op_id)
+    truth = truth or old
+    body = sync_function_sql(table, old, new, op_id, truth=truth, has_default=has_default)
     create = [f'CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON "{table}"', f"FOR EACH ROW EXECUTE FUNCTION {function}()"]
-    up = ["    op.execute(", '        """', *[f"        {line}" for line in body], '        """', "    )"]
-    up += ["    op.execute(", '        """', *[f"        {line}" for line in create], '        """', "    )"]
+    up = _execute_block(body) + _execute_block(create)
+    up += ["    op.execute(", f"        {json.dumps(f'COMMENT ON FUNCTION {function}() IS ')}", f"        {json.dumps(_sql_quote(sync_comment(op_id, truth)))}", "    )"]
     down = [f"    op.execute('DROP TRIGGER IF EXISTS {trigger} ON \"{table}\"')", f'    op.execute("DROP FUNCTION IF EXISTS {function}()")']
     return up, down
+
+
+def _sql_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _literal(value: object) -> str:
@@ -252,6 +319,36 @@ def index_migration_file(head: str, indexes: Sequence[Dict[str, object]]) -> str
     return f"migrations/versions/{index_revision(head, indexes)}_concurrent_{slug[:50]}.py"
 
 
+ONLINE_NOT_NULL = [
+    "def _set_not_null_online(table: str, column: str) -> None:",
+    '    """ADD CONSTRAINT NOT VALID (no scan), VALIDATE CONSTRAINT (writes continue), SET NOT NULL (PostgreSQL 12+ proves',
+    '    it from the validated constraint: no second scan), DROP CONSTRAINT. Idempotent: every step checks the catalog."""',
+    '    check = f"ck_{table}_{column}_not_null"',
+    "    bind = op.get_bind()",
+    "    nullable = bind.execute(",
+    '        sa.text(',
+    '            "SELECT is_nullable FROM information_schema.columns "',
+    '            "WHERE table_name = :t AND column_name = :c AND table_schema = current_schema()"',
+    "        ),",
+    '        {"t": table, "c": column},',
+    "    ).scalar()",
+    '    if nullable == "NO":',
+    "        op.execute(f'ALTER TABLE \"{table}\" DROP CONSTRAINT IF EXISTS \"{check}\"')",
+    "        return",
+    '    validated_sql = sa.text("SELECT convalidated FROM pg_constraint WHERE conname = :n")',
+    '    validated = bind.execute(validated_sql, {"n": check}).scalar()',
+    "    if validated is None:",
+    "        op.execute(f'ALTER TABLE \"{table}\" ADD CONSTRAINT \"{check}\" CHECK (\"{column}\" IS NOT NULL) NOT VALID')",
+    "        validated = False",
+    "    if not validated:",
+    "        op.execute(f'ALTER TABLE \"{table}\" VALIDATE CONSTRAINT \"{check}\"')",
+    "    op.execute(f'ALTER TABLE \"{table}\" ALTER COLUMN \"{column}\" SET NOT NULL')",
+    "    op.execute(f'ALTER TABLE \"{table}\" DROP CONSTRAINT IF EXISTS \"{check}\"')",
+    "",
+    "",
+]
+
+
 def contract_migration(spec: Spec, head: str, contracting: Sequence[Dict[str, object]]) -> str:
     """The NOT NULL transition of completed backfills, online and idempotent, after re-checking the database."""
     revision = contract_revision(head, [str(c["op_id"]) for c in contracting])
@@ -291,31 +388,7 @@ def contract_migration(spec: Spec, head: str, contracting: Sequence[Dict[str, ob
         '    raise RuntimeError(f"backfill {op_id} is {state!r}, not complete; the contract phase needs a complete backfill")',
         "",
         "",
-        "def _set_not_null_online(table: str, column: str) -> None:",
-        '    """ADD CONSTRAINT NOT VALID (no scan), VALIDATE CONSTRAINT (writes continue), SET NOT NULL (PostgreSQL 12+ proves',
-        '    it from the validated constraint: no second scan), DROP CONSTRAINT. Idempotent: every step checks the catalog."""',
-        '    check = f"ck_{table}_{column}_not_null"',
-        "    bind = op.get_bind()",
-        "    nullable = bind.execute(",
-        '        sa.text(',
-        '            "SELECT is_nullable FROM information_schema.columns "',
-        '            "WHERE table_name = :t AND column_name = :c AND table_schema = current_schema()"',
-        "        ),",
-        '        {"t": table, "c": column},',
-        "    ).scalar()",
-        '    if nullable == "NO":',
-        "        op.execute(f'ALTER TABLE \"{table}\" DROP CONSTRAINT IF EXISTS \"{check}\"')",
-        "        return",
-        '    validated = bind.execute(sa.text("SELECT convalidated FROM pg_constraint WHERE conname = :n"), {"n": check}).scalar()',
-        "    if validated is None:",
-        "        op.execute(f'ALTER TABLE \"{table}\" ADD CONSTRAINT \"{check}\" CHECK (\"{column}\" IS NOT NULL) NOT VALID')",
-        "        validated = False",
-        "    if not validated:",
-        "        op.execute(f'ALTER TABLE \"{table}\" VALIDATE CONSTRAINT \"{check}\"')",
-        "    op.execute(f'ALTER TABLE \"{table}\" ALTER COLUMN \"{column}\" SET NOT NULL')",
-        "    op.execute(f'ALTER TABLE \"{table}\" DROP CONSTRAINT IF EXISTS \"{check}\"')",
-        "",
-        "",
+        *ONLINE_NOT_NULL,
         "def upgrade() -> None:",
         "    with op.get_context().autocommit_block():  # one transaction per statement",
     ]
@@ -332,6 +405,303 @@ def contract_migration(spec: Spec, head: str, contracting: Sequence[Dict[str, ob
 def contract_migration_file(head: str, contracting: Sequence[Dict[str, object]]) -> str:
     slug = "_".join(f"{c['table']}_{c['column']}" for c in contracting)
     return f"migrations/versions/{contract_revision(head, [str(c['op_id']) for c in contracting])}_contract_{slug[:50]}.py"
+
+
+SYNC_STATE_SQL = [
+    'SYNC_STATE = sa.text("SELECT tgenabled::text FROM pg_trigger WHERE tgname = :n AND NOT tgisinternal")',
+    "SYNC_COMMENT = sa.text(",
+    '    "SELECT obj_description(p.oid, \'pg_proc\') FROM pg_proc p "',
+    '    "WHERE p.proname = :n AND p.pronamespace = current_schema()::regnamespace"',
+    ")",
+]
+
+DEPENDENTS_SQL = [
+    "DEPENDENTS = sa.text(",
+    '    "SELECT d.classid::regclass::text, d.deptype, c.contype::text, "',
+    '    "pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_depend d "',
+    '    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "',
+    '    "LEFT JOIN pg_constraint c ON d.classid = \'pg_constraint\'::regclass AND c.oid = d.objid "',
+    '    "WHERE d.refclassid = \'pg_class\'::regclass AND d.refobjid = to_regclass(:t) AND a.attname = :c "',
+    '    "AND d.deptype <> \'i\' ORDER BY 4"',
+    ")",
+    "TABLE_TRIGGERS = sa.text(",
+    '    "SELECT t.tgname, p.proname, p.prosrc FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "',
+    '    "WHERE t.tgrelid = to_regclass(:t) AND NOT t.tgisinternal ORDER BY t.tgname"',
+    ")",
+    "FUNCTIONS_MENTIONING = sa.text(",
+    '    "SELECT n.nspname || \'.\' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "',
+    '    "WHERE n.nspname NOT IN (\'pg_catalog\', \'information_schema\') AND p.prokind = \'f\' "',
+    '    "AND p.prosrc ~* :column_re AND p.prosrc ~* :table_re ORDER BY 1"',
+    ")",
+]
+
+MANAGED_DEPENDENT_LINES = [
+    "def _managed_dependent(kind: str, contype: str | None, description: str, table: str, column: str) -> bool:",
+    '    """What goes away with the column by design: its own default and its own NOT NULL constraint',
+    '    (PostgreSQL 18 records NOT NULL in pg_constraint). Every other dependent (an index, a constraint, a',
+    '    foreign key from another table, a view, a policy, a generated column, extended statistics, a',
+    '    publication column list) is not ours."""',
+    '    if kind == "pg_attrdef" and description == f"default value for column {column} of table {table}":',
+    "        return True",
+    '    return kind == "pg_constraint" and contype == "n"',
+    "",
+    "",
+    "def _unmanaged_dependents(bind, table: str, column: str) -> list[str]:",
+    '    rows = bind.execute(DEPENDENTS, {"t": table, "c": column}).all()',
+    "    return [str(r[3]) for r in rows if not _managed_dependent(str(r[0]), r[2], str(r[3]), table, column)]",
+    "",
+    "",
+    "def _foreign_code_naming(bind, table: str, column: str, own: set[str], reviewed: set[str]) -> list[str]:",
+    '    """Trigger functions of the table and other user functions whose source names the column: plpgsql is',
+    '    not dependency-tracked, so a textual match is the only signal; a reviewed function name is accepted."""',
+    '    word = re.compile(rf"\\b{re.escape(column)}\\b", re.IGNORECASE)  # Python\'s word boundary, for trigger sources',
+    "    found: list[str] = []",
+    '    for name, function, source in bind.execute(TABLE_TRIGGERS, {"t": table}).all():',
+    "        if function in own:",
+    "            continue",
+    "        if word.search(str(source or \"\")):",
+    '            found.append(f"trigger {name} (function {function})")',
+    '    params = {"column_re": rf"\\m{column}\\M", "table_re": rf"\\m{table}\\M"}  # PostgreSQL\'s word boundaries',
+    "    for (qualified,) in bind.execute(FUNCTIONS_MENTIONING, params).all():",
+    "        if qualified not in reviewed and qualified.rsplit(\".\", 1)[-1] not in own:",
+    '            found.append(f"function {qualified}")',
+    "    return found",
+]
+
+
+def _default_sql_of(change: Dict[str, object]) -> str:
+    """The SQL literal of the old field's default (``from_field`` of a rename entry), for SET DEFAULT."""
+    return _sql_default(field_from_doc(change["from_field"]))  # type: ignore[arg-type]
+
+
+def _has_default(change: Dict[str, object]) -> bool:
+    doc = change.get("from_field")
+    return isinstance(doc, dict) and doc.get("default") is not None
+
+
+def retire_migration(spec: Spec, head: str, retiring: Sequence[Dict[str, object]]) -> str:
+    """The retire revision of renames: the truth moves to the new column. Online and idempotent: the sync function is
+    replaced in place (``CREATE OR REPLACE``, same trigger), the new column takes the old one's NOT NULL (online) and
+    default, and the function's comment records ``truth=<new> retired_at=<now>``. Nothing is dropped. The downgrade
+    puts the old column back in charge (comment, DROP NOT NULL, DROP DEFAULT); no data moves either way."""
+    revision = retire_revision(head, [str(c["op_id"]) for c in retiring])
+    targets = ", ".join(f"{c['table']}.{c['from_column']} -> {c['column']}" for c in retiring)
+    lines = _revision_header(
+        f"Retire: the truth of {targets} moves to the new column.",
+        "Each statement runs in its own transaction. CREATE OR REPLACE FUNCTION swaps the sync function under the same\n"
+        "trigger; SET NOT NULL is proved from a validated constraint (writes continue during the scan); SET DEFAULT takes a\n"
+        "brief ACCESS EXCLUSIVE lock without a rewrite. The old column stays, equal to the new one by the trigger, for the\n"
+        "application versions that still map it (B). Nothing is dropped here.",
+        revision,
+        head,
+        ["import sqlalchemy as sa", "from alembic import op"],
+        spec,
+    )
+    lines += ["", f'PROGRESS_TABLE = "{progress_table(spec)}"', *SYNC_STATE_SQL, "", ""]
+    lines += [
+        "def _require_in_sync(op_id: str, table: str, old: str, new: str, trigger: str) -> None:",
+        '    """The preconditions the plan checked from the evidence, checked again on the live database."""',
+        "    bind = op.get_bind()",
+        '    state = bind.execute(SYNC_STATE, {"n": trigger}).scalar()',
+        '    if state not in ("O", "A"):',
+        '        what = "missing" if state is None else "disabled"',
+        '        raise RuntimeError(f"{table}: sync trigger {trigger} is {what}; the rename {op_id} cannot be retired")',
+        "    mismatch = bind.execute(sa.text(f'SELECT count(*) FROM \"{table}\" WHERE \"{new}\" IS DISTINCT FROM \"{old}\"')).scalar()",
+        "    if mismatch:",
+        '        raise RuntimeError(f"{table}: {mismatch} row(s) where {new} differs from {old}; run the backfill {op_id} first")',
+        '    progress = bind.execute(sa.text(f"SELECT state FROM {PROGRESS_TABLE} WHERE op_id = :op"), {"op": op_id}).scalar()',
+        '    if progress == "complete":',
+        "        return",
+        "    total = bind.execute(sa.text(f'SELECT count(*) FROM \"{table}\"')).scalar()",
+        "    if progress is None and total == 0:  # a fresh environment: nothing to backfill, the fact is recorded",
+        "        bind.execute(",
+        "            sa.text(",
+        '                f"INSERT INTO {PROGRESS_TABLE} "',
+        '                "(op_id, table_name, column_name, strategy, checksum, state, finished_at) "',
+        "                \"VALUES (:op, :t, :c, 'mirror_column', 'empty-table-at-contract', 'complete', now()) \"",
+        '                "ON CONFLICT (op_id) DO NOTHING"',
+        "            ),",
+        '            {"op": op_id, "t": table, "c": new},',
+        "        )",
+        "        return",
+        '    raise RuntimeError(f"backfill {op_id} is {progress!r}, not complete; the retire phase needs a complete backfill")',
+        "",
+        "",
+        "def _stamp(function: str, op_id: str, truth: str, retired: bool) -> None:",
+        '    """The function comment is the catalog record of which column is the truth and since when."""',
+        '    comment = f"{SYNC_COMMENT_PREFIX} op={op_id} truth={truth}"',
+        "    if retired:",
+        '        stamp = op.get_bind().execute(sa.text("SELECT now()")).scalar()',
+        '        comment += f" retired_at={stamp.isoformat()}"',
+        "    quoted = comment.replace(\"'\", \"''\")",
+        "    op.execute(f\"COMMENT ON FUNCTION {function}() IS '{quoted}'\")",
+        "",
+        "",
+        *ONLINE_NOT_NULL,
+        "",
+        "",
+        "def upgrade() -> None:",
+        "    with op.get_context().autocommit_block():  # one transaction per statement",
+    ]
+    lines.insert(lines.index('PROGRESS_TABLE = "' + progress_table(spec) + '"'), f'SYNC_COMMENT_PREFIX = "{SYNC_COMMENT_PREFIX}"')
+    for c in retiring:
+        table, old, new, op_id = str(c["table"]), str(c["from_column"]), str(c["column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        lines.append(f"        _require_in_sync({json.dumps(op_id)}, {json.dumps(table)}, {json.dumps(old)}, {json.dumps(new)}, {json.dumps(trigger)})")
+    for c in retiring:
+        table, old, new, op_id = str(c["table"]), str(c["from_column"]), str(c["column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        has_default = _has_default(c)
+        lines += _execute_block(sync_function_sql(table, old, new, op_id, truth=new, has_default=has_default), "        ")
+        lines.append(f"        _stamp({json.dumps(function)}, {json.dumps(op_id)}, {json.dumps(new)}, True)")
+        if c.get("required", True):
+            lines.append(f"        _set_not_null_online({json.dumps(table)}, {json.dumps(new)})  # the old column's NOT NULL, carried over")
+        if has_default:
+            lines.append(f"        op.execute('ALTER TABLE \"{table}\" ALTER COLUMN \"{new}\" SET DEFAULT {_default_sql_of(c)}')")
+    lines += ["", "", "def downgrade() -> None:", "    with op.get_context().autocommit_block():"]
+    for c in reversed(list(retiring)):
+        table, old, new, op_id = str(c["table"]), str(c["from_column"]), str(c["column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        has_default = _has_default(c)
+        if c.get("required", True):
+            lines.append(f"        op.execute('ALTER TABLE \"{table}\" ALTER COLUMN \"{new}\" DROP NOT NULL')")
+        if has_default:
+            lines.append(f"        op.execute('ALTER TABLE \"{table}\" ALTER COLUMN \"{new}\" DROP DEFAULT')")
+        lines += _execute_block(sync_function_sql(table, old, new, op_id, truth=old, has_default=has_default), "        ")
+        lines.append(f"        _stamp({json.dumps(function)}, {json.dumps(op_id)}, {json.dumps(old)}, False)")
+    return "\n".join(lines) + "\n"
+
+
+def retire_migration_file(head: str, retiring: Sequence[Dict[str, object]]) -> str:
+    slug = "_".join(f"{c['table']}_{c['from_column']}" for c in retiring)
+    return f"migrations/versions/{retire_revision(head, [str(c['op_id']) for c in retiring])}_retire_{slug[:50]}.py"
+
+
+def drop_migration(spec: Spec, head: str, dropping: Sequence[Dict[str, object]], column_sql: Dict[str, str], *, approved_by: str, phrase: str, reviewed_functions: Sequence[str] = ()) -> str:
+    """The destructive contract of retired renames: one transaction that locks the table, re-checks every safety
+    condition on the live catalog (both columns present, NOT NULL carried, the truth marker, the trigger enabled, zero
+    differing rows, no dependent object other than the column's own default and NOT NULL, no foreign code naming the
+    column, backfill complete), then drops the trigger, the function and the old column with ``RESTRICT``. A failure
+    anywhere rolls the whole revision back. ``column_sql`` maps the operation id to the ``sa.Column(...)`` text of the
+    old column, for the downgrade: it recreates the column, copies the *current* values of the new column back, restores
+    NOT NULL and the default, and recreates the sync function and trigger (truth = the new column). That is a
+    compatibility restoration for B, not the recovery of the historical content at the time of the drop."""
+    revision = drop_revision(head, [str(c["op_id"]) for c in dropping])
+    targets = ", ".join(f"{c['table']}.{c['from_column']}" for c in dropping)
+    lines = _revision_header(
+        f"Contract (destructive): drop {targets}.",
+        "IRREVERSIBLE for the data of the old column(s): the downgrade recreates them from the new column's current values,\n"
+        "offline, and cannot restore what the old column held at the time of the drop (keep a backup if that matters).\n"
+        "One transaction: ACCESS EXCLUSIVE on the table (lock_timeout 5s, fail fast), every precondition re-checked on the\n"
+        "live catalog, DROP TRIGGER, DROP FUNCTION, DROP COLUMN ... RESTRICT (never CASCADE: a dependent object the checks\n"
+        f"missed makes the statement fail and the transaction roll back).\nApproved by: {approved_by}\nConfirmation phrase: {phrase}",
+        revision,
+        head,
+        ["import re", "", "import sqlalchemy as sa", "from alembic import op"],
+        spec,
+    )
+    lines += [
+        "",
+        f'PROGRESS_TABLE = "{progress_table(spec)}"',
+        f'SYNC_COMMENT_PREFIX = "{SYNC_COMMENT_PREFIX}"',
+        'LOCK_TIMEOUT = "5s"',
+        f"REVIEWED_FUNCTIONS = {json.dumps(sorted(set(reviewed_functions)))}",
+        "COLUMNS = sa.text(",
+        '    "SELECT column_name, is_nullable FROM information_schema.columns "',
+        '    "WHERE table_name = :t AND table_schema = current_schema() AND column_name IN (:o, :n)"',
+        ")",
+        *SYNC_STATE_SQL,
+        *DEPENDENTS_SQL,
+        "",
+        "",
+        *MANAGED_DEPENDENT_LINES,
+        "",
+        "",
+        "def _require_safe(",
+        "    op_id: str, table: str, old: str, new: str, required: bool, trigger: str, function: str",
+        ") -> None:",
+        '    """Under ACCESS EXCLUSIVE: no writer can change the pair between these checks and the drop."""',
+        "    bind = op.get_bind()",
+        "    bind.execute(sa.text(f\"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'\"))",
+        "    bind.execute(sa.text(f'LOCK TABLE \"{table}\" IN ACCESS EXCLUSIVE MODE'))",
+        '    present = {str(r[0]): str(r[1]) for r in bind.execute(COLUMNS, {"t": table, "o": old, "n": new}).all()}',
+        "    if old not in present or new not in present:",
+        '        raise RuntimeError(f"{table}: expected both {old} and {new}; found {sorted(present)}: resolve by hand")',
+        '    if required and present[new] != "NO":',
+        '        raise RuntimeError(f"{table}.{new} is nullable: the retire revision did not carry the NOT NULL of {old}")',
+        '    comment = str(bind.execute(SYNC_COMMENT, {"n": function}).scalar() or "")',
+        '    if f"{SYNC_COMMENT_PREFIX} op={op_id} truth={new}" not in comment:',
+        '        raise RuntimeError(f"{table}: {function} does not record truth={new} ({comment!r}); retire first")',
+        '    state = bind.execute(SYNC_STATE, {"n": trigger}).scalar()',
+        '    if state not in ("O", "A"):',
+        "        what = 'missing' if state is None else 'disabled'",
+        '        raise RuntimeError(f"{table}: sync trigger {trigger} is {what}: the pair may differ")',
+        "    differ = sa.text(f'SELECT count(*) FROM \"{table}\" WHERE \"{new}\" IS DISTINCT FROM \"{old}\"')",
+        "    mismatch = bind.execute(differ).scalar()",
+        "    if mismatch:",
+        '        raise RuntimeError(f"{table}: {mismatch} row(s) where {new} differs from {old}; nothing is dropped")',
+        "    unmanaged = _unmanaged_dependents(bind, table, old)",
+        "    if unmanaged:",
+        '        raise RuntimeError(f"{table}.{old} has dependents the tool does not manage: {unmanaged}; remove them first")',
+        "    foreign = _foreign_code_naming(bind, table, old, {function}, set(REVIEWED_FUNCTIONS))",
+        "    if foreign:",
+        '        raise RuntimeError(f"{table}.{old} is named by code the tool does not manage: {foreign}; review it first")',
+        '    progress = bind.execute(sa.text(f"SELECT state FROM {PROGRESS_TABLE} WHERE op_id = :op"), {"op": op_id}).scalar()',
+        '    if progress != "complete":',
+        '        raise RuntimeError(f"backfill {op_id} is {progress!r}, not complete")',
+        "",
+        "",
+        "def upgrade() -> None:",
+    ]
+    for c in dropping:
+        table, old, new, op_id = str(c["table"]), str(c["from_column"]), str(c["column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        lines += [
+            "    _require_safe(",
+            f"        {json.dumps(op_id)}, {json.dumps(table)}, {json.dumps(old)}, {json.dumps(new)}, {bool(c.get('required', True))},",
+            f"        {json.dumps(trigger)}, {json.dumps(function)},",
+            "    )",
+        ]
+    for c in dropping:
+        table, old, op_id = str(c["table"]), str(c["from_column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        lines.append(f"    op.execute('DROP TRIGGER IF EXISTS {trigger} ON \"{table}\"')")
+        lines.append(f'    op.execute("DROP FUNCTION IF EXISTS {function}()")')
+        lines.append(f"    op.execute('ALTER TABLE \"{table}\" DROP COLUMN \"{old}\" RESTRICT')  # never CASCADE")
+    lines += [
+        "",
+        "",
+        "def downgrade() -> None:",
+        '    """Conditional: recreate the column, copy the current values of the new column back, restore the sync trigger.',
+        '    Offline by nature (a full-table UPDATE in one transaction); the historical content of the dropped column is',
+        '    not recoverable from here. Not an online rollback: stop the application, downgrade, redeploy."""',
+    ]
+    for c in reversed(list(dropping)):
+        table, old, new, op_id = str(c["table"]), str(c["from_column"]), str(c["column"]), str(c["op_id"])
+        trigger, function = sync_names(table, op_id)
+        has_default = _has_default(c)
+        lines.append(f"    op.add_column({json.dumps(table)}, {column_sql[op_id]})")
+        if has_default:
+            lines.append(f"    op.execute('ALTER TABLE \"{table}\" ALTER COLUMN \"{old}\" SET DEFAULT {_default_sql_of(c)}')")
+        lines.append(f"    op.execute('UPDATE \"{table}\" SET \"{old}\" = \"{new}\"')  # the current values, not the historical ones")
+        if c.get("required", True):
+            lines.append(f"    op.execute('ALTER TABLE \"{table}\" ALTER COLUMN \"{old}\" SET NOT NULL')")
+        lines += _execute_block(sync_function_sql(table, old, new, op_id, truth=new, has_default=has_default))
+        lines += _execute_block([f'CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON "{table}"', f"FOR EACH ROW EXECUTE FUNCTION {function}()"])
+        lines.append('    stamp = op.get_bind().execute(sa.text("SELECT now()")).scalar().isoformat()  # the wait restarts here')
+        lines.append(f'    comment = f"{SYNC_COMMENT_PREFIX} op={op_id} truth={new} retired_at={{stamp}}"')
+        lines.append(f"    op.execute(f\"COMMENT ON FUNCTION {function}() IS '{{comment}}'\")")
+    return "\n".join(lines) + "\n"
+
+
+def drop_migration_file(head: str, dropping: Sequence[Dict[str, object]]) -> str:
+    slug = "_".join(f"{c['table']}_{c['from_column']}" for c in dropping)
+    return f"migrations/versions/{drop_revision(head, [str(c['op_id']) for c in dropping])}_drop_{slug[:50]}.py"
+
+
+def confirmation_phrase(dropping: Sequence[Dict[str, object]]) -> str:
+    """The exact text ``--confirm-irreversible`` must carry: it names every column the revision drops."""
+    return "drop " + ", ".join(f"{c['table']}.{c['from_column']}" for c in dropping)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,7 +723,7 @@ def backfill_specs(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         "",
         "BACKFILLS: dict[str, dict] = {",
     ]
-    keys = ("table", "column", "field_type", "strategy", "params", "state_declared", "expand_revision", "index_revision", "contract_revision", "kind", "from_column", "sync", "source_of_truth")
+    keys = ("table", "column", "field_type", "strategy", "params", "state_declared", "expand_revision", "index_revision", "retire_revision", "contract_revision", "kind", "from_column", "required", "sync", "source_of_truth")
     for c in sorted(changes, key=lambda x: str(x["op_id"])):
         lines.append(f"    {json.dumps(str(c['op_id']))}: {{")
         for key in keys:
@@ -410,6 +780,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -448,6 +819,8 @@ PROGRESS = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
 )
 EVIDENCE_SCHEMA = "{EVIDENCE_SCHEMA}"
+TOOL_SESSION = "{pkg}{TOOL_SESSION_SUFFIX}"  # the application_name of this runner's connections
+SYNC_COMMENT_PREFIX = "{SYNC_COMMENT_PREFIX}"
 CONTRACT_SENTINEL = "empty-table-at-contract"  # the checksum the contract revision records for an empty table
 EXIT_OK, EXIT_USAGE, EXIT_CONNECTION, EXIT_LOCKED = 0, 1, 2, 3
 EXIT_CHECKPOINT, EXIT_RLS, EXIT_INCOMPLETE, EXIT_UNKNOWN = 4, 5, 6, 7
@@ -471,6 +844,36 @@ INDEX_STATE = (
     "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :n"
 )
 ROLE_STATE = "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+SYNC_COMMENT = (
+    "SELECT obj_description(p.oid, 'pg_proc') FROM pg_proc p "
+    "WHERE p.proname = :n AND p.pronamespace = current_schema()::regnamespace"
+)
+COLUMN_DETAIL = (
+    "SELECT is_nullable, data_type, column_default FROM information_schema.columns "
+    "WHERE table_name = :t AND column_name = :c AND table_schema = current_schema()"
+)
+DEPENDENTS = (
+    "SELECT d.classid::regclass::text, d.deptype, c.contype::text, "
+    "pg_describe_object(d.classid, d.objid, d.objsubid) FROM pg_depend d "
+    "JOIN pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid "
+    "LEFT JOIN pg_constraint c ON d.classid = 'pg_constraint'::regclass AND c.oid = d.objid "
+    "WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid = to_regclass(:t) AND a.attname = :c "
+    "AND d.deptype <> 'i' ORDER BY 4"
+)
+TABLE_TRIGGERS = (
+    "SELECT t.tgname, p.proname, p.prosrc FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid "
+    "WHERE t.tgrelid = to_regclass(:t) AND NOT t.tgisinternal ORDER BY t.tgname"
+)
+FUNCTIONS_MENTIONING = (
+    "SELECT n.nspname || '.' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+    "WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND p.prokind = 'f' "
+    "AND p.prosrc ~* :column_re AND p.prosrc ~* :table_re ORDER BY 1"
+)
+SESSIONS = (
+    "SELECT coalesce(application_name, ''), usename, count(*), min(backend_start) FROM pg_stat_activity "
+    "WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend' "
+    "GROUP BY 1, 2 ORDER BY 1, 2"
+)
 PROGRESS_ROW = (
     "SELECT state, last_key, rows_processed, batches, passes, checksum, table_name, column_name "
     "FROM {{table}} WHERE op_id = :op FOR UPDATE"
@@ -494,7 +897,8 @@ def database_url() -> str:
 
 def _engine(url: str) -> AsyncEngine:
     """One engine per command invocation (disposed by the caller); never per batch."""
-    return create_async_engine(url, poolclass=None)
+    settings = {{"server_settings": {{"application_name": TOOL_SESSION}}}}
+    return create_async_engine(url, poolclass=None, connect_args=settings)
 
 
 @asynccontextmanager
@@ -799,29 +1203,17 @@ async def _operation_evidence(
         "pending_rows": None,
         "progress": None,
     }}
-    if column is not None:
+    source_present = True
+    if definition.get("kind") == "rename":
+        source_params = {{"t": definition["table"], "c": definition["from_column"]}}
+        source = (await conn.execute(text(COLUMN_STATE), source_params)).scalar()
+        source_present = source is not None
+    if column is not None and source_present:
         predicate = pending_predicate(definition, q(str(definition["column"])))
         pending_sql = f"SELECT count(*) FROM {{q(str(definition['table']))}} WHERE {{predicate}}"
         entry["pending_rows"] = int((await conn.execute(text(pending_sql))).scalar() or 0)
     if definition.get("kind") == "rename":
-        sync = dict(definition.get("sync") or {{}})
-        state = (await conn.execute(text(TRIGGER_STATE), {{"n": sync.get("trigger")}})).scalar()
-        entry.update(
-            kind="rename",
-            source_column=definition.get("from_column"),
-            source_of_truth=definition.get("source_of_truth"),
-            mismatch_rows=entry["pending_rows"],
-            columns_agree=entry["pending_rows"] == 0 if entry["pending_rows"] is not None else None,
-            sync={{
-                "mechanism": sync.get("mechanism"),
-                "trigger": sync.get("trigger"),
-                "present": state is not None,
-                "enabled": state in ("O", "A"),
-            }},
-        )
-        if definition.get("state_declared") == "expand" and (state is None or state not in ("O", "A")):
-            what = "missing" if state is None else "disabled"
-            problems.append(f"{{op_id}}: sync trigger {{sync.get('trigger')}} is {{what}}: writes are not mirrored")
+        await _rename_evidence(conn, op_id, definition, entry, problems)
     if progress_exists:
         row = (
             await conn.execute(
@@ -837,14 +1229,110 @@ async def _operation_evidence(
             entry["progress"]["recorded_by"] = "the contract revision: the table was empty, nothing to backfill"
         elif row and row["checksum"] != checksum_of(definition):
             problems.append(f"{{op_id}}: the checkpoint belongs to another definition")
-    complete = bool(entry["progress"] and entry["progress"]["state"] == "complete") and entry["pending_rows"] == 0
+    recorded = bool(entry["progress"] and entry["progress"]["state"] == "complete")
+    complete = recorded and (entry["pending_rows"] == 0 or (entry["pending_rows"] is None and not source_present))
     entry["backfill_complete"] = complete
-    if definition.get("state_declared") == "expand" and not complete:
+    if definition.get("state_declared") in ("expand", "retire") and not complete:
         state = (entry["progress"] or {{}}).get("state")
         problems.append(f"{{op_id}}: backfill not complete ({{entry['pending_rows']}} pending rows, progress {{state}})")
-    if definition.get("state_declared") == "contract" and entry["nullable"]:
+    if definition.get("state_declared") == "contract" and entry["nullable"] and definition.get("required", True):
         problems.append(f"{{op_id}}: declared contracted but the column is still nullable")
     return entry
+
+
+def _parse_sync_comment(comment: str | None) -> dict[str, str | None]:
+    """``fastapi-architect sync op=<id> truth=<column> [retired_at=<iso>]`` as written by the revisions."""
+    out: dict[str, str | None] = {{"truth": None, "retired_at": None}}
+    if comment and comment.startswith(SYNC_COMMENT_PREFIX):
+        for token in comment[len(SYNC_COMMENT_PREFIX) :].split():
+            key, _sep, value = token.partition("=")
+            if key in out:
+                out[key] = value
+    return out
+
+
+def _managed_dependent(kind: str, contype: str | None, description: str, table: str, column: str) -> bool:
+    """What goes away with the column by design: its own default and its own NOT NULL constraint. Everything else
+    (an index, a constraint, a foreign key from another table, a view, a policy, a generated column, extended
+    statistics, a publication column list) is not the tool's and blocks a drop."""
+    if kind == "pg_attrdef" and description == f"default value for column {{column}} of table {{table}}":
+        return True
+    return kind == "pg_constraint" and contype == "n"
+
+
+async def _rename_evidence(
+    conn: AsyncConnection, op_id: str, definition: dict, entry: dict, problems: list[str]
+) -> None:
+    """What the retire and the destructive contract of a rename need to know about the live database."""
+    sync = dict(definition.get("sync") or {{}})
+    table, old, new = str(definition["table"]), str(definition["from_column"]), str(definition["column"])
+    declared = definition.get("state_declared")
+    state = (await conn.execute(text(TRIGGER_STATE), {{"n": sync.get("trigger")}})).scalar()
+    comment = (await conn.execute(text(SYNC_COMMENT), {{"n": sync.get("function")}})).scalar()
+    marker = _parse_sync_comment(comment)
+    columns: dict[str, dict] = {{}}
+    for name in (old, new):
+        row = (await conn.execute(text(COLUMN_DETAIL), {{"t": table, "c": name}})).first()
+        columns[name] = {{
+            "present": row is not None,
+            "nullable": None if row is None else row[0] == "YES",
+            "type": None if row is None else row[1],
+            "default": None if row is None else row[2],
+        }}
+    dependents = []
+    for kind, deptype, contype, description in (await conn.execute(text(DEPENDENTS), {{"t": table, "c": old}})).all():
+        managed = _managed_dependent(str(kind), contype, str(description), table, old)
+        dependents.append(
+            {{"kind": str(kind), "deptype": str(deptype), "description": str(description), "managed": managed}}
+        )
+    word = re.compile(rf"\\b{{re.escape(old)}}\\b", re.IGNORECASE)  # Python's word boundary, for trigger sources
+    own = {{sync.get("function")}}
+    other_triggers = []
+    for name, function, source in (await conn.execute(text(TABLE_TRIGGERS), {{"t": table}})).all():
+        if function in own:
+            continue
+        mentions = bool(word.search(str(source or "")))
+        other_triggers.append({{"name": str(name), "function": str(function), "mentions_column": mentions}})
+    mentioning_params = {{"column_re": rf"\\m{{old}}\\M", "table_re": rf"\\m{{table}}\\M"}}  # PostgreSQL's word boundaries
+    functions = [str(r[0]) for r in (await conn.execute(text(FUNCTIONS_MENTIONING), mentioning_params)).all()]
+    functions = [f for f in functions if f.rsplit(".", 1)[-1] not in own]
+    entry.update(
+        kind="rename",
+        source_column=old,
+        source_of_truth=definition.get("source_of_truth"),
+        source_present=columns[old]["present"],
+        columns=columns,
+        mismatch_rows=entry["pending_rows"],
+        columns_agree=entry["pending_rows"] == 0 if entry["pending_rows"] is not None else None,
+        sync={{
+            "mechanism": sync.get("mechanism"),
+            "trigger": sync.get("trigger"),
+            "function": sync.get("function"),
+            "present": state is not None,
+            "enabled": state in ("O", "A"),
+            "truth": marker["truth"],
+            "retired_at": marker["retired_at"],
+        }},
+        dependents=dependents,
+        unmanaged_dependents=[d["description"] for d in dependents if not d["managed"]],
+        other_triggers=other_triggers,
+        functions_mentioning=functions,
+    )
+    if declared in ("expand", "retire"):
+        if state is None or state not in ("O", "A"):
+            what = "missing" if state is None else "disabled"
+            problems.append(f"{{op_id}}: sync trigger {{sync.get('trigger')}} is {{what}}: writes are not mirrored")
+        expected_truth = old if declared == "expand" else new
+        if marker["truth"] != expected_truth:
+            found = marker["truth"]
+            problems.append(f"{{op_id}}: sync truth={{found}}, expected {{expected_truth}} for state {{declared}}")
+        if declared == "retire" and definition.get("required", True) and columns[new]["nullable"]:
+            problems.append(f"{{op_id}}: declared retired but {{new}} is still nullable: retire revision not applied")
+    elif declared == "contract":
+        if columns[old]["present"]:
+            problems.append(f"{{op_id}}: declared contracted but {{old}} is still in the table")
+        if state is not None:
+            problems.append(f"{{op_id}}: declared contracted but the sync trigger {{sync.get('trigger')}} still exists")
 
 
 async def verify(url: str, application_version: str | None = None) -> dict:
@@ -857,6 +1345,8 @@ async def verify(url: str, application_version: str | None = None) -> dict:
         "application_version_declared": application_version,
         "operations": {{}},
         "indexes": [],
+        "sessions": [],
+        "tool_session": TOOL_SESSION,
         "problems": [],
     }}
     problems: list[str] = evidence["problems"]
@@ -878,6 +1368,18 @@ async def verify(url: str, application_version: str | None = None) -> dict:
             if heads != [EXPECTED_HEAD]:
                 problems.append(f"alembic current {{heads}} is not the expected head {{EXPECTED_HEAD}}")
             progress_exists = bool((await conn.execute(text("SELECT to_regclass(:t)"), {{"t": PROGRESS_TABLE}})).scalar())
+            for name, user, count, oldest in (await conn.execute(text(SESSIONS))).all():
+                identified = str(name) == TOOL_SESSION or str(name).startswith("{pkg}@")
+                started = oldest.isoformat() if isinstance(oldest, datetime) else str(oldest)
+                evidence["sessions"].append(
+                    {{
+                        "application_name": str(name),
+                        "user": str(user),
+                        "count": int(count),
+                        "oldest_backend_start": started,
+                        "identified": identified,
+                    }}
+                )
             for op_id, definition in sorted(BACKFILLS.items()):
                 entry = await _operation_evidence(conn, op_id, definition, progress_exists, problems)
                 evidence["operations"][op_id] = entry
@@ -982,13 +1484,20 @@ def _sql_literal_changed(field_type: str, name: str) -> str:
     return samples.get(field_type, "'y'")
 
 
+def _sql_literal_third(field_type: str, name: str) -> Optional[str]:
+    """A third value of the type, different from the other two (the contradiction test sets both columns of a row that
+    holds the first value to the second and the third); None when the type has no third value (bool)."""
+    samples = {"str": f"'{name}-third'", "int": "3", "float": "3.5", "uuid": "'22222222-2222-4222-8222-222222222222'", "datetime": "now() - interval '2 days'", "date": "current_date - 2", "decimal": "29.99"}
+    return samples.get(field_type)
+
+
 def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Sequence[Dict[str, object]]) -> str:
     """``tests/test_backfill.py`` of the generated project: the runner on an empty database, on rows inserted with
     NULL values in small batches, resumed from a partial run, idempotent, refusing a foreign checkpoint; the evidence."""
     pkg = spec.package
     pending = [c for c in changes if c.get("state_declared") == PHASE_EXPAND]
     target = pending[0] if pending else None  # once every change is contracted the insert-based tests skip: the columns are NOT NULL
-    renames = [c for c in pending if c.get("kind") == KIND_RENAME]
+    renames = [c for c in changes if c.get("kind") == KIND_RENAME and c.get("state_declared") in (PHASE_EXPAND, PHASE_RETIRE)]  # the trigger exists until the drop
     insert_sql = "SELECT 1"
     if target is not None:
         entity = next((e for _m, e in _ordered_entities(spec) if e.plural == target["table"]), None)
@@ -1027,7 +1536,7 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
                 vals.append(_sql_literal(str(r.get("field_type")), str(r["from_column"])))
         return f'INSERT INTO "{table}" ({", ".join(cols)}) VALUES ({", ".join(vals)})'
 
-    renames_literal_items = [{"op": str(r["op_id"]), "table": str(r["table"]), "old": str(r["from_column"]), "new": str(r["column"]), "sample": _sql_literal(str(r.get("field_type")), str(r["from_column"])), "changed": _sql_literal_changed(str(r.get("field_type")), str(r["from_column"])), "insert": _insert_for(str(r["table"]))} for r in renames]
+    renames_literal_items = [{"op": str(r["op_id"]), "table": str(r["table"]), "old": str(r["from_column"]), "new": str(r["column"]), "sample": _sql_literal(str(r.get("field_type")), str(r["from_column"])), "changed": _sql_literal_changed(str(r.get("field_type")), str(r["from_column"])), "third": _sql_literal_third(str(r.get("field_type")), str(r["from_column"])), "insert": _insert_for(str(r["table"]))} for r in renames]
     pending_literal = json.dumps([str(c["op_id"]) for c in pending])
     table_literal = json.dumps(str(target["table"])) if target else "None"
     column_literal = json.dumps(str(target["column"])) if target else "None"
@@ -1036,6 +1545,7 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         "",
         "import pytest",
         "from sqlalchemy import text",
+        "from sqlalchemy.exc import DBAPIError",
         "from sqlalchemy.ext.asyncio import create_async_engine",
         "",
         f"from {pkg}.ops import backfill",
@@ -1153,6 +1663,19 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         '        assert run(_execute(migrated, agree, {"id": row}))  # an old-name write: the new column follows',
         '        run(_execute(migrated, f\'DELETE FROM "{table}" WHERE id = :id\', {"id": row}))',
         "",
+        "",
+        '@pytest.mark.skipif(not RENAMES, reason="no rename in transition")',
+        "def test_the_sync_trigger_refuses_one_statement_that_sets_both_names_to_different_values(migrated: str):",
+        '    for item in [r for r in RENAMES if r["third"] is not None]:  # a type with three distinct values',
+        '        table, old, new = item["table"], item["old"], item["new"]',
+        '        agree = f\'SELECT "{old}" IS NOT DISTINCT FROM "{new}" FROM "{table}" WHERE id = :id\'',
+        '        row = run(_execute(migrated, item["insert"] + " RETURNING id"))  # both columns hold the sample value',
+        '        contradiction = f\'UPDATE "{table}" SET "{old}" = {item["changed"]}, "{new}" = {item["third"]} WHERE id = :id\'',
+        "        with pytest.raises(DBAPIError):  # SQLSTATE 23514: the writer's transaction rolls back",
+        '            run(_execute(migrated, contradiction, {"id": row}))',
+        '        assert run(_execute(migrated, agree, {"id": row}))  # the row is untouched',
+        '        run(_execute(migrated, f\'DELETE FROM "{table}" WHERE id = :id\', {"id": row}))',
+        "",
     ]
     return "\n".join(lines)
 
@@ -1164,7 +1687,27 @@ def runner_imports_for_env(spec: Spec, has_phased: bool) -> Optional[str]:
     return f"from {spec.package}.ops.backfill import PROGRESS as _progress_table  # noqa: F401"
 
 
-def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], indexes: Sequence[Dict[str, object]], contracting: Sequence[Dict[str, object]], head_before: str, expand_rev: Optional[str], index_rev: Optional[str], contract_rev: Optional[str]) -> List[Dict[str, object]]:
+DROP_PRECONDITIONS = [
+    "a rename operation the manifest knows, with its stable identity (contract_operation_known)",
+    "retire declared in the manifest and applied on the database: the sync function records truth=<new column> (contract_rename_retired, contract_retire_applied)",
+    "evidence present, valid, fresh and generated after the retire revision ran (contract_evidence_present, contract_evidence_fresh, contract_evidence_after_retire)",
+    "zero rows where the columns differ (contract_columns_agree)",
+    "backfill complete (contract_backfill_complete)",
+    "the application version of the retired generation declared by the operator (contract_application_version_accredited)",
+    "every session of the database identified as a generation that does not map the old column, the tool's own sessions and the names the contract ignores aside; the operator declares that older versions stopped (contract_deployments_identified, contract_old_versions_declared_stopped)",
+    "the minimum age since the retire when the contract configures one (contract_retire_age; a wait is never proof)",
+    "NOT NULL, type and default of the old column carried by the new one (contract_constraints_carried)",
+    "no dependent in the catalog other than the column's own default and NOT NULL, no trigger function or user function naming the column unless reviewed (contract_dependencies_reviewed)",
+    "one Alembic head, applied on the database (contract_single_head)",
+    "no drift on the files the manifest records (contract_baseline_clean)",
+    "explicit human authorization (--authorize-contract and authorization.contract.declared_by) (contract_authorized)",
+    "the approver's identity (authorization.destructive.approved_by) (contract_approver_identified)",
+    "the irreversible confirmation, distinct from the authorization: --confirm-irreversible with the exact phrase the plan prints (contract_irreversible_confirmed)",
+    "no interrupted operation in the journal and no lock held by another process (contract_no_pending_operations)",
+]
+
+
+def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], indexes: Sequence[Dict[str, object]], contracting: Sequence[Dict[str, object]], head_before: str, expand_rev: Optional[str], index_rev: Optional[str], contract_rev: Optional[str], *, retiring: Sequence[Dict[str, object]] = (), retire_rev: Optional[str] = None, dropping: Sequence[Dict[str, object]] = (), drop_rev: Optional[str] = None) -> List[Dict[str, object]]:
     """The phases of a plan with their revision, reversibility, lock profile, preconditions and evidence."""
     phases: List[Dict[str, object]] = []
     if expand_rev:
@@ -1191,9 +1734,9 @@ def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], ind
                 "evidence_required": [EVIDENCE_SCHEMA],
                 "source_of_truth": "the old column, until the rename is retired",
                 "read_policy": "the transitional application reads the old column (validation alias on the read schema) and exposes both names, the old one marked deprecated",
-                "write_policy": "the transitional application writes both columns in the same statement; the old application writes the old column only; the sync trigger mirrors either write to the other column, the old column winning when one statement sets both",
-                "coexistence": "A (old name only) and B (both names) may run together on the expanded schema; C (new name only) is not available in this version: retire and contract are later increments",
-                "state_after": "declared: expand (rename in transition); nothing is retired or dropped by this version",
+                "write_policy": "the transitional application writes both columns in the same statement; the old application writes the old column only; the sync trigger mirrors either write to the other column and refuses one statement that sets both names to different values (an INSERT where a column default made both non-NULL resolves to the source of truth); the transitional application refuses a request that sends both names (422: one name per request)",
+                "coexistence": "A (old name only) and B (both names) may run together on the expanded schema; C (new name only) arrives with the retire evolution, after the backfill and fresh evidence",
+                "state_after": "declared: expand (rename in transition); nothing is retired or dropped by this evolution",
                 "renames": [f"{c['table']}.{c['from_column']} -> {c['column']}" for c in new_changes if c.get("kind") == KIND_RENAME],
             })
     if index_rev:
@@ -1208,6 +1751,22 @@ def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], ind
             "state_after": "an invalid index after an interruption is dropped and rebuilt by a re-run; the revision fails rather than end with an invalid index",
             "indexes": [index_name(str(i["table"]), list(i["columns"])) for i in indexes],
         })
+    if retire_rev:
+        phases.append({
+            "phase": PHASE_RETIRE,
+            "revision": retire_rev,
+            "transactional": False,
+            "reversible": True,
+            "lock_profile": "CREATE OR REPLACE FUNCTION under the same trigger (brief lock on the function); SET NOT NULL online (ADD CONSTRAINT NOT VALID, VALIDATE with writes continuing, SET NOT NULL, DROP CONSTRAINT); SET DEFAULT: brief ACCESS EXCLUSIVE, no rewrite; each statement its own transaction",
+            "preconditions": ["sync trigger present and enabled", "backfill complete and zero rows where the columns differ (checked in the plan from the evidence and again by the revision)", "database at the manifest head", "the transitional application version declared by the operator", "authorization.contract.declared_by names who declares the retire"],
+            "evidence_required": [EVIDENCE_SCHEMA],
+            "source_of_truth": "the new column, from this revision on; the old column stays, equal to it by the trigger, for the versions that still map it",
+            "read_policy": "C (new name only) reads the new column; B keeps reading the old one, which the trigger keeps equal",
+            "write_policy": "C writes the new column and the trigger fills the old one; B writes both; A's writes to the old column are still mirrored; one statement that sets both names to different values is refused",
+            "coexistence": "B and C may run together on the retire schema; A keeps working through the trigger but is outside this phase's contract and must be gone before the destructive contract; the application tags its connections (application_name) so the evidence can tell the generations apart",
+            "state_after": "declared: retire; the function comment records truth=<new column> and retired_at; downgrade: DROP NOT NULL, DROP DEFAULT and the comment back to the old column (no data moves)",
+            "renames": [f"{c['table']}.{c['from_column']} -> {c['column']}" for c in retiring],
+        })
     if contract_rev:
         phases.append({
             "phase": PHASE_CONTRACT,
@@ -1219,5 +1778,21 @@ def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], ind
             "evidence_required": [EVIDENCE_SCHEMA],
             "state_after": "declared: contract; the downgrade is DROP NOT NULL (no data lost)",
             "columns": [f"{c['table']}.{c['column']}" for c in contracting],
+        })
+    if drop_rev:
+        phases.append({
+            "phase": PHASE_CONTRACT,
+            "revision": drop_rev,
+            "destructive": True,
+            "transactional": True,
+            "reversible": "conditional",
+            "lock_profile": "one transaction: ACCESS EXCLUSIVE on the table (lock_timeout 5s: it fails rather than queue behind traffic), every precondition re-checked on the live catalog, DROP TRIGGER, DROP FUNCTION, DROP COLUMN ... RESTRICT (never CASCADE); a failure anywhere rolls everything back",
+            "preconditions": list(DROP_PRECONDITIONS),
+            "evidence_required": [EVIDENCE_SCHEMA],
+            "ddl_reversibility": "conditional: the downgrade recreates the old column, copies the current values of the new column back, restores NOT NULL and the default, and recreates the sync trigger (truth = the new column); offline, a full-table UPDATE in one transaction",
+            "data_recovery": "not provided: the content the old column had at the time of the drop is not recoverable from the database once dropped; keep a backup taken before the upgrade if it matters (after the checks it equals the new column, which stays)",
+            "compatibility_restoration": "B works again after the downgrade (both columns, trigger); there is no online rollback: stop, downgrade, redeploy",
+            "state_after": "declared: contract; the old column, its sync trigger and function are gone; the operation stays in the runner's definitions for the evidence",
+            "columns": [f"{c['table']}.{c['from_column']}" for c in dropping],
         })
     return phases

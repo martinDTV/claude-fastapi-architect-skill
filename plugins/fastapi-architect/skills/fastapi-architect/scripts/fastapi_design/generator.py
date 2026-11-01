@@ -32,8 +32,8 @@ from .blueprint import Blueprint
 from .spec import Spec
 
 MANIFEST = ".fastapi-architect/generation.json"
-MANIFEST_SCHEMA = "fastapi-architect/generation/1.4"  # 1.2 records the implemented security model (increment 5); 1.3 (v2.1) records phased changes and concurrent indexes; 1.4 (v2.2) records renames in transition (kind, from_column, sync, policies)
-MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2", "fastapi-architect/generation/1.3", "fastapi-architect/generation/1.4")
+MANIFEST_SCHEMA = "fastapi-architect/generation/1.5"  # 1.5 (v2.2 inc. 2): application_tag; rename entries carry retire/contract state, compatible_tags, destructive record  # 1.2 records the implemented security model (increment 5); 1.3 (v2.1) records phased changes and concurrent indexes; 1.4 (v2.2) records renames in transition (kind, from_column, sync, policies)
+MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2", "fastapi-architect/generation/1.3", "fastapi-architect/generation/1.4", "fastapi-architect/generation/1.5")
 
 
 class GenerationError(RuntimeError):
@@ -117,6 +117,7 @@ def build_manifest(spec: Spec, blueprint: Blueprint, tool_version: str, *, histo
         "migrations": list(blueprint.migrations),
         "phased_changes": list(blueprint.phased),  # 1.3: expand/backfill/contract operations and their declared state
         "concurrent_indexes": list(blueprint.indexes),  # 1.3
+        "application_tag": blueprint.application_tag,  # 1.5: the application_name this generation announces to PostgreSQL
         "security": security,
         "history": list(history) if history is not None else [{"operation": "generate", "spec_digest": spec.digest, "modules": [m.name for m in spec.modules]}],
     }

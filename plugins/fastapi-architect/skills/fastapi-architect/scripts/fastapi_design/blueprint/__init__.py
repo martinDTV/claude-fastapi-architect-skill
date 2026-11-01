@@ -51,16 +51,20 @@ from typing import Dict, List, Optional
 from ..advisor import STYLE_HEXAGONAL, Recommendation
 from ..spec import IntegrationSpec, Spec
 from ._base import Blueprint, Layout, Lineage, PhaseState
-from ._helpers import _authz, _claim_binding, _oidc, _ordered_entities, _registry, _rls
+from ._helpers import _authz, _claim_binding, _oidc, _ordered_entities, _registry, _rls, field_from_doc
 from .modules import _adapter, _dependencies, _models, _ports, _ports_for, _repository, _router, _schemas, _service
-from .persistence import _alembic_env, _alembic_ini, _alembic_mako, _db, _migration, added_columns, delta_revision, initial_revision, migration_file
+from .persistence import _alembic_env, _alembic_ini, _alembic_mako, _column_sql, _db, _migration, added_columns, delta_revision, initial_revision, migration_file
 from .phased import (
+    application_tag,
     backfill_runner,
     backfill_specs,
     backfill_tests,
     contract_migration,
     contract_migration_file,
     contract_revision,
+    drop_migration,
+    drop_migration_file,
+    drop_revision,
     index_migration,
     index_migration_file,
     index_name,
@@ -68,6 +72,9 @@ from .phased import (
     pending_columns,
     progress_table,
     renames_of,
+    retire_migration,
+    retire_migration_file,
+    retire_revision,
 )
 from .scaffold import _api_router, _audit_config, _config, _env_example, _errors, _gitignore, _main, _pyproject, _readme
 from .security import _authz_module, _security
@@ -86,7 +93,8 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
     pending = pending_columns(phases.pending) if phases is not None else frozenset()
     renames = renames_of(phases.pending) if phases is not None else {}
     indexed = frozenset((str(i["table"]), str(c)) for i in (phases.all_indexes if phases is not None else []) for c in i["columns"])
-    has_phased = phases is not None and bool(phases.all_phased or phases.new_phased or phases.contracting)
+    has_phased = phases is not None and bool(phases.all_phased or phases.new_phased or phases.contracting or phases.retiring or phases.dropping)
+    tag = application_tag(spec, phases.all_phased if phases is not None else [])
     files: Dict[str, str] = {}
     notes: List[str] = []
     migrations: List[Dict[str, object]] = []
@@ -107,7 +115,7 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
     if _authz(spec):
         files[f"src/{pkg}/core/authz.py"] = _authz_module(spec)
     if pg:
-        files[f"src/{pkg}/core/db.py"] = _db(spec)
+        files[f"src/{pkg}/core/db.py"] = _db(spec, tag)
         files["alembic.ini"] = _alembic_ini(spec)
         files["migrations/env.py"] = _alembic_env(spec, layout, phases)
         files["migrations/script.py.mako"] = _alembic_mako()
@@ -133,10 +141,20 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
                 files[index_migration_file(head, phases.new_indexes)] = index_migration(spec, head, phases.new_indexes)
                 migrations.append({"revision": index_revision(head, phases.new_indexes), "down_revision": head, "file": index_migration_file(head, phases.new_indexes), "tables": [], "columns": [], "indexes": [index_name(str(i["table"]), list(i["columns"])) for i in phases.new_indexes], "row_level_security": _rls(spec), "phase": "index", "transactional": False, "reversible": True})
                 head = index_revision(head, phases.new_indexes)
+            if phases is not None and phases.retiring:
+                files[retire_migration_file(head, phases.retiring)] = retire_migration(spec, head, phases.retiring)
+                migrations.append({"revision": retire_revision(head, [str(c["op_id"]) for c in phases.retiring]), "down_revision": head, "file": retire_migration_file(head, phases.retiring), "tables": [], "columns": [f"{c['table']}.{c['column']}" for c in phases.retiring], "row_level_security": _rls(spec), "phase": "retire", "transactional": False, "reversible": True})
+                head = retire_revision(head, [str(c["op_id"]) for c in phases.retiring])
             if phases is not None and phases.contracting:
                 files[contract_migration_file(head, phases.contracting)] = contract_migration(spec, head, phases.contracting)
                 migrations.append({"revision": contract_revision(head, [str(c["op_id"]) for c in phases.contracting]), "down_revision": head, "file": contract_migration_file(head, phases.contracting), "tables": [], "columns": [f"{c['table']}.{c['column']}" for c in phases.contracting], "operations": [str(c["op_id"]) for c in phases.contracting], "row_level_security": _rls(spec), "phase": "contract", "transactional": False, "reversible": True})
                 head = contract_revision(head, [str(c["op_id"]) for c in phases.contracting])
+            if phases is not None and phases.dropping:
+                column_sql = {str(c["op_id"]): _column_sql(field_from_doc(c["from_field"]), True) for c in phases.dropping}  # type: ignore[arg-type]
+                auth = phases.drop_authorization
+                files[drop_migration_file(head, phases.dropping)] = drop_migration(spec, head, phases.dropping, column_sql, approved_by=str(auth.get("approved_by") or ""), phrase=str(auth.get("phrase") or ""), reviewed_functions=list(auth.get("reviewed_functions") or []))
+                migrations.append({"revision": drop_revision(head, [str(c["op_id"]) for c in phases.dropping]), "down_revision": head, "file": drop_migration_file(head, phases.dropping), "tables": [], "columns": [f"{c['table']}.{c['from_column']}" for c in phases.dropping], "row_level_security": _rls(spec), "phase": "contract", "destructive": True, "transactional": True, "reversible": "conditional"})
+                head = drop_revision(head, [str(c["op_id"]) for c in phases.dropping])
         test_phases = replace(phases, head=head) if phases is not None else None
         files["tests/test_migrations.py"] = _migration_tests(spec, lineage, test_phases)
         if has_phased:
@@ -193,7 +211,7 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
         notes.append(f"row-level security: every tenant table is protected in its creating migration (ENABLE + FORCE, policy on {spec.security['multi_tenant']['rls']['context_key']}, grants to {spec.security['multi_tenant']['rls']['app_role']}); the application sets the tenant context per transaction; tests/test_rls.py proves it through the application role and needs {spec.package.upper()}_MIGRATIONS_DATABASE_URL besides DATABASE_URL")
     if has_phased:
         notes.append(f"phased migrations: {len(phases.all_phased)} change(s) with a backfill (python -m {pkg}.ops.backfill), {len(phases.all_indexes)} concurrent index(es); pending columns stay nullable until their contract phase")
-    return Blueprint(style=rec.style, package=pkg, files=files, layout=layout_lines, notes=notes, migrations=migrations, phased=list(phases.all_phased) if phases is not None else [], indexes=list(phases.all_indexes) if phases is not None else [])
+    return Blueprint(style=rec.style, package=pkg, files=files, layout=layout_lines, notes=notes, migrations=migrations, application_tag=tag, phased=list(phases.all_phased) if phases is not None else [], indexes=list(phases.all_indexes) if phases is not None else [])
 
 
 def _tree(paths: List[str]) -> List[str]:

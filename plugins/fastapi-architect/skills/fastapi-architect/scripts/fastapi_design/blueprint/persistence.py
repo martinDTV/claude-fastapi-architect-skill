@@ -12,14 +12,15 @@ from ._helpers import _call, _entity_index, _fk_fields, _fk_name, _ordered_entit
 from .phased import KIND_RENAME, pending_columns, progress_table, progress_table_ddl, rename_sync_ddl
 
 
-def _db(spec: Spec) -> str:
+def _db(spec: Spec, application_tag: str = "") -> str:
     rls = _rls(spec)
     lines = [
         '"""Async engine, request-scoped sessions and the declarative base (SQLAlchemy 2, asyncpg).',
         "",
         "Tables are created by Alembic migrations only (``alembic upgrade head``); nothing here calls ``create_all``.",
         "The naming convention gives every constraint and index a deterministic name, so the migration scripts and the",
-        "models agree and the test suite can compare them.",
+        "models agree and the test suite can compare them. Every connection announces APPLICATION_NAME (package and",
+        "generation) to PostgreSQL, so the migration evidence can tell which builds are connected.",
     ]
     if rls:
         lines += [
@@ -44,6 +45,7 @@ def _db(spec: Spec) -> str:
         lines += ["", f"from {spec.package}.core.security import TenantPrincipalDep"]
     lines += [
         "",
+        f'APPLICATION_NAME = "{application_tag}"  # this generation, as pg_stat_activity.application_name',
         "NAMING_CONVENTION = {",
         '    "ix": "ix_%(column_0_label)s",',
         '    "uq": "uq_%(table_name)s_%(column_0_N_name)s",',
@@ -61,7 +63,8 @@ def _db(spec: Spec) -> str:
         "",
         "",
         "def make_engine(url: str) -> AsyncEngine:",
-        "    return create_async_engine(url, pool_pre_ping=True)",
+        '    settings = {"server_settings": {"application_name": APPLICATION_NAME}}',
+        "    return create_async_engine(url, pool_pre_ping=True, connect_args=settings)",
         "",
         "",
         "async def get_session(request: Request) -> AsyncIterator[AsyncSession]:",
@@ -374,7 +377,8 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[P
     for r in (phases.new_phased if phases is not None else []):
         if r.get("kind") != KIND_RENAME:
             continue
-        sync_up, sync_down = rename_sync_ddl(str(r["table"]), str(r["from_column"]), str(r["column"]), str(r["op_id"]))
+        old_doc = r.get("from_field") if isinstance(r.get("from_field"), dict) else {}
+        sync_up, sync_down = rename_sync_ddl(str(r["table"]), str(r["from_column"]), str(r["column"]), str(r["op_id"]), truth=str(r["from_column"]), has_default=old_doc.get("default") is not None)
         up += [f"    # rename {r['table']}.{r['from_column']} -> {r['column']} in transition: the trigger keeps both columns equal for every write"] + sync_up
         down = sync_down + down
     changes = new_tables + [f"{t}.{f.name}" for t, f, _r in columns]

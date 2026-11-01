@@ -376,6 +376,7 @@ def _tests(spec: Spec, module: ModuleSpec, ports: List[IntegrationSpec], renames
             old = str(entry["from_column"])
             if True:
                 test(f"test_create_{x}_accepts_the_former_name_{old}_and_returns_both_names", [f'    payload["{old}"] = payload.pop("{f.name}")', "    response = client.post(url, json=payload, headers=headers)", "    assert response.status_code == 201, response.text", "    body = response.json()", f'    assert body["{f.name}"] == body["{old}"] == PAYLOAD_{up}["{f.name}"]'])
+                test(f"test_create_{x}_refuses_{old}_and_{f.name}_in_one_request", [f'    payload["{old}"] = {_changed_sample(f)}  # both names, two values: ambiguous, refused at the boundary', "    response = client.post(url, json=payload, headers=headers)", "    assert response.status_code == 422, response.text", f'    payload["{old}"] = payload["{f.name}"]  # the same value under both names is refused too: one name per request', "    assert client.post(url, json=payload, headers=headers).status_code == 422", f'    del payload["{old}"]', "    assert client.post(url, json=payload, headers=headers).status_code == 201"])
             if ops["update"]:
                 test(f"test_update_{x}_through_the_former_name_{old}_writes_both_columns", ["    created = client.post(url, json=payload, headers=headers).json()", f'    updated = client.patch({item}, json={{"{old}": {_changed_sample(f)}}}, headers=headers)', "    assert updated.status_code == 200, updated.text", f'    assert updated.json()["{f.name}"] == updated.json()["{old}"] == {_changed_sample(f)}', f'    again = client.patch({item}, json={{"{f.name}": {_sample(f)}}}, headers=headers)', f'    assert again.json()["{old}"] == {_sample(f)}'])
         if ops["get_route"] and ops["create"]:
@@ -508,6 +509,7 @@ def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None, phases: Opti
     progress = progress_table(spec) if phases is not None and (phases.all_phased or phases.new_phased) else None
     if progress:
         tables = sorted(tables + [progress])
+    retired = sorted((str(c["table"]), str(c["from_column"])) for c in (phases.all_phased if phases is not None else []) if c.get("kind") == "rename" and c.get("state_declared") == "retire")
     fks = []
     for _m, e in _ordered_entities(spec):
         for f in _fk_fields(e):
@@ -522,6 +524,7 @@ def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None, phases: Opti
         f'REVISION = "{revision}"',
         *_call("TABLES = [", [json.dumps(t) for t in tables], "]"),
         *_call("FOREIGN_KEYS = [", [f"({json.dumps(t)}, {json.dumps(n)})" for t, n in fks], "]"),
+        *(_call("RETIRED_COLUMNS = [", [f"({json.dumps(t)}, {json.dumps(c)})" for t, c in retired], "]  # old names of retired renames: in the database, not in the models, until the contract") if retired else []),
         "",
         "",
         "async def _inspect(url: str, what):",
@@ -539,13 +542,31 @@ def _migration_tests(spec: Spec, lineage: Optional[Lineage] = None, phases: Opti
         "",
         "",
         "def test_migrated_schema_matches_the_models(migrated: str):",
-        '    """No drift: autogenerate would produce nothing (unexpected schema changes are detected here)."""',
-        "",
-        "    def diff(sync):",
-        '        context = MigrationContext.configure(sync, opts={"compare_type": True})',
-        "        return compare_metadata(context, Base.metadata)",
-        "",
-        "    assert run(_inspect(migrated, diff)) == []",
+        *(
+            [
+                '    """No drift: autogenerate would produce nothing (unexpected schema changes are detected here), the old',
+                '    column of a retired rename aside (kept for the transitional version until the contract drops it)."""',
+                "",
+                "    def diff(sync):",
+                '        context = MigrationContext.configure(sync, opts={"compare_type": True})',
+                "        return compare_metadata(context, Base.metadata)",
+                "",
+                "    def retired(entry) -> bool:",
+                '        return entry[0] == "remove_column" and (entry[2], entry[3].name) in RETIRED_COLUMNS',
+                "",
+                "    assert [entry for entry in run(_inspect(migrated, diff)) if not retired(entry)] == []",
+            ]
+            if retired
+            else [
+                '    """No drift: autogenerate would produce nothing (unexpected schema changes are detected here)."""',
+                "",
+                "    def diff(sync):",
+                '        context = MigrationContext.configure(sync, opts={"compare_type": True})',
+                "        return compare_metadata(context, Base.metadata)",
+                "",
+                "    assert run(_inspect(migrated, diff)) == []",
+            ]
+        ),
         "",
         "",
         "def test_tables_and_constraints_exist(migrated: str):",

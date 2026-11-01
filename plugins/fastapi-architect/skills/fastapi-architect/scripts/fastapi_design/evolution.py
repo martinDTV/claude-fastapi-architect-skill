@@ -48,16 +48,33 @@ from fastapi_common.fs import resolve_against
 from .adoption import ADOPTION
 from .advisor import recommend
 from .blueprint import Layout, Lineage, PhaseState, added_columns, build, delta_revision
-from .blueprint.phased import KIND_RENAME, MIRROR_STRATEGY, contract_revision, index_name, index_revision, operation_id, phase_descriptions, sync_names
+from .blueprint.phased import (
+    KIND_RENAME,
+    MIRROR_STRATEGY,
+    PHASE_RETIRE,
+    application_tag,
+    confirmation_phrase,
+    contract_revision,
+    drop_revision,
+    index_name,
+    index_revision,
+    operation_id,
+    phase_descriptions,
+    retire_revision,
+    sync_names,
+)
 from .discovery import ProjectModel, discover
 from .generator import MANIFEST, GenerationError, WriteError, build_manifest, safe_join
 from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
 from .locking import LockHeld
+from .locking import inspect as inspect_lock
 from .migrations import (
     PROTECTED_COLUMNS,
     backfill_params,
     contract_preconditions,
+    drop_preconditions,
     load_evidence,
+    retire_preconditions,
     validate_authorization,
     validate_backfill,
     validate_contract_fields,
@@ -68,14 +85,16 @@ from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
 from .verify import run_generated_tests
 
-EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.3"  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
-EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3")
+EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.4"  # 1.4 (v2.2 inc. 2): retire_fields, contract_fields on a retired rename (destructive), authorization.destructive  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
+EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3", "fastapi-architect/evolution/1.4")
 EVOLUTION_SCHEMA_12 = "fastapi-architect/evolution/1.2"
 EVOLUTION_SCHEMA_13 = "fastapi-architect/evolution/1.3"
-PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13)
-REPORT_SCHEMA = "evolution_report/1.4"  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
+EVOLUTION_SCHEMA_14 = "fastapi-architect/evolution/1.4"
+PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14)
+RENAME_SCHEMAS = (EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14)
+REPORT_SCHEMA = "evolution_report/1.5"  # 1.5 (v2.2 inc. 2): plan.migration.retires, destructive contract entries, the retire phase, contract_authorization.confirm_irreversible (additive)  # 1.4 (v2.2): plan.migration.renames and the transition phase  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
-DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
+DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "src/{pkg}/core/db.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
 STATE_PLANNED = "planned"
 STATE_NOOP = "noop"
@@ -86,6 +105,7 @@ STATE_INCONCLUSIVE = "inconclusive"
 STATE_REJECTED = "rejected"
 SEVERITY_BLOCKING = ("high", "critical")
 COMPATIBLE, POTENTIALLY_INCOMPATIBLE, UNSUPPORTED = "compatible", "potentially_incompatible", "unsupported"
+DESTRUCTIVE = "destructive"  # v2.2 inc. 2: the drop of a retired rename's old column
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 
@@ -182,8 +202,11 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
                     if schema not in PHASED_SCHEMAS:
                         errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_12}")
                 elif key == "rename_fields":
-                    if schema != EVOLUTION_SCHEMA_13:
+                    if schema not in RENAME_SCHEMAS:
                         errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_13} (renames as expand_contract, in transition)")
+                elif key == "retire_fields":
+                    if schema != EVOLUTION_SCHEMA_14:
+                        errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_14} (the truth of a rename moves to the new column)")
                 elif key not in ("name", "add_fields", "add_operations") and not str(key).startswith("x-"):
                     errors.append(f"{q}.{key}: unknown property")
             if "add_fields" in e and (not isinstance(e["add_fields"], list) or not e["add_fields"]):
@@ -201,15 +224,18 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
             if "contract_fields" in e and schema in PHASED_SCHEMAS:
                 e["contract_fields"], contract_errors = validate_contract_fields(e["contract_fields"], f"{q}.contract_fields")
                 errors.extend(contract_errors)
-            if "rename_fields" in e and schema == EVOLUTION_SCHEMA_13:
+            if "rename_fields" in e and schema in RENAME_SCHEMAS:
                 e["rename_fields"], rename_errors = validate_rename_fields(e["rename_fields"], f"{q}.rename_fields")
                 errors.extend(rename_errors)
+            if "retire_fields" in e and schema == EVOLUTION_SCHEMA_14:
+                e["retire_fields"], retire_errors = validate_contract_fields(e["retire_fields"], f"{q}.retire_fields")
+                errors.extend(retire_errors)
             if "add_operations" in e:
                 ops = e["add_operations"]
                 if not isinstance(ops, list) or any(o not in OPERATIONS for o in ops):
                     errors.append(f"{q}.add_operations: expected a list of {', '.join(OPERATIONS)}")
-            if not any(key in e for key in ("add_fields", "add_operations", "add_indexes", "contract_fields", "rename_fields")):
-                errors.append(f"{q}: nothing to add (add_fields, add_operations, add_indexes, contract_fields or rename_fields)")
+            if not any(key in e for key in ("add_fields", "add_operations", "add_indexes", "contract_fields", "rename_fields", "retire_fields")):
+                errors.append(f"{q}: nothing to add (add_fields, add_operations, add_indexes, contract_fields, rename_fields or retire_fields)")
         endpoints = m.get("add_endpoints", [])
         if not isinstance(endpoints, list):
             errors.append(f"{p}.add_endpoints: expected a list")
@@ -284,6 +310,8 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
         errors.append(f"evolution.authorization: needs schema {EVOLUTION_SCHEMA_12}")
     authorization, auth_errors = validate_authorization(document.get("authorization")) if schema in PHASED_SCHEMAS else ({}, [])
     errors.extend(auth_errors)
+    if isinstance(document.get("authorization"), dict) and "destructive" in document["authorization"] and schema != EVOLUTION_SCHEMA_14:
+        errors.append(f"evolution.authorization.destructive: needs schema {EVOLUTION_SCHEMA_14}")
     project = document.get("project")
     if not isinstance(project, dict):
         errors.append("evolution.project: required object with 'path'")
@@ -407,6 +435,8 @@ class EvolutionPlan:
     phased_new: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: phased changes this plan declares (expand)
     indexes_new: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: concurrent indexes this plan creates
     contracting: List[Dict[str, Any]] = field(default_factory=list)  # v2.1: phased changes this plan contracts
+    retiring: List[Dict[str, Any]] = field(default_factory=list)  # v2.2: renames whose truth this plan moves to the new column
+    dropping: List[Dict[str, Any]] = field(default_factory=list)  # v2.2: retired renames whose old column this plan drops
     files: Dict[str, str] = field(default_factory=dict)
     expected: Dict[str, Optional[str]] = field(default_factory=dict)
     evolved_spec: Optional[Spec] = None
@@ -422,6 +452,10 @@ class EvolutionPlan:
             what.append("modify " + ", ".join(self.modified_modules))
         if self.contracting:
             what.append("contract " + ", ".join(f"{c['table']}.{c['column']}" for c in self.contracting))
+        if self.retiring:
+            what.append("retire " + ", ".join(f"{c['table']}.{c['from_column']}" for c in self.retiring))
+        if self.dropping:
+            what.append("drop " + ", ".join(f"{c['table']}.{c['from_column']}" for c in self.dropping))
         renames = [c for c in self.phased_new if c.get("kind") == "rename"]
         if renames:
             what.append("rename " + ", ".join(f"{c['table']}.{c['from_column']}->{c['column']}" for c in renames))
@@ -451,7 +485,7 @@ class EvolutionPlan:
             "tests_required": list(self.tests_required),
             "diffs": dict(self.diffs),
             "transforms": list(self.transforms),
-            "phased": {"new": list(self.phased_new), "indexes": list(self.indexes_new), "contracting": list(self.contracting)},
+            "phased": {"new": list(self.phased_new), "indexes": list(self.indexes_new), "contracting": list(self.contracting), "retiring": list(self.retiring), "dropping": list(self.dropping)},
         }
 
 
@@ -495,7 +529,7 @@ def _module_files(layout: Layout, pkg: str, module: str) -> List[str]:
 def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[ModuleChange], pg: bool, plan: "EvolutionPlan", block, phased_ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Merge modify_modules into the document; classify every change; block the unsafe ones. ``phased_ctx`` (v2.1)
     carries the manifest's phased changes and indexes and collects the ones this plan declares."""
-    phased_ctx = phased_ctx if phased_ctx is not None else {"manifest_phased": [], "manifest_indexes": [], "head_before": None, "new": [], "indexes": [], "contracting": []}
+    phased_ctx = phased_ctx if phased_ctx is not None else {"manifest_phased": [], "manifest_indexes": [], "head_before": None, "new": [], "indexes": [], "contracting": [], "retiring": [], "dropping": []}
     modules = {m.get("name"): m for m in doc.get("functional", {}).get("modules", []) if isinstance(m, dict)}
     existing_tables = {e.plural for m in baseline.modules for e in m.entities}
     for change in changes:
@@ -601,6 +635,10 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 if old_doc.get("references"):
                     block("rename_protected_column", f"{label}: {source!r} is a foreign key; renaming a relation is not supported in this version")
                     continue
+                indexed_by = [str(i.get("name")) for i in phased_ctx["manifest_indexes"] + phased_ctx["indexes"] if i.get("table") == table and source in (i.get("columns") or [])]
+                if indexed_by:
+                    block("rename_indexed_column_unsupported", f"{label}: {source!r} is a column of the concurrent index(es) {indexed_by}; an index on the old column would be dropped with it at the contract. Drop the index and declare it on the new name after the rename, or keep the name")
+                    continue
                 params = {"source": source}
                 op_id = operation_id(table, target, MIRROR_STRATEGY, params, phased_ctx.get("head_before") or "")
                 if any(p.get("op_id") == op_id for p in phased_ctx["manifest_phased"]):
@@ -635,7 +673,15 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                     block("contract_operation_known", f"{label}: operation {item['operation']} is not a phased change of {table}.{item['name']} recorded in the manifest")
                     continue
                 if pending.get("kind") == KIND_RENAME:
-                    block("contract_rename_available", f"{label}: operation {item['operation']} is a rename in transition; its retire and contract phases are not available in this version (nothing is retired or dropped)")
+                    if pending.get("state_declared") == "expand":
+                        block("contract_rename_retire_first", f"{label}: operation {item['operation']} is a rename in transition; declare it in retire_fields first (the truth moves to the new column, nothing is dropped), deploy that generation, verify, and only then contract")
+                    elif pending.get("state_declared") != PHASE_RETIRE:
+                        block("contract_operation_pending", f"{label}: operation {item['operation']} is already declared {pending.get('state_declared')!r}")
+                    elif any(d.get("op_id") == pending.get("op_id") for d in phased_ctx["dropping"]):
+                        continue
+                    else:
+                        phased_ctx["dropping"].append(dict(pending))
+                        plan.changes.append({"kind": "drop_column", "target": label, "classification": DESTRUCTIVE, "detail": f"destructive contract of operation {item['operation']}: DROP COLUMN {table}.{pending.get('from_column')} RESTRICT with its sync trigger and function, in one transaction, after sixteen named preconditions; the downgrade recreates the column from the new column's current values (offline); B is incompatible from here on"})
                     continue
                 if pending.get("state_declared") != "expand":
                     block("contract_operation_pending", f"{label}: operation {item['operation']} is already declared {pending.get('state_declared')!r}")
@@ -646,6 +692,22 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                     continue
                 phased_ctx["contracting"].append(dict(pending))
                 plan.changes.append({"kind": "contract_not_null", "target": label, "classification": POTENTIALLY_INCOMPATIBLE, "detail": f"NOT NULL transition of operation {item['operation']}: needs the backfill complete, zero pending rows, the application version that writes the column, fresh evidence and explicit authorization; online (CHECK NOT VALID, VALIDATE, SET NOT NULL, DROP CONSTRAINT); reversible (DROP NOT NULL)"})
+            for item in ech.get("retire_fields", []) if isinstance(ech.get("retire_fields"), list) else []:
+                label = f"{change.name}.{ech['name']}.{item['name']}:retire"
+                pending = next((p for p in phased_ctx["manifest_phased"] if p.get("op_id") == item["operation"]), None)
+                if pending is None or pending.get("table") != table or pending.get("column") != item["name"]:
+                    block("retire_operation_known", f"{label}: operation {item['operation']} is not a phased change of {table}.{item['name']} recorded in the manifest")
+                    continue
+                if pending.get("kind") != KIND_RENAME:
+                    block("retire_rename_only", f"{label}: operation {item['operation']} is not a rename; an added column has no name to retire (contract_fields makes it NOT NULL)")
+                    continue
+                if pending.get("state_declared") != "expand":
+                    block("retire_operation_pending", f"{label}: operation {item['operation']} is already declared {pending.get('state_declared')!r}")
+                    continue
+                if any(r.get("op_id") == pending.get("op_id") for r in phased_ctx["retiring"]):
+                    continue
+                phased_ctx["retiring"].append(dict(pending))
+                plan.changes.append({"kind": "retire_rename", "target": label, "classification": POTENTIALLY_INCOMPATIBLE, "detail": f"retire of operation {item['operation']}: the code drops the former name {pending.get('from_column')!r} (requests and responses carry {item['name']!r} only), the retire revision moves the truth to {item['name']} (NOT NULL and default carried over, function comment stamped), the old column stays and the trigger keeps it equal for the transitional version; needs fresh evidence (backfill complete, columns equal, trigger enabled) and authorization.contract.declared_by"})
             current_ops = ent.get("operations")
             current_set = set(current_ops) if isinstance(current_ops, list) else set(OPERATIONS)
             for op in ech.get("add_operations", []):
@@ -660,7 +722,7 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
     return doc
 
 
-def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION, authorize_contract: bool = False, evidence_path: Optional[str] = None) -> EvolutionPlan:
+def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION, authorize_contract: bool = False, evidence_path: Optional[str] = None, confirm_irreversible: Optional[str] = None) -> EvolutionPlan:
     """Compute the plan without writing anything."""
     raw = _resolve_project(contract)
     plan = EvolutionPlan(state=STATE_PLANNED, project=str(raw), contract=contract)
@@ -764,29 +826,50 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     evolved_doc["functional"]["modules"] = list(evolved_doc["functional"]["modules"]) + list(new_modules)  # new modules first: changes may depend on them
     manifest_chain = [m for m in (model.manifest.get("migrations") or []) if isinstance(m, dict)]
     head_before = str(manifest_chain[-1].get("revision")) if manifest_chain else None
-    phased_ctx: Dict[str, Any] = {"manifest_phased": [dict(x) for x in (model.manifest.get("phased_changes") or []) if isinstance(x, dict)], "manifest_indexes": [dict(x) for x in (model.manifest.get("concurrent_indexes") or []) if isinstance(x, dict)], "head_before": head_before, "new": [], "indexes": [], "contracting": []}
+    phased_ctx: Dict[str, Any] = {"manifest_phased": [dict(x) for x in (model.manifest.get("phased_changes") or []) if isinstance(x, dict)], "manifest_indexes": [dict(x) for x in (model.manifest.get("concurrent_indexes") or []) if isinstance(x, dict)], "head_before": head_before, "new": [], "indexes": [], "contracting": [], "retiring": [], "dropping": []}
     evolved_doc = _apply_module_changes(baseline, evolved_doc, contract.modify_modules, pg, plan, block, phased_ctx)
     plan.phased_new, plan.indexes_new, plan.contracting = phased_ctx["new"], phased_ctx["indexes"], phased_ctx["contracting"]
+    plan.retiring, plan.dropping = phased_ctx["retiring"], phased_ctx["dropping"]
+    if plan.dropping and "no_destructive_schema_change" in contract.invariants:
+        block("no_destructive_schema_change", "the contract declares no_destructive_schema_change and asks to drop " + ", ".join(f"{d['table']}.{d['from_column']}" for d in plan.dropping) + "; a destructive contract must leave that invariant out, on purpose")
     if plan.blockers:
         plan.state = STATE_BLOCKED
         return plan
-    if plan.contracting:
+    if plan.contracting or plan.retiring or plan.dropping:
         auth = contract.authorization.get("contract") or {}
+        destructive_auth = contract.authorization.get("destructive") or {}
         evidence_file = evidence_path or auth.get("evidence")
         evidence, evidence_errors = (None, ["no evidence path given (authorization.contract.evidence or --evidence)"])
         if evidence_file:
             evidence, evidence_errors = load_evidence(str(resolve_against(str(evidence_file), contract.source)))
         if evidence is None:
             block("contract_evidence_valid", "; ".join(evidence_errors))
+        max_age = float(auth.get("max_evidence_age_hours") or 24.0)
         for change in plan.contracting:
-            for name, ok, detail in contract_preconditions(change, evidence, head_before=head_before, authorized=authorize_contract, declared_by=auth.get("declared_by"), max_age_hours=float(auth.get("max_evidence_age_hours") or 24.0), indexes=phased_ctx["manifest_indexes"]):
+            for name, ok, detail in contract_preconditions(change, evidence, head_before=head_before, authorized=authorize_contract, declared_by=auth.get("declared_by"), max_age_hours=max_age, indexes=phased_ctx["manifest_indexes"]):
                 pre.append(Precondition(name, ok, detail))
                 if not ok:
                     block(name, f"{change['table']}.{change['column']}: {detail}")
+        for change in plan.retiring:
+            for name, ok, detail in retire_preconditions(change, evidence, head_before=head_before, declared_by=auth.get("declared_by"), max_age_hours=max_age, indexes=phased_ctx["manifest_indexes"]):
+                pre.append(Precondition(name, ok, detail))
+                if not ok:
+                    block(name, f"{change['table']}.{change['from_column']} -> {change['column']}: {detail}")
+        if plan.dropping:
+            holder = inspect_lock(project)
+            alembic_now = model.alembic or {}
+            heads_on_disk = len(alembic_now.get("heads") or []) if alembic_now.get("chain_ok") else 0
+            drift_clean = not any(state == "managed_modified" for state in model.ownership.values())
+            phrase = confirmation_phrase(plan.dropping)
+            for change in plan.dropping:
+                for name, ok, detail in drop_preconditions(change, evidence, head_before=head_before, authorized=authorize_contract, declared_by=auth.get("declared_by"), max_age_hours=max_age, destructive=destructive_auth, confirm_phrase=confirm_irreversible, expected_phrase=phrase, package=baseline.package, lock_holder=holder if holder and holder.get("status") == "held" else None, drift_clean=drift_clean, heads_on_disk=heads_on_disk):
+                    pre.append(Precondition(name, ok, detail))
+                    if not ok:
+                        block(name, f"{change['table']}.{change['from_column']}: {detail}")
         if plan.blockers:
             plan.state = STATE_BLOCKED
             return plan
-    if canonical_digest(evolved_doc) == baseline.digest and not (plan.indexes_new or plan.contracting):
+    if canonical_digest(evolved_doc) == baseline.digest and not (plan.indexes_new or plan.contracting or plan.retiring or plan.dropping):
         plan.state = STATE_NOOP
         plan.evolved_spec_digest = baseline.digest
         pre.append(Precondition("already_applied", True, "the contract adds nothing the project does not already have; nothing to do"))
@@ -855,9 +938,9 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     baseline_phases = PhaseState(pending=[x for x in phased_ctx["manifest_phased"] if x.get("state_declared") == "expand"], all_phased=list(phased_ctx["manifest_phased"]), all_indexes=list(phased_ctx["manifest_indexes"]), head=head_before)
     old_files = build(baseline, baseline_rec, phases=baseline_phases).files
     phases: Optional[PhaseState] = None
-    expand_rev = index_rev = contract_rev = None
+    expand_rev = index_rev = contract_rev = retire_rev = drop_rev = None
     if pg and lineage is not None:
-        if (plan.phased_new or plan.indexes_new or plan.contracting) and not evolved.persistence["kind"] == "postgresql":
+        if (plan.phased_new or plan.indexes_new or plan.contracting or plan.retiring or plan.dropping) and not evolved.persistence["kind"] == "postgresql":
             block("phased_needs_postgresql", "phased changes need PostgreSQL persistence")
         head = lineage.head
         tables_now = set(lineage.tables)
@@ -867,23 +950,45 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         if plan.indexes_new:
             index_rev = index_revision(head, plan.indexes_new)
             head = index_rev
+        if plan.retiring:
+            retire_rev = retire_revision(head, [str(c["op_id"]) for c in plan.retiring])
+            head = retire_rev
         if plan.contracting:
             contract_rev = contract_revision(head, [str(c["op_id"]) for c in plan.contracting])
             head = contract_rev
+        if plan.dropping:
+            drop_rev = drop_revision(head, [str(c["op_id"]) for c in plan.dropping])
+            head = drop_rev
         for op in plan.phased_new:
             op.update(expand_revision=expand_rev, index_revision=index_rev, application_version=evolved.digest)
         contracting_ids = {str(c["op_id"]) for c in plan.contracting}
+        retiring_ids = {str(c["op_id"]) for c in plan.retiring}
+        dropping_ids = {str(c["op_id"]) for c in plan.dropping}
+        destructive_auth = contract.authorization.get("destructive") or {}
         all_phased: List[Dict[str, Any]] = []
         for x in phased_ctx["manifest_phased"]:
             entry = dict(x)
             if entry.get("op_id") in contracting_ids:
                 entry.update(state_declared="contract", contract_revision=contract_rev)
+            elif entry.get("op_id") in retiring_ids:
+                entry.update(state_declared=PHASE_RETIRE, retire_revision=retire_rev, application_version=evolved.digest, source_of_truth="to_column", read_policy="to_column", write_policy="to_column", transition="retired: the code knows the new name only; the trigger keeps the old column equal for the transitional version until the contract")
+            elif entry.get("op_id") in dropping_ids:
+                _trigger, _function = sync_names(str(entry["table"]), str(entry["op_id"]))
+                entry.update(state_declared="contract", contract_revision=drop_rev, dropped={"column": entry.get("from_column"), "trigger": _trigger, "function": _function}, destructive={"approved_by": destructive_auth.get("approved_by"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by"), "confirmation": confirmation_phrase(plan.dropping), "evidence_generated_at": (evidence.get("generated_at") if isinstance(evidence, dict) else None)})
             all_phased.append(entry)
         all_phased.extend(plan.phased_new)
+        tag = application_tag(evolved, all_phased)
+        for entry in all_phased:
+            if entry.get("kind") == KIND_RENAME and entry.get("state_declared") == PHASE_RETIRE:
+                tags = [str(t) for t in (entry.get("compatible_tags") or [])]
+                entry["compatible_tags"] = tags + ([tag] if tag not in tags else [])  # generations that do not map the old column
         plan.contracting = [x for x in all_phased if x.get("op_id") in contracting_ids]
+        plan.retiring = [x for x in all_phased if x.get("op_id") in retiring_ids]
+        plan.dropping = [x for x in all_phased if x.get("op_id") in dropping_ids]
         all_indexes = list(phased_ctx["manifest_indexes"]) + [dict(i, revision=index_rev) for i in plan.indexes_new]
-        phases = PhaseState(pending=[x for x in all_phased if x.get("state_declared") == "expand"], all_phased=all_phased, all_indexes=all_indexes, new_phased=list(plan.phased_new), new_indexes=list(plan.indexes_new), contracting=list(plan.contracting), head=head_before)
-    elif plan.phased_new or plan.indexes_new or plan.contracting:
+        drop_authorization = {"approved_by": destructive_auth.get("approved_by"), "phrase": confirmation_phrase(plan.dropping), "reviewed_functions": list(destructive_auth.get("reviewed_functions") or [])} if plan.dropping else {}
+        phases = PhaseState(pending=[x for x in all_phased if x.get("state_declared") == "expand"], all_phased=all_phased, all_indexes=all_indexes, new_phased=list(plan.phased_new), new_indexes=list(plan.indexes_new), contracting=list(plan.contracting), retiring=list(plan.retiring), dropping=list(plan.dropping), drop_authorization=drop_authorization, head=head_before)
+    elif plan.phased_new or plan.indexes_new or plan.contracting or plan.retiring or plan.dropping:
         block("phased_needs_migration_lineage", "phased changes, concurrent indexes and contract phases need a PostgreSQL project with a known migration chain")
     if plan.blockers:
         plan.state = STATE_BLOCKED
@@ -891,7 +996,7 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     new_bp = build(evolved, rec, lineage, phases)
     new_files = dict(new_bp.files)
     history = list(model.manifest.get("history") or [{"operation": "generate", "spec_digest": baseline.digest, "modules": existing}])
-    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new if x.get("kind") != KIND_RENAME], "renamed": [x["op_id"] for x in plan.phased_new if x.get("kind") == KIND_RENAME], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting]}})
+    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new if x.get("kind") != KIND_RENAME], "renamed": [x["op_id"] for x in plan.phased_new if x.get("kind") == KIND_RENAME], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting], "retired": [x["op_id"] for x in plan.retiring], "dropped": [x["op_id"] for x in plan.dropping]}})
     manifest = build_manifest(evolved, new_bp, tool_version, history=history)
     if lineage:
         for rel in lineage.files:
@@ -973,12 +1078,13 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         plan.migration.update({
             "head_after": delta[-1]["revision"] if delta else lineage.head,
             "revisions": [{"revision": x["revision"], "file": x["file"], "phase": x.get("phase", "additive"), "transactional": x.get("transactional", True), "reversible": x.get("reversible", True)} for x in delta],
-            "phases": phase_descriptions(evolved, plan.phased_new, plan.indexes_new, plan.contracting, lineage.head, expand_rev, index_rev, contract_rev),
+            "phases": phase_descriptions(evolved, plan.phased_new, plan.indexes_new, plan.contracting, lineage.head, expand_rev, index_rev, contract_rev, retiring=plan.retiring, retire_rev=retire_rev, dropping=plan.dropping, drop_rev=drop_rev),
             "backfills": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "strategy": op["strategy"], "params": op["params"], "application_version": op["application_version"], "run": f"python -m {evolved.package}.ops.backfill run {op['op_id']}", "verify": f"python -m {evolved.package}.ops.backfill verify --application-version {op['application_version']} --output evidence.json", "state": "declared: expand; applied and verified states are read from the database, never from the repository"} for op in plan.phased_new],
             "renames": [{"operation": op["op_id"], "table": op["table"], "from": op["from_column"], "to": op["column"], "strategy": "expand_contract", "sync": op["sync"], "source_of_truth": "the old column until the rename is retired", "read_policy": "the transitional application reads the old column and exposes both names (old one deprecated)", "write_policy": "the transitional application writes both; the old application writes the old one; the sync trigger mirrors either write, the old column winning when one statement sets both", "coexistence": "A (old name only) and B (both names) may run together; C (new name only) needs the retire phase, not available in this version", "next": "retire (remove the old name from the code) and contract (drop the old column): later increments, each an authorised evolution", "verify": f"python -m {evolved.package}.ops.backfill verify: mismatch_rows must be 0 and the sync trigger enabled"} for op in plan.phased_new if op.get("kind") == KIND_RENAME],
-            "contract": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "revision": contract_rev, "reversible": True} for op in plan.contracting],
+            "retires": [{"operation": op["op_id"], "table": op["table"], "from": op["from_column"], "to": op["column"], "revision": retire_rev, "reversible": True, "source_of_truth": "the new column from the retire revision on", "read_policy": "C reads the new column; B keeps reading the old one, kept equal by the trigger", "write_policy": "C writes the new column and the trigger fills the old one; B writes both; a statement setting both names to different values is refused", "coexistence": "B and C on the retire schema; A is outside this phase's contract and must be gone before the destructive contract", "compatible_tags": list(op.get("compatible_tags") or [])} for op in plan.retiring],
+            "contract": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "revision": contract_rev, "reversible": True} for op in plan.contracting] + [{"operation": op["op_id"], "table": op["table"], "column": op["from_column"], "revision": drop_rev, "destructive": True, "reversible": "conditional", "drops": dict(op.get("dropped") or {}), "confirmation": confirmation_phrase(plan.dropping), "approved_by": (op.get("destructive") or {}).get("approved_by")} for op in plan.dropping],
         })
-        if plan.phased_new or plan.indexes_new or plan.contracting:
+        if plan.phased_new or plan.indexes_new or plan.contracting or plan.retiring or plan.dropping:
             plan.migration["kind"] = "phased: " + ", ".join(p["phase"] for p in plan.migration["phases"]) + " (expand adds nullable columns; the backfill runs out of band; the contract phase is a separate, authorised evolution)"
     else:
         plan.migration = {"required": False, "kind": "not applicable (in-memory persistence)" if not pg else "unknown"}
@@ -1009,6 +1115,10 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
             plan.risks.append(f"{op['table']}.{op['column']}: the table has row-level security; the runner refuses to run as a role that does not bypass RLS (it would silently see no rows): use the owner URL")
     for i in plan.indexes_new:
         plan.risks.append(f"index {i['name']}: CREATE INDEX CONCURRENTLY in its own revision (SHARE UPDATE EXCLUSIVE: writes continue; two scans; waits for older transactions); an interruption leaves an invalid index that a re-run drops and rebuilds; the revision fails rather than end invalid")
+    for op in plan.retiring:
+        plan.risks.append(f"{op['table']}.{op['from_column']} -> {op['column']} (operation {op['op_id']}): retire: this generation (C) answers with {op['column']!r} only; clients still sending or reading {op['from_column']!r} must move to B's responses or to the new name; `alembic upgrade head` re-checks the trigger and the equality of the columns, swaps the sync function (truth = {op['column']}), carries NOT NULL and default over and stamps retired_at; the old column stays for B; downgrade: DROP NOT NULL/DEFAULT and the comment back (no data moves)")
+    for op in plan.dropping:
+        plan.risks.append(f"{op['table']}.{op['from_column']} (operation {op['op_id']}): DESTRUCTIVE: `alembic upgrade head` drops the old column, its sync trigger and function in one transaction after re-checking every condition under ACCESS EXCLUSIVE (lock_timeout 5s); B (and A) fail from that moment; the downgrade recreates the column from the new column's current values offline and cannot restore the dropped content; take a backup before upgrading if the historical content matters; no online rollback")
     for op in plan.contracting:
         plan.risks.append(f"{op['table']}.{op['column']}: contract phase: the revision re-checks pending rows and the progress state on the live database and fails rather than contract prematurely; ADD CONSTRAINT NOT VALID and SET NOT NULL take brief ACCESS EXCLUSIVE locks, VALIDATE takes SHARE UPDATE EXCLUSIVE; an application version that still inserts NULLs makes the revision fail: it must be gone (declared by the operator in the evidence)")
     if plan.preserved_manual:
@@ -1153,6 +1263,7 @@ class EvolveOptions:
     faults: Optional[FaultInjector] = None  # tests: interrupt the publication of the real project
     authorize_contract: bool = False  # v2.1: the explicit human authorization a contract phase needs (--authorize-contract)
     evidence: Optional[str] = None  # v2.1: migration evidence file (overrides authorization.contract.evidence)
+    confirm_irreversible: Optional[str] = None  # v2.2: the exact phrase a destructive contract prints (`drop <table>.<column>`); distinct from authorize_contract
 
 
 def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None, *, durable: bool = True) -> Operation:
@@ -1244,7 +1355,7 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
 def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None) -> Dict[str, Any]:
     options = options or EvolveOptions()
     contract = contract_or_path if isinstance(contract_or_path, EvolutionContract) else load_evolution(contract_or_path)
-    plan = plan_evolution(contract, baseline_contract=options.baseline_contract, authorize_contract=options.authorize_contract, evidence_path=options.evidence)
+    plan = plan_evolution(contract, baseline_contract=options.baseline_contract, authorize_contract=options.authorize_contract, evidence_path=options.evidence, confirm_irreversible=options.confirm_irreversible)
     report: Dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "tool": {"name": "fastapi-architect evolve", "version": TOOL_VERSION},
@@ -1253,7 +1364,7 @@ def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None
         "verification": None,
         "applied": {"written": [], "state": "not_applied"},
         "authorization": options.authorization.to_dict(),
-        "contract_authorization": {"authorize_contract": bool(options.authorize_contract), "evidence": options.evidence or (contract.authorization.get("contract") or {}).get("evidence"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by")},
+        "contract_authorization": {"authorize_contract": bool(options.authorize_contract), "confirm_irreversible": options.confirm_irreversible, "approved_by": (contract.authorization.get("destructive") or {}).get("approved_by"), "evidence": options.evidence or (contract.authorization.get("contract") or {}).get("evidence"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by")},
         "state": plan.state,
         "note": "preview only unless --apply; with --apply the plan is first applied to a copy and verified, and the project is written only when that verification did not reject it, through the recoverable writer (journal under .fastapi-architect/ops); verified requires executed tests, audit_clean means no test was executed",
     }

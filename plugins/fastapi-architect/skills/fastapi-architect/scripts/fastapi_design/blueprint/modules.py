@@ -55,16 +55,45 @@ def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset(), r
     renames = renames or {}
     all_fields = [f for e in module.entities for f in e.fields]
     old_fields = {(t, n): field_from_doc(entry["from_field"]) for (t, n), entry in renames.items() if any(e.plural == t for e in module.entities)}  # type: ignore[arg-type]
-    pydantic = ["AliasChoices", "BaseModel", "ConfigDict", "Field"] if old_fields else ["BaseModel", "ConfigDict", "Field"]
+    pydantic = ["AliasChoices", "BaseModel", "ConfigDict", "Field", "model_validator"] if old_fields else ["BaseModel", "ConfigDict", "Field"]
     lines = _header(
-        "Request and response schemas (pydantic v2); unknown properties are rejected." + (" Fields renamed in transition accept both names and expose both, the old one deprecated." if old_fields else ""),
-        stdlib=_type_imports(all_fields + list(old_fields.values())),
+        "Request and response schemas (pydantic v2); unknown properties are rejected." + (" Fields renamed in transition accept either name and expose both, the old one deprecated; a request that sends both names is refused." if old_fields else ""),
+        stdlib=_type_imports(all_fields + list(old_fields.values())) + (["from typing import Any"] if old_fields else []),
         third_party=[f"from pydantic import {', '.join(pydantic)}"],
     )
+    if old_fields:
+        lines += [
+            "",
+            "def reject_contradictory_names(data: Any, pairs: tuple[tuple[str, str], ...]) -> Any:",
+            '    """A request that names a field by both its names is ambiguous (which value is meant when they differ?):',
+            '    refused (422) with the reason, never resolved by precedence or by which key came first. One name passes."""',
+            "    if isinstance(data, dict):",
+            "        for new, old in pairs:",
+            "            if new in data and old in data:",
+            '                raise ValueError(f"{new!r} and {old!r} name the same field; send one of them")',
+            "    return data",
+        ]
 
     def alias(e: EntitySpec, f: FieldSpec) -> List[str]:
         entry = renames.get((e.plural, f.name))
         return [f'validation_alias=AliasChoices("{f.name}", "{entry["from_column"]}")'] if entry else []
+
+    def boundary(e: EntitySpec) -> List[str]:
+        pairs = [(f.name, str(renames[(e.plural, f.name)]["from_column"])) for f in e.fields if (e.plural, f.name) in renames]
+        if not pairs:
+            return []
+        return [
+            "",
+            "    @model_validator(mode=\"before\")",
+            "    @classmethod",
+            "    def _one_value_per_renamed_field(cls, data: Any) -> Any:",
+            f"        return reject_contradictory_names(data, RENAMED_{e.snake.upper()})",
+        ]
+
+    for e in module.entities:
+        pairs = [(f.name, str(renames[(e.plural, f.name)]["from_column"])) for f in e.fields if (e.plural, f.name) in renames]
+        if pairs:
+            lines += ["", "", f"RENAMED_{e.snake.upper()} = {tuple(pairs)!r}  # (new name, former name) in transition", ""]
 
     for e in module.entities:
         ops = _ops(e)
@@ -80,12 +109,12 @@ def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset(), r
                 else:
                     args = ([] if f.required else ["default=None"]) + ([constraints] if constraints else []) + alias(e, f)
                     create_lines += _call(f"{f.name}: {_annotation(f)} = Field(", args, ")", "    ")
-            lines += ["", f"class {e.name}Create(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *create_lines, ""]
+            lines += ["", f"class {e.name}Create(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *create_lines, *boundary(e), ""]
         if ops["update"]:
             update_lines = []
             for f in e.fields:
                 update_lines += _call(f"{f.name}: {_annotation(f, optional=True)} = Field(", ["default=None"] + ([_constraints(f)] if _constraints(f) else []) + alias(e, f), ")", "    ")
-            lines += ["", f"class {e.name}Update(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *update_lines, ""]
+            lines += ["", f"class {e.name}Update(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *update_lines, *boundary(e), ""]
         read_lines = ["    id: UUID"] + ([f"    {tenant}: UUID"] if tenant else []) + (["    owner_id: str"] if e.owned else [])
         for f in e.fields:
             entry = renames.get((e.plural, f.name))

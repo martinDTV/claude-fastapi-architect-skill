@@ -55,6 +55,9 @@ class PhaseState:
     new_phased: List[Dict[str, object]] = field(default_factory=list)  # introduced by this plan (expand revision)
     new_indexes: List[Dict[str, object]] = field(default_factory=list)  # created by this plan (index revision)
     contracting: List[Dict[str, object]] = field(default_factory=list)  # contracted by this plan (contract revision)
+    retiring: List[Dict[str, object]] = field(default_factory=list)  # v2.2: renames whose truth moves to the new column (retire revision)
+    dropping: List[Dict[str, object]] = field(default_factory=list)  # v2.2: retired renames whose old column is dropped (destructive contract revision)
+    drop_authorization: Dict[str, object] = field(default_factory=dict)  # v2.2: approved_by, phrase, reviewed_functions for the drop revision's record
     head: Optional[str] = None  # the head the runner expects when no chain is appended (baseline rebuilds)
 
 
@@ -68,6 +71,7 @@ class Blueprint:
     migrations: List[Dict[str, object]] = field(default_factory=list)  # [{revision, down_revision, file, tables}] in chain order
     phased: List[Dict[str, object]] = field(default_factory=list)  # v2.1: phased changes (expand/backfill/contract) recorded in the manifest
     indexes: List[Dict[str, object]] = field(default_factory=list)  # v2.1: concurrent indexes recorded in the manifest
+    application_tag: str = ""  # v2.2: the application_name this generation announces to PostgreSQL
 
     def to_dict(self) -> Dict[str, object]:
         return {"style": self.style, "package": self.package, "files": sorted(self.files), "layout": list(self.layout), "notes": list(self.notes)}
