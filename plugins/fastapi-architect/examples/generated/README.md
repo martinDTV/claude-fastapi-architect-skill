@@ -27,7 +27,10 @@ columns the source of truth), then through its retire (`parcels-retire-label.jso
 truth moves to the new columns, nothing dropped) and its destructive contract (`parcels-contract-label.json`: the old
 columns, triggers and functions dropped with `RESTRICT` after sixteen preconditions, `--authorize-contract` and
 `--confirm-irreversible`; the committed evidence samples are deliberately stale, so neither is applied from the
-repository alone); see [`VERIFICATION.md`](VERIFICATION.md). What the
+repository alone), and `team-notes-add-reminders-merge.json` adds a module to the in-memory example with the opt-in
+three-way merge authorised on `main.py` and `.audit-fastapi.json` (inert on the untouched snapshot; on a copy edited by
+hand, `plan --allow-merge` merges the developer's hunks and shows the digests, the hunks and the diff); see
+[`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in
 `references/design-contracts.md`.

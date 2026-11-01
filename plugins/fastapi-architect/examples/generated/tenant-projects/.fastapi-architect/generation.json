@@ -70,7 +70,7 @@
   ],
   "package": "tenant_projects",
   "phased_changes": [],
-  "schema": "fastapi-architect/generation/1.5",
+  "schema": "fastapi-architect/generation/1.6",
   "security": {
     "authentication": "api_key",
     "authorization_declared": null,

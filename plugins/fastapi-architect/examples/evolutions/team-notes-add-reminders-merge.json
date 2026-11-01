@@ -1,0 +1,48 @@
+{
+  "schema": "fastapi-architect/evolution/1.5",
+  "project": {
+    "path": "../generated/team-notes"
+  },
+  "add_modules": [
+    {
+      "name": "reminders",
+      "description": "Reminders attached to the workspace's notes.",
+      "entities": [
+        {
+          "name": "Reminder",
+          "fields": [
+            {"name": "text", "type": "str", "max_length": 80},
+            {"name": "due_on", "type": "date", "required": false}
+          ],
+          "operations": ["create", "get", "list"]
+        }
+      ]
+    }
+  ],
+  "files": {
+    "merge": [
+      {
+        "path": "src/team_notes/main.py",
+        "transform": "three_way_python",
+        "on_conflict": "reject",
+        "ownership": {
+          "generator_may_change": "file",
+          "developer_owns": [],
+          "generator_owns": []
+        }
+      },
+      {
+        "path": ".audit-fastapi.json",
+        "transform": "three_way_json"
+      }
+    ]
+  },
+  "invariants": [
+    "existing_routes_unchanged",
+    "historical_migrations_unchanged",
+    "declared_contracts_unchanged",
+    "no_destructive_schema_change",
+    "protected_files_unchanged"
+  ],
+  "x-note": "v2.2 increment 3: the same module addition as any evolution, plus the opt-in three-way merge of two integration points. On the committed snapshot (no manual change) the authorisation is inert and the files are regenerated as usual; on a copy where main.py was edited by hand, `plan --allow-merge` merges the developer's hunks with the generator's and shows the three digests, the hunks and the diff; without `--allow-merge` the plan blocks (merge_not_authorized_on_command_line). The audit configuration is not changed by this evolution, so manual keys in it are simply preserved."
+}
