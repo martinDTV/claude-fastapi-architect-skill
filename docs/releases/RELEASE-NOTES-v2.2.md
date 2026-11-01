@@ -286,3 +286,42 @@ proof; the function scan is textual (dynamic SQL and functions that name neither
 seen); the downgrade's full-table copy is offline and was not timed at scale; a connection failure inside the drop
 transaction was not injected (PostgreSQL rolls the transaction back); nothing here demonstrates a distributed
 deployment. The version stays 2.1.0 until the release increment; increments 3 to 6 need their own authorisation.
+
+### Acceptance hardening of the destructive contract (2026-11-01)
+
+A strictly bounded second pass over the only destructive operation, before increment 3: negative tests on a real
+PostgreSQL (`tests/test_destructive_acceptance_v22_postgresql.py`, opt-in) and fixes for the defects they
+demonstrated. No capability was added. Before and after each defect is recorded in
+`plugins/fastapi-architect/examples/generated/VERIFICATION.md` (section "acceptance hardening").
+
+| Defect demonstrated before the fix | Fix |
+|---|---|
+| A field with a declared default, renamed: `INSERT … (code, status) VALUES ('T-1', 'closed')` through the new name ended as `state = 'open', status = 'open'`; the sync trigger took the old column's default for a value and the explicit write was lost silently (the "truth wins on INSERT with a default" branch of increment 2) | renames of fields that declare a default are refused by the planner (`rename_defaulted_column_unsupported`); the trigger has no precedence branch left: a statement that sets both names to different values is refused in every state |
+| A generation that maps the old column (B) reconnecting between the plan and `alembic upgrade head`: the drop revision dropped the column with B connected (the sessions were checked by the plan only) | the drop revision re-checks the connected sessions on the database clock before locking (`COMPATIBLE_TAGS`, `IGNORED_SESSIONS` and the runner's own name generated into the file) and refuses, naming the sessions |
+| Evidence that aged past the contract's `max_evidence_age_hours` between the plan and the upgrade: the revision dropped the column | the revision re-checks the age of the evidence the plan read (`EVIDENCE_GENERATED_AT`) and the age of the retire (`retired_at` against `min_retire_age_hours`) and refuses |
+| The downgrade of the drop (recreate, copy back, trigger) set no `lock_timeout`: queued behind traffic indefinitely (by inspection of the generated revision) | the downgrade sets the same `lock_timeout` and fails fast; any failure inside it rolls the whole downgrade back (verified with a trigger-name collision: the recreated column is gone again and `alembic_version` did not move) |
+
+Also recorded: the plan now states what is known about deployments in five separate parts
+(`plan.migration.phases[contract].assurance`: human declaration, observed sessions, schema state, automated
+verification, residual uncertainty) and the evidence document carries `limits[]`; neither presents a wait, a
+declaration or a snapshot as proof that older instances are gone.
+
+Verified on the throwaway cluster (numbers in the verification record): every write pattern of the transition
+(old name only, new name only, both equal, both different, partial updates, explicit NULLs on the nullable and on
+the NOT NULL pair, rollback, two sessions on one row, the old application after the retire); thirteen kinds of
+dependency on the old column (index, partial index, unique and check constraints, a foreign key from another table,
+a view, a materialized view, a row-level-security policy, a generated column, a trigger with a column list, a trigger
+whose body names the column, a function naming table and column, extended statistics) each listed by the evidence,
+each blocking the plan and each making the revision refuse with `alembic_version`, the columns and the triggers
+intact; the lock timeout; a backend terminated while waiting for the lock; the reconnecting generation; aged
+evidence; the half-done downgrade; the queued downgrade; and the retry that succeeds once nothing stands in the way.
+
+Known and left alone: an additive revision line for a defaulted column with a long name can exceed the generated
+project's 120-column Ruff limit (v2.1 template; cosmetic, the project runs; not touched in this pass).
+
+Validation of the acceptance pass: `tests/test_destructive_acceptance_v22_postgresql.py` 5 OK (112.9 s, 131 MB);
+`tests/test_retire_contract_v22_postgresql.py` 3 OK (84.5 s); `tests/test_retire_contract_v22.py` 13 OK;
+full suite 719 OK on 3.13 (169.2 s, 137 MB) and 719 OK on 3.9 (186.1 s, 186 MB); PostgreSQL regression `test_renames_v22_postgresql.py` 4 OK (45.5 s), `test_migrations_v21_postgresql.py` 4 OK (61.9 s), `test_acceptance_v21.py` 4 OK (83.4 s), `test_acceptance_v20.py` 3 OK (54.1 s), `test_design_v20_postgresql.py` 9 OK (98.6 s);
+`scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`,
+`git diff --check` and the secrets scan pass; the generation oracle is unchanged (fresh projects identical to the
+published engine except `core/db.py`; evolution plans differ only in manifests, the phased example aside).

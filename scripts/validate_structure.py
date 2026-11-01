@@ -212,13 +212,14 @@ for contract_name in ('parcels-retire-label.json','parcels-contract-label.json')
 assert 'no_destructive_schema_change' not in json.loads((base.parent.parent/'examples/evolutions/parcels-contract-label.json').read_text(encoding='utf-8')).get('invariants',[]), 'the destructive example must leave no_destructive_schema_change out on purpose'
 for sample in ('parcels-rename-evidence.sample.json','parcels-retire-evidence.sample.json'):
     assert json.loads((base.parent.parent/'examples/evolutions'/sample).read_text(encoding='utf-8')).get('schema')=='fastapi-architect/migration-evidence/1.2', f'examples/evolutions/{sample}: must be evidence 1.2'
-for rel in ('tests/test_retire_contract_v22.py','tests/test_retire_contract_v22_postgresql.py'):
+for rel in ('tests/test_retire_contract_v22.py','tests/test_retire_contract_v22_postgresql.py','tests/test_destructive_acceptance_v22_postgresql.py'):
     assert (root/rel).is_file(), f'Missing {rel}'
 assert 'fastapi-architect/evolution/1.4' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'retire_fields' in skill and 'confirm-irreversible' in skill, 'contract 1.4 (retire_fields, the destructive contract) is not documented'
 _phased_src=(base/'scripts/fastapi_design/blueprint/phased.py').read_text(encoding='utf-8')
 _drop_src=_phased_src.split('def drop_migration(')[1].split('\ndef ')[0]
 assert 'RESTRICT' in _drop_src and 'CASCADE' not in _drop_src.replace('never CASCADE','').replace('never `CASCADE`',''), 'the drop revision must use RESTRICT and never CASCADE'
-assert 'LOCK TABLE' in _drop_src and 'lock_timeout' in _drop_src, 'the drop revision must lock the table with a lock timeout'
+assert 'LOCK TABLE' in _drop_src and 'lock_timeout' in _drop_src and 'pg_stat_activity' in _drop_src and 'EVIDENCE_GENERATED_AT' in _drop_src, 'the drop revision must lock the table with a lock timeout and re-check sessions and evidence age'
+assert 'the truth wins' not in _phased_src, 'the sync trigger must never resolve a contradiction by precedence'
 assert 'retire' in (root/'docs/architecture/adr-2.2-01-safe-renames.md').read_text(encoding='utf-8') and 'Retire and the destructive contract' in (root/'docs/guides/phased-migrations-and-backfills.md').read_text(encoding='utf-8'), 'retire and the destructive contract are not documented in the decision record and the guide'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'

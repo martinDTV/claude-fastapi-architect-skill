@@ -317,7 +317,9 @@ name twice, two renames sharing a source or a target, a source that is not a fie
 that exists (`rename_target_free`), the identity, ownership, tenant and timestamp columns and foreign keys
 (`rename_protected_column`), a column already in a phased change (`rename_column_in_transition`), an in-memory
 project or a new table (`rename_needs_existing_postgresql_table`), a source column that a concurrent index covers
-(`rename_indexed_column_unsupported`, since increment 2: the index would vanish with the column at the contract). A
+(`rename_indexed_column_unsupported`, since increment 2: the index would vanish with the column at the contract), a
+source field that declares a default (`rename_defaulted_column_unsupported`: a column default makes an INSERT through
+one name indistinguishable from an INSERT through both, so the trigger could take the default for a value). A
 repeated rename is a no-op. `contract_fields` naming a rename that was not retired is refused
 (`contract_rename_retire_first`); `remove_fields` and `change_fields` stay refused. Retire and contract are the two
 further evolutions of section 11; nothing is renamed in place.
@@ -418,6 +420,12 @@ database-side ones under `ACCESS EXCLUSIVE` with `lock_timeout = 5s`):
 | 15 | `contract_irreversible_confirmed` | `--confirm-irreversible` equals the printed phrase |
 | 16 | `contract_no_pending_operations` | no interrupted operation in the journal (every plan refuses otherwise), no project lock held by another process |
 
+The revision evaluates the time-dependent ones again on the database clock when it runs, because any amount of time
+may pass between the plan and `alembic upgrade head`: the connected sessions (`COMPATIBLE_TAGS`, `IGNORED_SESSIONS` and
+the runner's own name are generated into the file), the age of the evidence the plan read (`EVIDENCE_GENERATED_AT`
+against `max_evidence_age_hours`) and the age of the retire (`retired_at` from the function comment against
+`min_retire_age_hours`). The downgrade sets the same `lock_timeout` and fails rather than queue.
+
 Plus the informational `contract_database_at_head`, `contract_evidence_matches`, `contract_sync_enabled`,
 `contract_indexes_valid`, `contract_restrict_only` and `contract_data_recovery_declared`.
 
@@ -435,6 +443,16 @@ truth on the new column and a fresh `retired_at`; a full-table `UPDATE` in one t
 database; after the checks it equalled the new column, which stays; a backup taken before the upgrade is the only way
 back to the historical content); **compatibility restoration** means stop, downgrade, redeploy B; there is **no online
 rollback** after a destructive contract.
+
+What is known about deployments, kept apart in `plan.migration.phases[contract].assurance` (and summarised in
+`plan.risks`): **human declaration** (`declared_by`, `approved_by`, `old_versions_stopped`, the two command-line
+flags: who decided, never evidence that older instances are gone); **observed sessions** (a snapshot at verify time,
+taken again by the revision under the lock); **schema state** (the truth marker, `retired_at`, NOT NULL and type
+carried, zero differing rows, the dependents, the trigger, one head: measured by `verify` and again by the revision);
+**automated verification** (freshness, evidence newer than the retire, the minimum age, the declared digest);
+**residual uncertainty** (instances idle at both observations, clients behind a pooler, code that names the column
+without connecting under its own name, functions found by text only, the minimum age being a policy). The evidence
+document carries the same limits in `limits[]`.
 
 Application tags: every generated application announces `application_name = <package>@<12 hex>` to PostgreSQL
 (`core/db.py`), a hash of the package and the declared state of every phased change, so A (no tag, generated before

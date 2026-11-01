@@ -157,8 +157,9 @@ What `evolve_fastapi.py apply` produces from the fifth example (`parcels-rename-
 - an expand revision that adds `label` and `weight` nullable next to the old columns and creates one **sync trigger**
   per rename: `BEFORE INSERT OR UPDATE FOR EACH ROW`; whichever column a writer touched, the other follows inside the
   same statement and transaction; one statement that sets both to different values is refused (SQLSTATE 23514; the
-  writer's transaction rolls back), the only exception being an INSERT where a column default made both non-NULL,
-  where the declared source of truth wins. The trigger only assigns to `NEW` (it cannot recurse), runs as the writer
+  writer's transaction rolls back), with no exception: a field that declares a default cannot be renamed this way
+  (`rename_defaulted_column_unsupported`), because the trigger could not tell its default from a value. The trigger
+  only assigns to `NEW` (it cannot recurse), runs as the writer
   and leaves row-level security to the policies; its comment records `op=<id> truth=<column>`. The downgrade drops
   trigger, function and new columns without losing data: the old columns hold everything;
 - the transitional code (B): the model maps both columns (`label` nullable, `reference` as before and marked as the
@@ -259,15 +260,22 @@ column (`contract_dependencies_reviewed`: catalog dependents must go by hand; a 
 be accepted by name in `reviewed_functions` after review); the evidence older than the retire or written by B's runner
 (`contract_evidence_after_retire`, `contract_retire_applied`).
 
-What it produces: a `drop` revision in **one transaction**: `lock_timeout = 5s`, `LOCK TABLE … ACCESS EXCLUSIVE`, every
-database-side condition re-checked on the live catalog, `DROP TRIGGER`, `DROP FUNCTION`, `ALTER TABLE … DROP COLUMN …
-RESTRICT`. Never `CASCADE`: a dependent the checks missed fails the statement and the whole revision rolls back,
-`alembic_version` included. The approver and the phrase are written in the revision's docstring and in the manifest
-(`destructive {approved_by, declared_by, confirmation, evidence_generated_at}`).
+What it produces: a `drop` revision in **one transaction**: the connected sessions, the age of the evidence the plan
+read and the age of the retire checked again on the database clock (time passes between the plan and `alembic
+upgrade head`; a generation that reconnects, or evidence that aged past the contract's limit, makes the revision
+refuse), then `lock_timeout = 5s`, `LOCK TABLE … ACCESS EXCLUSIVE`, every database-side condition re-checked on the
+live catalog, `DROP TRIGGER`, `DROP FUNCTION`, `ALTER TABLE … DROP COLUMN … RESTRICT`. Never `CASCADE`: a dependent
+the checks missed fails the statement and the whole revision rolls back, `alembic_version` included. The approver and
+the phrase are written in the revision's docstring and in the manifest (`destructive {approved_by, declared_by,
+confirmation, evidence_generated_at}`). What the plan knows about deployments is stated in five parts in
+`plan.migration.phases[contract].assurance` (a human declaration, the sessions observed, the schema state measured, the
+automated checks, and the residual uncertainty: an instance idle at both observations, a pooler hiding the application
+name, code that names the column without connecting under its own name).
 
 Reversibility, kept apart. **DDL**: conditional; the downgrade recreates the column, copies the new column's *current*
-values back, restores NOT NULL and default and recreates the sync trigger (truth on the new column), offline: a
-full-table `UPDATE` in one transaction. **Data**: the content the old column had at the drop is not recoverable from the
+values back, restores NOT NULL and recreates the sync trigger (truth on the new column), offline: a full-table `UPDATE`
+in one transaction that fails after the lock timeout rather than queue, and rolls back entirely on any error. **Data**:
+the content the old column had at the drop is not recoverable from the
 database (after the checks it equalled the new column, which stays); take a backup before the upgrade if it matters.
 **Compatibility**: B works again after the downgrade; there is no online rollback: stop, downgrade, redeploy. C keeps
 working across the drop because it never named the old column.

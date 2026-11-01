@@ -42,8 +42,10 @@ that recommendation covered B and C, which the generator writes. It cannot cover
    column changed the new one follows, else if the new one changed the old one follows. **A statement that sets both
    names to different values is refused** (`RAISE EXCEPTION`, SQLSTATE 23514, the writer's transaction rolls back):
    the trigger cannot read the writer's intent from `OLD`/`NEW` in that case, so it does not guess (increment 2
-   replaced the "old column wins" rule of increment 1 before anything shipped). The one exception is an INSERT where
-   a column default made both non-NULL, where the declared source of truth wins. The function only assigns to `NEW`:
+   replaced the "old column wins" rule of increment 1 before anything shipped). There is no exception: a column
+   default would make an INSERT through one name indistinguishable from an INSERT through both, so the acceptance of
+   increment 2 refuses renames of fields that declare a default (`rename_defaulted_column_unsupported`) after a test
+   showed the default being taken for a value. The function only assigns to `NEW`:
    it never issues another statement, so it cannot recurse; it runs inside the writer's statement and transaction, so
    a rollback covers both columns; it is `SECURITY INVOKER`, so it carries no privilege; row-level security policies
    still check the final row. It is named after the operation (`trg_<table>_<op>_sync`, `fn_<table>_<op>_sync`), its
@@ -87,7 +89,11 @@ that recommendation covered B and C, which the generator writes. It cannot cover
    approver's identity; `--confirm-irreversible` with the exact phrase the plan prints (`drop <table>.<column>`),
    distinct from the authorization and never implied by it; no lock held and no interrupted operation. `CASCADE` is
    never generated; a dependent the checks missed fails the statement and rolls everything back. The invariant
-   `no_destructive_schema_change` must be left out of that contract on purpose.
+   `no_destructive_schema_change` must be left out of that contract on purpose. The revision repeats, on the database
+   clock and under the lock, what time can change after the plan: the connected sessions, the age of the evidence the
+   plan read and the age of the retire (the acceptance showed a generation reconnecting between the plan and the
+   upgrade, and evidence ageing past the contract's limit, both dropping the column before this). The downgrade fails
+   after the same lock timeout rather than queue behind traffic.
 9. **Reversibility, kept apart.** DDL reversibility of the drop is *conditional*: the downgrade recreates the column,
    copies the new column's current values back, restores NOT NULL and default and recreates the trigger, offline. Data
    recovery of the dropped content is not provided by the tool (a backup taken before the upgrade is the only way to
@@ -130,5 +136,9 @@ that recommendation covered B and C, which the generator writes. It cannot cover
 - Operators run, after the retire evolution: `alembic upgrade head` (the retire revision), deploy C, stop A and B,
   `verify` with C's runner; after the destructive contract: a backup if the historical content matters, `alembic
   upgrade head`; the downgrade of the drop is an offline, conditional recovery.
-- Still unavailable: renames of columns covered by a concurrent index (refused), in-place renames, type changes,
+- The plan states what is known about deployments in five parts (human declaration, observed sessions, schema state,
+  automated verification, residual uncertainty: `plan.migration.phases[contract].assurance`), and the evidence carries
+  its `limits`; none of the parts is presented as proof that older instances are gone.
+- Still unavailable: renames of columns covered by a concurrent index or declaring a default (refused), in-place
+  renames, type changes,
   removal of entities, and any proof of a distributed deployment beyond what one database can observe.

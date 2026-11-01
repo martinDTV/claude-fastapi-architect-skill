@@ -591,3 +591,76 @@ A distributed deployment: three processes on one machine sharing one database; t
 `pg_stat_activity` and cannot see instances that connect intermittently. A connection failure in the middle of the
 drop transaction (PostgreSQL rolls it back; not injected here). Tables beyond 1 500 rows; a full-table downgrade copy
 on a large table is offline by design and was not timed at scale.
+
+# v2.2 increment 2, acceptance hardening of the destructive contract
+
+`FA_DESIGN_PG=1 python3 -m unittest discover -s tests -p test_destructive_acceptance_v22_postgresql.py` on a throwaway
+PostgreSQL 16.10 cluster, macOS, CPython 3.13.5: **5 tests OK in 112.9 s, 131 MB** after the fixes. The same
+module against the engine before the fixes (HEAD `9ee9714`) is the "before" column. Nothing here adds a capability.
+
+## Defects, before and after
+
+| Scenario | Before the fixes (`9ee9714`) | After |
+|---|---|---|
+| A field with a default (`state default 'open'`) renamed to `status`; `INSERT (code, status) VALUES ('T-1', 'closed')` | planned and applied; the row read `state = 'open', status = 'open'`: the explicit value was lost to the default | the plan refuses `rename_defaulted_column_unsupported`; the trigger keeps no precedence branch |
+| B (a generation that maps the old column) reconnects after the plan, before `alembic upgrade head` | the revision dropped the column with B connected (exit 0) | the revision refuses before locking: "sessions that may still map the old column: ['parcels@… x1 as fa_owner']"; schema intact |
+| The contract allows 0.001 h of evidence age; the revision runs 5 s after the plan | the revision dropped the column (exit 0) | the revision refuses: "the evidence this revision was planned from is 0.0 h old (limit 0.001 h): re-plan"; schema intact |
+| A downgrade of the drop while another session holds every row `FOR UPDATE` | no `lock_timeout` in the downgrade: it queues until the holder commits (by inspection of the generated revision) | the downgrade fails after the lock timeout; the retry succeeds once the lock is released |
+
+## Transition integrity (`test_01`, raw SQL on the retire schema, 40 rows)
+
+| Write | Result |
+|---|---|
+| INSERT / UPDATE through the old name only | mirrored into the new column, same statement |
+| INSERT / UPDATE through the new name only | mirrored into the old column |
+| Both names, equal values (INSERT and UPDATE) | accepted |
+| Both names, different values (INSERT; UPDATE of the NOT NULL pair; UPDATE of the nullable pair) | refused, SQLSTATE 23514, the row untouched, nothing inserted |
+| UPDATE of another column (`weight`, `created_at`) | the pair left alone |
+| Explicit NULL on the nullable pair, through either name | both NULL |
+| Explicit NULL on the NOT NULL pair, through either name; INSERT without either name | refused, SQLSTATE 23502 |
+| ROLLBACK after writes through both names | both columns untouched |
+| Two sessions on one row (`reference` in a held transaction, `label` waiting) | the second waits for the row lock; the last committed write wins on both columns |
+| A (v2.1.0, old name only) after the retire: create, set `weight_kg` to NULL | mirrored; C reads it; nothing lost |
+
+## Dependency matrix (`test_03`, 200 rows, D planned, each object created before `alembic upgrade head`)
+
+| Dependency on `shipments.reference` | Evidence lists | Plan | Revision | Schema |
+|---|---|---|---|---|
+| index | `index ix_dep_reference` | blocked | refused ("dependents the tool does not manage") | intact |
+| partial index (`WHERE reference <> ''`) | `index ix_dep_partial` | blocked | refused | intact |
+| unique constraint | `constraint uq_dep_reference on table shipments` (and its index) | blocked | refused | intact |
+| check constraint | `constraint ck_dep_reference on table shipments` | blocked | refused | intact |
+| foreign key from another table | `constraint dep_audit_ref_fkey on table dep_audit` and the unique target | blocked | refused | intact |
+| view | `rule _RETURN on view dep_view` | blocked | refused | intact |
+| materialized view | `rule _RETURN on materialized view dep_matview` | blocked | refused | intact |
+| row-level-security policy | `policy dep_policy on table shipments` | blocked | refused | intact |
+| generated column (`upper(reference)`) | `default value for column dep_upper of table shipments` | blocked | refused | intact |
+| trigger of other code with `UPDATE OF reference` | `trigger dep_trigger on table shipments` | blocked | refused | intact |
+| trigger of other code whose body names the column | `dep_audit` (`other_triggers`, `mentions_column`) | blocked | refused ("named by code the tool does not manage") | intact |
+| function naming table and column | `public.dep_report` (`functions_mentioning`) | blocked | refused ("named by code") | intact |
+| extended statistics | `statistics object dep_stats` | blocked | refused | intact |
+
+Every catalog kind comes from `pg_depend` on the column (the column's own default and NOT NULL are the only dependents
+considered the tool's); the two textual kinds come from the trigger sources of the table and from `pg_proc`. With
+every dependency removed the same revision applies. `RESTRICT` is the last line, not the first: PostgreSQL drops
+indexes, constraints and statistics that involve the column together with it, which is why they are refused by the
+checks rather than left to the statement.
+
+## Atomicity and failures (`test_04`, `test_05`, 300 rows)
+
+| Case | Result |
+|---|---|
+| Another session holds every row `FOR UPDATE`; `alembic upgrade head` | fails after the 5 s lock timeout; `alembic_version`, both old columns and both triggers unchanged |
+| The revision's backend terminated (`pg_terminate_backend`) while it waits for the lock | the client reports the closed connection; nothing of the revision reached the database |
+| B reconnects between the plan and the upgrade | refused before the lock (sessions re-checked by the revision); schema intact |
+| Rows written by C after the evidence; retry of the upgrade with nothing in the way | the drop succeeds; C keeps working |
+| A trigger of the same name as the sync trigger exists when the downgrade runs | the downgrade fails at `CREATE TRIGGER`; the recreated column is gone again; `alembic_version` still at the drop revision (one transaction) |
+| Another session holds every row while the downgrade runs | fails after the lock timeout; nothing recreated |
+| Retry of the downgrade | both columns back, 0 rows differ, both triggers enabled; upgrade again |
+| The contract tolerates 0.001 h of evidence age; the upgrade runs 5 s after the plan | refused by the revision; schema intact |
+
+## What this does not show
+
+A network partition in the middle of the `DROP COLUMN` statement itself (PostgreSQL rolls the transaction back on its
+side; the client sees an error; not injected here). A distributed deployment. The additive revision of a defaulted
+column with a long name may exceed the generated project's 120-column Ruff limit (v2.1 template, cosmetic, untouched).
