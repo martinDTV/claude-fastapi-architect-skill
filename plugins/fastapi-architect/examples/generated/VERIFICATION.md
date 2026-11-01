@@ -460,3 +460,65 @@ Tables larger than 2 540 rows (the batch loop is O(batch) per step by constructi
 the NULL rows of the column); primary keys other than the generated `uuid` `id`; backfills as the application role
 under RLS; a real deployment with two application versions (the thread above is a stand-in); Podman or a container
 sidecar for the database (deferred); renames, drops and type changes (not in v2.1).
+
+# v2.2 increment 1: renames in transition on the fifth example (`parcels`, PostgreSQL 16)
+
+`FA_DESIGN_PG=1 python3 -m unittest discover -s tests -p test_renames_v22_postgresql.py` on 2026-10-31: one throwaway
+PostgreSQL 16.10 cluster, four tests, **43.0 s wall clock, 124 MB peak RSS**; the committed `parcels` snapshot is
+version **A** (it knows `reference` and `weight_kg` only) and the project evolved with
+`../evolutions/parcels-rename-label.json` is version **B** (both names). The two run as separate processes from their
+own virtual environments (`.venv/bin/python`, each wrapping its application with `TestClient` and answering requests
+read from its standard input) against the same expanded database. Every number below was measured in that run.
+
+## Coexistence of A and B (`test_01`)
+
+| Step | Result |
+|---|---|
+| A's baseline applied, 1 500 live rows (one third with `weight_kg` NULL) | 2.5 s (uv startup included) |
+| B's rename evolution verified in a copy (its own suite on a separate database through the trust model: 21 tests, 21 passed, among them the former-name create and update tests and the sync-trigger test; audit 0 → 0 findings) and applied | `verified`, `applied`; plan: create 5, modify 8, unchanged 25, kept 1; phases `expand` + `transition`; 11.0 s |
+| Expand revision on the shared database | `label`, `weight` added nullable, two sync triggers enabled, 1 500 rows still NULL in `label` (the backfill's job); 2.5 s |
+| A creates a row with `reference` and `weight_kg` | 201; the database shows `label` and `weight` already equal (mirrored by the trigger) |
+| B reads A's row and a pre-backfill row | `label == reference`, `weight == weight_kg`; a row the backfill has not touched reads correctly through the old column |
+| B creates with `label` and with the former name `reference` | 201 both; both columns equal in the database |
+| A updates B's row, B reads it; B updates A's row through either name, A reads it | the old column is the truth and the mirror follows: every read sees the last write |
+| A sets `weight_kg` to NULL | both columns NULL |
+| 30 interleaved updates of one row from both processes (15 with the old name, 15 with the new) | all 200; final pair equal (`b-14 | b-14`), the value one of the sent ones; 0.05 s |
+| A rolled-back update | both columns untouched |
+| Backfill of `label` killed by SIGKILL after 300 processed rows, resumed while A inserted 20 rows | the mirrored rows were never fewer than the processed ones; resumption `complete`: 1 500 rows, 12 batches, 1 pass, 0.52 s; A's 20 late inserts all 201 and mirrored by the trigger; 0 rows where `label` differs from `reference` |
+| Backfill of `weight` | `complete`: 1 000 rows in 2 batches (the 500 NULL weights already agreed) |
+| Evidence (`verify`, schema 1.1) | `ok`; both operations `columns_agree` with 0 mismatches, triggers present and enabled, source of truth `from_column` |
+| After the backfill | A still creates; B lists rows with `label == reference` on every one |
+
+## Backfill controls (`test_02`)
+
+400 rows; the first row held under `FOR UPDATE` by another session: the run ends `incomplete` with 399 rows and 1
+pending; released, the next run completes with 1. Drift injected behind a disabled trigger (`reference` changed): `verify`
+reports 1 mismatch and `columns_agree: false`; a run reopens the operation, fixes 1 and the mirror takes the old
+column's value. A disabled trigger is a problem the evidence names even when the columns agree. Corrupt and foreign
+checkpoints keep their exit code 4. The expand revision downgrades without data loss (triggers and new columns gone,
+400 rows intact) and upgrades again.
+
+## Adversarial (`test_03`) and row-level security (`test_04`)
+
+A hand-made `label integer` column on the database: the expand revision fails with "already exists", the version
+table and the schema are unchanged (the revision is transactional), no trigger is left behind. A stale baseline digest,
+a hand edit on a regenerated integration point, an altered historical revision, a second Alembic head and a premature
+contract of the rename are blocked by the plan with their precondition. On `tenant-projects` (policies with
+`FORCE ROW LEVEL SECURITY`), a rename of `name` to `title` applied as the owner: the application role's insert under its
+tenant context is mirrored by the trigger inside the policy; the backfill refuses the application role (exit 5) and
+completes as the owner; a rename of the tenant column is refused.
+
+## Defects the scenarios found before passing
+
+- The evidence read `pg_trigger.tgenabled` as the single-byte `"char"` type, which asyncpg returns as bytes: every
+  enabled trigger was reported disabled. The query casts to text.
+- The generated trigger test inserted only the renamed column of each rename; with a NOT NULL column renamed next to
+  it the insert failed. Each rename now carries a complete insert statement for its table.
+- Generated lines over the project's 120-column limit (trigger DDL, model comments, runner evidence, the renames
+  literal of the tests) were reformatted; the evolved project passes its own Ruff configuration.
+
+## What this does not show
+
+A real distributed deployment (load balancers, rolling restarts, clock skew): the two versions are two processes on one
+machine sharing one database. Tables beyond 1 500 rows. Retire and contract of a rename: not available in this
+increment, so the old columns, the triggers and both names stay.
