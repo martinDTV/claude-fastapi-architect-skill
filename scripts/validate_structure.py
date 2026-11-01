@@ -190,6 +190,15 @@ assert 'parcels' in (base.parent.parent/'examples/generated/README.md').read_tex
 assert (root/'tests/test_acceptance_v21.py').is_file(), 'Missing the v2.1.0 acceptance module'
 assert (root/'docs/releases/ACCEPTANCE-v2.1.0.md').is_file() and 'ACCEPTANCE-v2.1.0.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'Missing or unindexed acceptance report docs/releases/ACCEPTANCE-v2.1.0.md'
 assert 'Extension v2.1' in (root/'README.md').read_text(encoding='utf-8'), 'README does not describe v2.1'
+# v2.2 increment 0: span-exact edits, the pure three-way merge, the project lock, journal 1.1, the adversarial corpus and the v2.1.0 compatibility fixtures
+for rel in ('scripts/fastapi_design/spans.py','scripts/fastapi_design/merge.py','scripts/fastapi_design/locking.py'):
+    assert (base/rel).is_file(), f'Missing {rel}'
+    compile((base/rel).read_text(encoding='utf-8'),str(base/rel),'exec')
+for rel in ('tests/test_spans_v22.py','tests/test_merge_v22.py','tests/test_journal_v22.py','tests/fixtures/transforms22/app_factory.py','tests/fixtures/compat/generation-1.3/parcels/.fastapi-architect/generation.json','tests/fixtures/compat/evolution-1.2-expand.json','tests/fixtures/compat/evolution-1.2-contract.json','tests/fixtures/compat/migration-evidence-1.0.json','tests/fixtures/compat/evolution-report-1.3.json','docs/architecture/discovery-v2.2.md','docs/releases/RELEASE-NOTES-v2.2.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+for rel in ('architecture/discovery-v2.2.md','releases/RELEASE-NOTES-v2.2.md'):
+    assert rel in (root/'docs/README.md').read_text(encoding='utf-8'), f'docs/README.md does not index {rel}'
+assert 'operation/1.1' in (base/'scripts/fastapi_design/journal.py').read_text(encoding='utf-8') and 'ops list' in skill, 'the journal 1.1 and the ops subcommands are not documented'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'
