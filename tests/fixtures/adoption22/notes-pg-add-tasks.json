@@ -1,0 +1,36 @@
+{
+  "schema": "fastapi-architect/evolution/1.6",
+  "project": {
+    "path": "notes_pg"
+  },
+  "add_modules": [
+    {
+      "name": "tasks",
+      "description": "Tasks",
+      "persistence": "postgresql",
+      "entities": [
+        {
+          "name": "Task",
+          "fields": [
+            {
+              "name": "title",
+              "type": "str",
+              "max_length": 120
+            },
+            {
+              "name": "done",
+              "type": "bool",
+              "required": true,
+              "default": false
+            },
+            {
+              "name": "due",
+              "type": "date",
+              "required": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

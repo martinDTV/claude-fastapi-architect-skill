@@ -1,0 +1,39 @@
+{
+  "schema": "fastapi-architect/evolution/1.6",
+  "project": {
+    "path": "workshop"
+  },
+  "add_modules": [
+    {
+      "name": "reviews",
+      "description": "Customer reviews",
+      "entities": [
+        {
+          "name": "Review",
+          "fields": [
+            {
+              "name": "author",
+              "type": "str",
+              "max_length": 80
+            },
+            {
+              "name": "rating",
+              "type": "int",
+              "min_value": 1
+            },
+            {
+              "name": "comment",
+              "type": "str",
+              "required": false
+            }
+          ],
+          "operations": [
+            "create",
+            "get",
+            "list"
+          ]
+        }
+      ]
+    }
+  ]
+}

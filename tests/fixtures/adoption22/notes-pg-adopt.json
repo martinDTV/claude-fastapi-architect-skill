@@ -1,0 +1,53 @@
+{
+  "schema": "fastapi-architect/adoption/1.1",
+  "project": {
+    "path": "notes_pg"
+  },
+  "modules": [
+    {
+      "name": "notes",
+      "router": {
+        "file": "app/routers/notes.py",
+        "name": "router"
+      },
+      "files": [
+        "app/routers/notes.py",
+        "app/schemas.py"
+      ]
+    }
+  ],
+  "package": "app",
+  "unmanaged": [
+    "alembic/versions/0001_notes.py",
+    "app/models.py"
+  ],
+  "mount": {
+    "file": "app/main.py",
+    "function": null,
+    "app": "app",
+    "after_call": "app.include_router",
+    "prefix": "/api"
+  },
+  "new_modules": {
+    "layout": "package",
+    "router_variable": "router",
+    "import_style": "absolute",
+    "test_app": {
+      "module": "app.main",
+      "attribute": "app"
+    }
+  },
+  "operations": [
+    "add_module",
+    "mount_router",
+    "add_persistence"
+  ],
+  "alembic": {
+    "ini": "alembic.ini",
+    "script_location": "alembic",
+    "metadata": "app.db:Base",
+    "session_dependency": "app.db:get_session",
+    "async": true
+  },
+  "notes": "scenario B: the project's own Alembic environment declared; new modules may persist on it"
+}

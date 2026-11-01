@@ -1,0 +1,48 @@
+{
+  "schema": "fastapi-architect/evolution/1.6",
+  "project": {
+    "path": "workshop"
+  },
+  "modify_modules": [
+    {
+      "name": "items",
+      "add_endpoints": [
+        {
+          "method": "GET",
+          "path": "/reports/stats",
+          "name": "items_stats",
+          "summary": "Items at or above a price",
+          "parameters": [
+            {
+              "name": "min_price",
+              "in": "query",
+              "type": "float",
+              "required": false,
+              "default": 0.0
+            }
+          ],
+          "delegate": {
+            "callable": "app.services:count_items",
+            "arguments": [
+              "min_price"
+            ]
+          },
+          "response_model": "ItemStats"
+        },
+        {
+          "method": "GET",
+          "path": "/reports/value",
+          "name": "items_value",
+          "summary": "Catalogue value",
+          "dependencies": [
+            "app.deps:require_api_key"
+          ],
+          "delegate": {
+            "callable": "app.services:catalogue_value",
+            "arguments": []
+          }
+        }
+      ]
+    }
+  ]
+}

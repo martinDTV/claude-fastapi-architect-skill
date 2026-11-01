@@ -1,0 +1,54 @@
+{
+  "schema": "fastapi-architect/adoption/1.1",
+  "project": {
+    "path": "workshop"
+  },
+  "modules": [
+    {
+      "name": "items",
+      "router": {
+        "file": "app/routers/items.py",
+        "name": "router"
+      },
+      "files": [
+        "app/routers/items.py",
+        "app/schemas.py"
+      ]
+    }
+  ],
+  "package": "app",
+  "unmanaged": [
+    "app/routers/users.py",
+    "app/storage.py"
+  ],
+  "mount": {
+    "file": "app/main.py",
+    "function": "create_app",
+    "app": "application",
+    "after_call": "application.include_router",
+    "prefix": "/api"
+  },
+  "new_modules": {
+    "layout": "package",
+    "router_variable": "router",
+    "import_style": "absolute",
+    "test_app": {
+      "module": "app.main",
+      "attribute": "app"
+    }
+  },
+  "dependencies": {
+    "allowed": [
+      "app.deps:require_api_key",
+      "app.services:count_items",
+      "app.services:catalogue_value"
+    ]
+  },
+  "operations": [
+    "add_module",
+    "mount_router",
+    "add_endpoint",
+    "add_field"
+  ],
+  "notes": "scenario A: items adopted, users and storage unmanaged, new modules mounted inside create_app under /api"
+}

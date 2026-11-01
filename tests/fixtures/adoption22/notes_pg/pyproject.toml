@@ -1,0 +1,24 @@
+[project]
+name = "notes-pg"
+version = "0.1.0"
+description = "A hand-written notes API on SQLAlchemy (async) and Alembic."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.7,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.13,<2",
+  "httpx>=0.27,<1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.27,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+pythonpath = ["."]
