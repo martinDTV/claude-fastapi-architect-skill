@@ -163,3 +163,41 @@ entry after it), so once `apply` or `recover` returns, a crash or a power loss k
 that honours `fsync`. What that does not cover: the drive's own cache on macOS, directory entries on Windows, and
 filesystems that refuse to sync directories (the file is synced, the entry is not). A sync failure is reported as
 `write_failed` or `interrupted`, never hidden. The staging directory must live on the project's filesystem.
+
+## 10. Merging a hand-modified integration point (opt-in, v2.2)
+
+You edited `src/team_notes/main.py` by hand (a middleware, a helper) and the next evolution needs to regenerate it.
+The default answer is still a blocked plan: `manual_change_on_integration_point`. If you want the tool to keep your
+lines and add its own, say so twice: once in the contract, once on the command line.
+
+```json
+"files": {"merge": [{"path": "src/team_notes/main.py", "transform": "three_way_python",
+                     "ownership": {"generator_may_change": "file", "developer_owns": [{"function": "request_id_header"}]}}]}
+```
+
+```
+python3 scripts/evolve_fastapi.py plan evolution.json --allow-merge            # dry run: the merged text is computed, nothing is written
+python3 scripts/evolve_fastapi.py apply evolution.json --allow-merge --authorize-execution --trust fixture --trust-scope /path
+```
+
+What happens: the tool regenerates the file as it was at your project's baseline (BASE) and accepts it only when its
+digest equals the one the manifest recorded for the file; reads your file as it is (LOCAL); produces the new generated
+file (NEW); merges the hunks of NEW and LOCAL that do not overlap; proves every top-level node of both sides is
+present and that no definition had its header (decorators, signature) changed by both sides; refuses duplicate
+symbols, imports and router registrations, lost comments or lost hunks of yours, line-ending changes; and lists, per
+file, the three digests, the hunks taken from each side, the diff from your file to the result and the conflicts. The
+plan writes nothing. `apply` verifies the merged project in a copy (parse, duplicates, audit, routes, your tests) and
+publishes the planned text through the recoverable writer under the project lock; if your file changed after the plan,
+the writer refuses and you plan again.
+
+Ownership, if you want it finer than "the whole file": `generator_may_change` (where the generator may change lines),
+`developer_owns` (the generator may not touch; a generated change there is a conflict) and `generator_owns` (your
+change there is a conflict: the generator must be able to rewrite it). Regions are functions, `Class.method`, classes
+or line ranges of the generated base.
+
+When it refuses: overlapping or same-point changes (you and the generator added lines at the same place), a header
+changed by both sides, a duplicate, a comment or a hunk of yours that would disappear, a base that cannot be
+authenticated (the conflict says whether to regenerate with the new tool version or restore the file), a file that is
+not valid Python on either side. A refused plan leaves every file as it was; no conflict markers are ever written.
+`verified` means the merged project passed its suite, the audit and the route invariants; it is not a proof that the
+merge means what you meant, which is why the plan shows the diff and the hunks before you apply.

@@ -325,3 +325,82 @@ full suite 719 OK on 3.13 (169.2 s, 137 MB) and 719 OK on 3.9 (186.1 s, 186 MB);
 `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`,
 `git diff --check` and the secrets scan pass; the generation oracle is unchanged (fresh projects identical to the
 published engine except `core/db.py`; evolution plans differ only in manifests, the phased example aside).
+
+## Increment 3: Safe Three-Way Merge Integration
+
+The pure merge of increment 0 is wired into the planning, verification and application of evolutions, as an
+**opt-in per exact file**. By default a generated file edited by hand on an integration point still blocks an
+evolution; a contract may now name the file under `files.merge` (evolution 1.5), with the transformation and an
+ownership boundary, and the operator adds `--allow-merge` on the command line. With both halves present the plan
+computes a three-way merge between the authenticated generated base, the developer's file and the regenerated file,
+shows it, and only `apply` writes it, through the recoverable writer, after the merged project passed the
+verification copy. The developer's code is never removed to make an evolution applicable; a conflict is a structured
+record and a blocked plan, never a marker in a file. The decision record is
+[`docs/architecture/adr-2.2-05-three-way-merge.md`](../architecture/adr-2.2-05-three-way-merge.md); the guide is
+section 10 of [`docs/guides/evolving-generated-projects.md`](../guides/evolving-generated-projects.md); the contract is
+section 12 of `references/evolution-contracts.md`.
+
+### Design
+
+- **Authorisation, exact and two-sided.** `files.merge[] {path, transform: three_way_python|three_way_json,
+  ownership {generator_may_change: file|regions, developer_owns: regions, generator_owns: regions}, on_conflict:
+  reject}`; patterns, directories, the manifest, the journal, historical revisions, preserved files and unknown keys
+  are refused; `reject` is the only conflict behaviour that exists. `--allow-merge` is the second half; the flag
+  alone merges nothing, the contract alone blocks with the flag named.
+- **BASE authenticated by digest.** The base is regenerated from the contract the manifest records and accepted only
+  when its digest equals the digest the manifest recorded for the file (`plan.merges[].base`); otherwise
+  `merge_base_not_reconstructible` with both digests, `merge_base_unknown` for a file the manifest does not know, and
+  the existing `baseline_contract_available` for a manifest whose contract is not the one its digest names. LOCAL is
+  read with its line endings; NEW is the generator's output. The three digests travel in the plan, the journal's
+  `merge` step and the report.
+- **Ownership boundary.** Regions are top-level functions (or `Class.method`), classes or line ranges of the
+  generated base: a manual change inside a generator-owned region, a generated change inside a developer-owned one, or
+  outside the authorised regions, is a named conflict; everything else merges hunk by hunk.
+- **Accepted / refused.** Non-overlapping hunks with both sides' nodes present (the structural proof of `merge.py`),
+  headers of a definition changed by at most one side, no duplicate symbol, import, import binding or router
+  registration under the same prefix, every comment and hunk of the developer present, both sides and the result
+  parsing, line endings unchanged. Refused as records with base lines and both sides' text: `overlapping_changes`,
+  `insertions_at_the_same_point`, `structural_proof_failed`, `signature_or_decorators_changed_by_both_sides`,
+  `duplicate_addition`, `duplicate_symbol`, `duplicate_import`, `conflicting_import`,
+  `duplicate_router_registration`, `manual_comment_lost`, `manual_change_lost`, `line_endings_changed`,
+  `local_does_not_parse`, `generated_does_not_parse`, `json_value_conflict`, the ownership and base conflicts.
+- **Plan, apply, verify.** The plan is the dry run (digests, hunks taken from each side, preserved manual hunks, the
+  diff from LOCAL to the result, the conflicts, the authorisation required, the validations the copy will run). Apply
+  publishes the planned text, never a recomputed one: the writer's digest preconditions refuse a LOCAL changed after
+  the plan, a re-check of the planned result digest refuses a plan altered after verification, the project lock and
+  the journal (`merge` step) apply as always and `recover` restores the developer's file after an interrupted
+  publication. The verification copy re-checks the merged file (planned digest, parse, duplicates, developer's hunks
+  and comments) before the audit, the route contracts, the protected files and the authorised tests; `verified` means
+  the merged project passed them, not that the merge is semantically right beyond what they see. The manifest keeps
+  the generated digest of a merged file (the manual hunks stay the developer's and merge again next time) and
+  `history[].merged` names the files (manifest 1.6).
+- **A defect found on the way.** A verification copy inherited the project's lock file; with another process holding
+  the lock, `apply` crashed with `LockHeld` from inside the copy instead of ending in `applied.state: locked`. The
+  copy no longer carries the lock, and `LockHeld` inside the copy is a rejection reason.
+
+### Contracts and schemas (all additive)
+
+| Artefact | Change |
+|---|---|
+| `fastapi-architect/evolution/1.5` | `files.merge[] {path, transform, ownership, on_conflict}`; `rename_fields`, `retire_fields` and `authorization.destructive` accepted under 1.5 too; 1.0–1.4 keep their meaning |
+| `fastapi-architect/generation/1.6` | `history[].merged`; 1.0–1.5 still read |
+| `evolution_report/1.6` | `plan.merges[]`, `plan.files.merged[]`, `verification.merges[]`, `contract_authorization.allow_merge` |
+| journal | step kind `merge` (paths and the base, local, new and result digests) |
+| CLI | `evolve_fastapi.py plan|apply --allow-merge` |
+| Example | `examples/evolutions/team-notes-add-reminders-merge.json` |
+
+### Deliberate differences from v2.1.0 and from the earlier increments
+
+- Projects whose contracts have no `files.merge` behave exactly as before: the oracle against the published engine is
+  unchanged (fresh projects identical except `core/db.py` of the PostgreSQL ones; evolution plans differ only in their
+  manifests, the phased example aside). The five committed snapshots changed their manifests only (1.6).
+- The discovery proposed `files.allow_merge` with globs; the implementation requires exact paths, a transformation and
+  an ownership boundary (ADR-2.2-05 records why).
+
+### Validation
+
+| Check | Result |
+|---|---|
+| `tests/test_merge_integration_v22.py` | 14 OK on 3.13 (18.8 s) and 13 OK + 1 skipped on 3.9 (the end-to-end flow with the generated suite needs an interpreter that imports FastAPI): the authorisation refused by name (schema gate, globs, directories, escapes, the manifest and revisions, duplicates, transforms, `on_conflict`, ownership shapes, regions, unknown keys, preserve contradiction), the default still a refusal and both halves required; scenario A (import, middleware, decorated helper with comments preserved; apply; `history[].merged`; journal `merge` step; repeat as `noop`; a later evolution merging the same hunks again), B (same insertion point: `insertions_at_the_same_point` with both sides' text), C (manual keys of the audit configuration preserved; three-way JSON merge and conflict on synthetic documents), D (comments, decorators, imports, a positional-only and keyword-only signature), E (`manual_change_in_generator_region`, `generated_change_in_developer_region`, `generated_change_outside_authorized_region`, `merge_region_unresolved`); the whole flow plan → verify (generated suite through the trust model, `verification.merges` ok) → apply → repeat `noop`; adversarial: base absent, corrupt and from another contract; LOCAL changed after the plan and NEW changed after verification refused by the writer with the tree untouched; signature, decorator, duplicate-import, conflicting-import and duplicate-route conflicts named; CRLF (`line_endings_changed`), a tab-indented line (`local_does_not_parse`), a tab inside a comment preserved, a lost comment; a symlink (`unsafe_path`), a renamed target, a lock held by another process (`locked`), an interrupted journal, rollback restoring the developer's version, the retry applied, the repetition `noop`; the command line planning without writing |
+| Existing behaviour | full suite 733 OK on 3.13 (136.0 s, 136 MB) and 733 OK on 3.9 (141.7 s, 183 MB); PostgreSQL regression (the evolution paths touch every PostgreSQL scenario): `test_renames_v22_postgresql.py` 4 OK (47.6 s), `test_retire_contract_v22_postgresql.py` 3 OK (77.3 s), `test_migrations_v21_postgresql.py` 4 OK (58.1 s), `test_acceptance_v21.py` 4 OK (56.0 s), `test_acceptance_v20.py` 3 OK (40.8 s), `test_design_v20_postgresql.py` 9 OK (65.9 s); no Docker executor path was modified, so no real container run was repeated |
+| `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; the Docker executor was not modified (its tests kept their place in the suite; no real container run) |

@@ -87,7 +87,7 @@ Adoption does not convert the project: no file is rewritten, no layout is impose
                       "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": false}]}
   ],
   "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged"],
-  "files": {"allow_modify": ["..."], "preserve": ["README.md"]}
+  "files": {"allow_modify": ["..."], "preserve": ["README.md"], "merge": [{"path": "src/pkg/main.py", "transform": "three_way_python"}]}
 }
 ```
 
@@ -101,6 +101,7 @@ Adoption does not convert the project: no file is rewritten, no layout is impose
 | `modify_modules[].add_endpoints` | adopted: a handler appended to the module's router file (`method`, `path`, `name`, optional `summary`, a JSON `response` returned as is) |
 | `modify_modules[].add_fields` | adopted: `class`, `name`, `type` (str, int, float, bool), optional `required` with `default` |
 | `invariants`, `files.allow_modify`, `files.preserve` | as in 1.0 |
+| `files.merge[]` (1.5) | the opt-in three-way merge of hand-modified generated files, per exact path (section 12) |
 
 Classification of every requested change (reported under `plan.changes`):
 
@@ -129,7 +130,8 @@ for adopted projects the same endpoint again is a duplicate and blocks (nothing 
    `modify_modules`, the module's own files; only when managed, unchanged, allowed and not preserved), `unchanged`
    (never written, manual changes among them listed as `preserved_manual_changes`), `kept` (historical migrations),
    conflicts (`file_in_the_way`, `manual_change_on_integration_point`, `unmanaged_file_in_the_way`,
-   `not_allowed_to_modify`, `preserved_file_would_change`, `missing_managed_file`, `unsafe_path`); the manifest is
+   `not_allowed_to_modify`, `preserved_file_would_change`, `missing_managed_file`, `unsafe_path`; since 1.5 the merge
+   conflicts of section 12, and `merged` for the files a merge rewrote); the manifest is
    always rewritten against its current digest.
    **Files** (adopted): the transformed router or schema files (`transforms` carry the inserted symbols, the AST
    evidence and the digests before and after) and the refreshed adoption baseline.
@@ -220,7 +222,8 @@ the project is written through the recoverable writer.
   only; no changes to existing handlers, no generated modules, no persistence.
 - Migrations: one additive revision per evolution (tables, nullable or defaulted columns, nullable foreign keys);
   since v2.1 the phased form of section 9 (expand, concurrent index, declarative backfill, authorised contract);
-  renames, drops, column type changes, arbitrary data migrations and merges of heads are not supported.
+  renames (other than the phased renames of sections 10 and 11), drops (other than the destructive contract of
+  section 11), column type changes, arbitrary data migrations and merges of heads are not supported.
 - `verified` is as strong as the executed suite, through the local executor's process hygiene or the container
   executor's verified restrictions.
 
@@ -473,3 +476,88 @@ destructive entries in `plan.migration.contract[]` (`destructive: true`, `revers
 `contract_authorization.confirm_irreversible` and `approved_by`, and the change classification `destructive`.
 Examples: `examples/evolutions/parcels-retire-label.json`, `parcels-contract-label.json`, with
 `parcels-rename-evidence.sample.json` and `parcels-retire-evidence.sample.json`.
+
+## 12. Three-way merge of hand-modified generated files (contract `fastapi-architect/evolution/1.5`, v2.2 increment 3; opt-in)
+
+By default a generated file edited by hand on an integration point blocks an evolution
+(`manual_change_on_integration_point`). Contract 1.5 lets the operator authorise, **per exact file**, a three-way
+merge between the generated base, the developer's file and the regenerated file. Both halves are required: the
+contract entry and `--allow-merge` on the command line; with one missing the plan blocks (the second half as
+`merge_not_authorized_on_command_line`). Nothing merges by default, nowhere.
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.5",
+  "project": {"path": "../generated/team-notes"},
+  "add_modules": [{"name": "reminders", "description": "reminders", "entities": [{"name": "Reminder", "fields": [{"name": "text", "type": "str", "max_length": 80}], "operations": ["create", "get", "list"]}]}],
+  "files": {"merge": [
+    {"path": "src/team_notes/main.py", "transform": "three_way_python", "on_conflict": "reject",
+     "ownership": {"generator_may_change": "file", "developer_owns": [{"function": "request_id_header"}], "generator_owns": []}},
+    {"path": ".audit-fastapi.json", "transform": "three_way_json"}
+  ]}
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `path` | one exact relative path of a generated file; patterns, directories, the manifest, the journal, historical revisions and anything under `files.preserve` are refused |
+| `transform` | `three_way_python` (`.py`: line merge plus the structural proof) or `three_way_json` (`.json`: key by key; arrays whole) |
+| `ownership.generator_may_change` | `file` (default) or the regions where the generator may change lines; a generated hunk outside them is `generated_change_outside_authorized_region` |
+| `ownership.developer_owns` | regions the generator may not touch; a generated hunk inside is `generated_change_in_developer_region` |
+| `ownership.generator_owns` | regions where a manual change is refused (`manual_change_in_generator_region`): the generator must be able to rewrite them |
+| regions | `{"function": "name"}` or `{"function": "Class.method"}`, `{"class": "Name"}`, `{"lines": [first, last]}`, all over the **generated base**; one that does not resolve to exactly one node is `merge_region_unresolved`; regions apply to Python files only |
+| `on_conflict` | `reject`, the only behaviour: a conflict blocks the plan and nothing is written; `ours`, `theirs` or any resolution policy is refused as unsupported |
+
+**The three versions.** BASE is the file as the generator produced it at the project's baseline: regenerated from the
+contract the manifest records and authenticated against the digest the manifest recorded for that file
+(`plan.merges[].base.sha256_recorded` and `.sha256_regenerated`, `authenticated: true`). A different digest is
+`merge_base_not_reconstructible` (another tool version, a manipulated manifest, a contract that is not the one the
+file came from; the conflict says what to do), a file the manifest does not know is `merge_base_unknown`, a manifest
+whose contract is not the one its spec digest names is refused earlier (`baseline_contract_available`). LOCAL is the
+file on disk, read with its line endings (`local_sha256`); NEW is the generator's output for the evolved contract
+(`new_sha256`). The result's digest (`result_sha256`) is what the writer re-checks before publishing.
+
+**What merges.** Hunks of NEW and of LOCAL over BASE whose base ranges do not overlap, inside the ownership
+boundary; the structural proof of `merge.py` (every node a side added is present, a node changed by one side holds
+that side's version, none is lost; the merged text parses); no top-level definition whose header (decorators,
+signature, bases) both sides changed; no symbol defined twice, no import repeated or bound twice to different
+origins, no router registered twice under the same prefix; every comment and every hunk of the developer present in
+the result; both sides parsing; line endings unchanged. Two sides changing the body of one function at distinct lines
+merge; the header rule is what refuses "incompatible changes on the same node".
+
+**Conflicts** (each a record with `kind`, `path`, `detail`, `base_lines`, `generated` and `manual` snippets; the plan
+blocks; no marker is ever written into a project file): `overlapping_changes`, `insertions_at_the_same_point`,
+`structural_proof_failed`, `signature_or_decorators_changed_by_both_sides`, `header_not_preserved`,
+`duplicate_addition`, `duplicate_symbol`, `duplicate_import`, `conflicting_import`, `duplicate_router_registration`,
+`manual_comment_lost`, `manual_change_lost`, `line_endings_changed`, `local_does_not_parse`,
+`generated_does_not_parse`, `merged_text_does_not_parse`, `json_value_conflict`, the ownership conflicts above and the
+base conflicts above.
+
+**The plan is the dry run.** `plan` computes the merged text and writes nothing; `plan.merges[]` carries, per file:
+the transform and ownership, the three digests and the result digest, `hunks {generated, manual}`,
+`preserved_manual_hunks[]` and `applied_generated_hunks[]` (base lines and sizes), `diff_local_to_result`,
+`nodes_changed_by_both_sides_in_distinct_lines`, `checks_at_plan`, `validations_in_copy` and
+`authorization_required`; `plan.files.merged[]` lists the files; the diff from LOCAL to the result is under
+`plan.diffs`. The text report prints `merged` files with `~` and every conflict with `!`.
+
+**Apply.** The merged text of the plan is what the recoverable writer publishes, under the project lock, after its
+digest preconditions (LOCAL changed after the plan: `concurrent change … changed after the plan was computed`) and
+after the planned result digest is re-checked (a plan altered after verification: `merge result of … changed after the
+plan was computed`). The journal records a `merge` step (`paths`, and per path the base, local, new and result
+digests); a failure during publication leaves the journal for `recover`, which restores the developer's file. The
+manifest records the file's **generated** digest (not the merged one), so the manual hunks stay the developer's and
+the next evolution merges them again against the new base; `history[].merged` names the files (manifest 1.6).
+
+**Verification in the copy** (`verification.merges[]`): the copy holds exactly the planned text, it parses, no
+duplicate symbol, import or registration, the developer's hunks and comments are present; then the existing checks:
+static audit against the project's own, public route contracts, protected files, and the generated tests under the
+trust model. A textually clean merge whose copy fails any of these is `rejected`. `verified` means the merged project
+passed its suite, not that the merge is semantically right beyond what the suite, the audit and the routes see.
+
+**Limits, stated.** A tool upgrade that changes a template makes a previously merged file's base unreconstructible
+until the project is regenerated with the new version (the conflict says so). Semantic conflicts that neither the
+textual merge, the header rule, the duplicate checks nor the suite can see are not detected. Reformatting of the whole
+file by the developer (or a line-ending change) is a whole-file change: nothing merges. `.audit-fastapi.json` is wired
+for the JSON merge but today's evolutions never change it; manual keys in it are preserved without a merge.
+Report `evolution_report/1.6`: `plan.merges`, `plan.files.merged`, `verification.merges`,
+`contract_authorization.allow_merge`. Example: `examples/evolutions/team-notes-add-reminders-merge.json`.

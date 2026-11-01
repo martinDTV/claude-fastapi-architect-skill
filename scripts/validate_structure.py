@@ -126,7 +126,7 @@ assert (root/'docs/guides/evolving-generated-projects.md').is_file(), 'Missing d
 assert 'guides/evolving-generated-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the evolution guide'
 for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects','parcels'):
     manifest_doc=json.loads((base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').read_text(encoding='utf-8'))
-    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.5' and 'spec_document' in manifest_doc and 'security' in manifest_doc and 'phased_changes' in manifest_doc, f'{snapshot}: manifest must be 1.4 with the embedded contract, the security record and the phased changes'
+    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.6' and 'spec_document' in manifest_doc and 'security' in manifest_doc and 'phased_changes' in manifest_doc, f'{snapshot}: manifest must be 1.4 with the embedded contract, the security record and the phased changes'
 assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
@@ -221,6 +221,15 @@ assert 'RESTRICT' in _drop_src and 'CASCADE' not in _drop_src.replace('never CAS
 assert 'LOCK TABLE' in _drop_src and 'lock_timeout' in _drop_src and 'pg_stat_activity' in _drop_src and 'EVIDENCE_GENERATED_AT' in _drop_src, 'the drop revision must lock the table with a lock timeout and re-check sessions and evidence age'
 assert 'the truth wins' not in _phased_src, 'the sync trigger must never resolve a contradiction by precedence'
 assert 'retire' in (root/'docs/architecture/adr-2.2-01-safe-renames.md').read_text(encoding='utf-8') and 'Retire and the destructive contract' in (root/'docs/guides/phased-migrations-and-backfills.md').read_text(encoding='utf-8'), 'retire and the destructive contract are not documented in the decision record and the guide'
+# v2.2 increment 3: the opt-in three-way merge (contract 1.5, manifest 1.6, report 1.6)
+assert json.loads((base.parent.parent/'examples/evolutions/team-notes-add-reminders-merge.json').read_text(encoding='utf-8')).get('schema')=='fastapi-architect/evolution/1.5', 'examples/evolutions/team-notes-add-reminders-merge.json: must be an evolution 1.5 contract'
+for rel in ('tests/test_merge_integration_v22.py','docs/architecture/adr-2.2-05-three-way-merge.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+assert (base/'scripts/fastapi_design/merging.py').is_file(), 'Missing the merge integration module'
+assert '<<<<<<<' not in (base/'scripts/fastapi_design/merging.py').read_text(encoding='utf-8') and '<<<<<<<' not in (base/'scripts/fastapi_design/merge.py').read_text(encoding='utf-8'), 'the merge never writes conflict markers'
+assert 'architecture/adr-2.2-05-three-way-merge.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the merge decision record'
+assert 'fastapi-architect/evolution/1.5' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'files.merge' in skill and 'allow-merge' in skill, 'contract 1.5 (files.merge) is not documented'
+assert 'Merging a hand-modified integration point' in (root/'docs/guides/evolving-generated-projects.md').read_text(encoding='utf-8'), 'the merge walkthrough is missing from the evolution guide'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'
