@@ -392,7 +392,7 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(design.REPORT_SCHEMA, "architecture_report/1.1")
         from fastapi_design.evolution import REPORT_SCHEMA as EVOLUTION_SCHEMA
 
-        self.assertEqual(EVOLUTION_SCHEMA, "evolution_report/1.5")
+        self.assertEqual(EVOLUTION_SCHEMA, "evolution_report/1.6")
         record = TestRun().to_dict()
         self.assertIn("environment", record)
         self.assertEqual(record["environment"], {})
@@ -830,7 +830,7 @@ class DockerIsolationTests(unittest.TestCase):
                 self.assertEqual(verification["state"], "verified", verification["reasons"])
                 self.assertEqual(verification["tests"]["run"]["executor"], "container")
                 self.assertTrue(verification["tests"]["run"]["environment"]["phases"]["prepare"]["pip_cache"]["shared"])
-                self.assertEqual(evolution["schema"], "evolution_report/1.5")
+                self.assertEqual(evolution["schema"], "evolution_report/1.6")
                 # remediation: the suite of the fixture runs in the container (no dependencies to prepare)
                 shop = Path(tmp) / "remediation19"
                 shutil.copytree(REMEDIATION19, shop, ignore=shutil.ignore_patterns("__pycache__"))

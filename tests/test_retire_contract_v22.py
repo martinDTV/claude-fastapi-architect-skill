@@ -171,7 +171,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_the_examples_validate_and_the_older_ones_still_load(self) -> None:
         for path in (RETIRE_EXAMPLE, CONTRACT_EXAMPLE):
             contract = load_evolution(str(path))
-            self.assertEqual(contract.schema, EVOLUTION_SCHEMA, path.name)
+            self.assertEqual(contract.schema, "fastapi-architect/evolution/1.4", path.name)  # the increment-2 examples keep their schema
             self.assertTrue(contract.authorization["contract"]["evidence"].endswith(".sample.json"))
         self.assertEqual(load_evolution(str(CONTRACT_EXAMPLE)).authorization["destructive"]["approved_by"], "release owner, after the review of the retire evidence")
         self.assertNotIn("no_destructive_schema_change", load_evolution(str(CONTRACT_EXAMPLE)).invariants)
@@ -267,7 +267,7 @@ class RetireAndContractTests(unittest.TestCase):
         self.assertEqual({v["state_declared"] for v in s.c_ops.values()}, {"retire"})
         self.assertEqual(s.c_ops["label"]["compatible_tags"], [s.c_tag])
         self.assertEqual((s.c_ops["label"]["source_of_truth"], s.c_ops["label"]["read_policy"], s.c_ops["label"]["write_policy"]), ("to_column", "to_column", "to_column"))
-        self.assertEqual(s.c_manifest["schema"], "fastapi-architect/generation/1.5")
+        self.assertEqual(s.c_manifest["schema"], "fastapi-architect/generation/1.6")
         self.assertEqual(s.c_manifest["history"][-1]["phased"]["retired"], sorted([s.c_ops["label"]["op_id"], s.c_ops["weight"]["op_id"]]) if s.c_ops["label"]["op_id"] < s.c_ops["weight"]["op_id"] else [s.c_ops["label"]["op_id"], s.c_ops["weight"]["op_id"]])
 
     def test_the_retire_revision_moves_the_truth_online_and_its_downgrade_moves_it_back(self) -> None:
@@ -291,7 +291,7 @@ class RetireAndContractTests(unittest.TestCase):
         self.assertEqual(phases["retire"]["reversible"], True)
         self.assertIn("B and C may run together", phases["retire"]["coexistence"])
         self.assertEqual(len(plan["migration"]["retires"]), 2)
-        self.assertEqual(s.retire_report["schema"], "evolution_report/1.5")
+        self.assertEqual(s.retire_report["schema"], "evolution_report/1.6")
         self.assertTrue(any(c["classification"] == "potentially_incompatible" and c["kind"] == "retire_rename" for c in plan["changes"]))
         runner_defs = s.read(s.c_project, "src/parcels/ops/backfills.py")
         self.assertIn("'state_declared': 'retire'", runner_defs)
