@@ -143,6 +143,63 @@ the diff and the AST evidence; the copy is audited and the project's own tests r
 `users.py` and every other unadopted file are never written. A manual change on an adopted file after adoption
 blocks any transform until you adopt again; a duplicate route or symbol blocks; an ambiguous class blocks.
 
+### 8.1 Declaring where the project may grow (adoption 1.1, v2.2)
+
+The proposal also lists the **mount candidates** (every scope with direct `include_router` calls, with the
+application variable, the registrations, the application factories and any dynamic registration it saw), the
+Alembic facts, and prints an adoption 1.1 skeleton (`--format json`, key `adoption_1_1_skeleton`) whose permissions
+are empty on purpose. Complete it yourself: the prefix new modules hang under, the paths the tool must never write
+(`unmanaged`), the symbols an evolution may depend on (`dependencies.allowed`), what evolutions may do
+(`operations`) and, if the project has one, its Alembic environment (`alembic.metadata`, `alembic.session_dependency`).
+
+```
+python3 scripts/evolve_fastapi.py propose tests/fixtures/adoption22/workshop --format json
+python3 scripts/evolve_fastapi.py adopt tests/fixtures/adoption22/workshop-adopt.json
+```
+
+`adopt` verifies the boundary (one scope, the application bound there, direct registrations only, no symlink, every
+symbol resolving once, the Alembic facts) and records it; it still writes nothing but `.fastapi-architect/adoption.json`.
+
+### 8.2 A new module at the mount point
+
+```json
+{"schema": "fastapi-architect/evolution/1.6", "project": {"path": "/path/to/workshop"},
+ "add_modules": [{"name": "reviews", "entities": [{"name": "Review", "fields": [{"name": "author", "type": "str", "max_length": 80}, {"name": "rating", "type": "int", "min_value": 1}], "operations": ["create", "get", "list"]}]}]}
+```
+
+The plan creates `app/reviews/` (schemas, router, in-memory repository) and `tests/test_reviews.py`, and shows the
+only change to a file of yours: `app/main.py` gains one import after its last import and one
+`application.include_router(reviews_router, prefix="/api/reviews")` after the last registration inside
+`create_app`; the diff removes nothing, and the plan's `mount` block names the anchor, both digests and the routes
+the copy must resolve. `apply` verifies the copy (the new routes at their effective paths, the existing routes
+unchanged, your suite and the module's tests under the trust model) and publishes through the journal (`generate`
+and `mount` steps). The same contract again is a no-op. Declare `persistence: postgresql` only when the adoption
+carries the project's Alembic environment and `add_persistence`: the module then gets a model on your declarative
+base and one revision after your current head; you run `alembic upgrade head` with your own environment.
+
+### 8.3 Extending an adopted router with the project's own code
+
+```json
+{"schema": "fastapi-architect/evolution/1.6", "project": {"path": "/path/to/workshop"},
+ "modify_modules": [{"name": "items", "add_endpoints": [
+   {"method": "GET", "path": "/reports/stats", "name": "items_stats", "parameters": [{"name": "min_price", "in": "query", "type": "float", "required": false, "default": 0.0}], "delegate": {"callable": "app.services:count_items", "arguments": ["min_price"]}, "response_model": "ItemStats"},
+   {"method": "GET", "path": "/reports/value", "name": "items_value", "dependencies": ["app.deps:require_api_key"], "delegate": {"callable": "app.services:catalogue_value", "arguments": []}}]}]}
+```
+
+The handler is appended to the adopted router with typed parameters, the allowed dependencies as `Depends`, and a
+body that calls exactly one function of yours (awaited when it is async); nothing else travels from the contract
+into the file. A path that an earlier parametrised route of the same method would capture first (`/stats` after
+`/{item_id}`) is refused rather than reordered: pick a path your routes do not shadow.
+
+### 8.4 What stays refused
+
+Several mount points or a registration inside a loop; a module whose package, sibling file or prefix already exists;
+an alias already bound in the mount file; a symbol outside `dependencies.allowed`; a delegate that is not a
+function; a response model that is not a class of the adopted module; a mount file changed since the adoption
+(adopt again); a generated module edited by hand (it is yours now; the tool will not regenerate it); persistence
+without the project's own, linear Alembic environment (two heads, another metadata, a table that already exists).
+Every refusal names its reason and leaves the project intact.
+
 ## 9. If something interrupts the write
 
 Every write goes through `.fastapi-architect/ops/<operation id>/`: the new content and a backup of each file are

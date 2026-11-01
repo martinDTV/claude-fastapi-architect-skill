@@ -82,7 +82,7 @@ plugins/fastapi-architect/
         ├── evolve_fastapi.py             # discover, propose, adopt, plan, apply, recover: evolution of generated and adopted projects (v2.0)
         ├── fastapi_audit/                # auditor package: rules per category, facts, summaries, call graph, report, remediation, remediate/, cli
         ├── fastapi_common/               # shared infrastructure: the plugin version, transient-artefact set, filesystem helpers and the durable atomic write (v2.1)
-        └── fastapi_design/               # design package: spec, advisor, blueprint/ (package), generator, verify, report, pipeline, discovery, evolution, journal, transforms, adoption (v2.0)
+        └── fastapi_design/               # design package: spec, advisor, blueprint/ (package), generator, verify, report, pipeline, discovery, evolution, journal, transforms, adoption (v2.0), adopted (v2.2)
 plugins/fastapi-architect/evals/          # claude plugin eval suite (positive, negative, decision, tool-use cases)
 plugins/fastapi-architect/examples/       # tenant-ledger: verified reference implementation (FastAPI, SQLAlchemy 2, Alembic, PostgreSQL RLS);
                                           # specs/ and evolutions/: example architecture and evolution contracts; generated/: the backends generated from them (v2.0)

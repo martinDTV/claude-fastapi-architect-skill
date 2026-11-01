@@ -208,6 +208,10 @@ stability check of 2.3 on merged files.
 
 ### 2.5 Fuller evolution of manually adopted projects
 
+> Implemented by increment 4 (2026-11-01) as adoption 1.1 and evolution 1.6, with one mount point per adoption
+> instead of `mount_points[]`, self-contained generated packages, bounded extensions and persistence only on the
+> project's own verified Alembic environment: [`adr-2.2-06-adopted-projects-ii.md`](adr-2.2-06-adopted-projects-ii.md).
+
 **Current state.** Transforms only inside adopted modules; handlers return a literal; fields `str|int|float|bool`;
 no new modules (nothing can mount a router); no persistence; adopted files must be unchanged since adoption; a
 hand-written project with a manifest is refused.

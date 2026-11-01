@@ -41,7 +41,7 @@ project.
 Nothing is inferred from file names alone: a file called like a generated one is `unmanaged` unless the manifest
 lists it, and a managed or adopted file with unexpected content is a manual change.
 
-## 2. Adoption of hand-written projects (`fastapi-architect/adoption/1.0`)
+## 2. Adoption of hand-written projects (`fastapi-architect/adoption/1.0`; 1.1 adds the declared boundary of section 13)
 
 Flow: `discover` → `propose` → the operator writes the contract → `adopt` → the baseline is recorded → controlled
 evolution of the adopted modules only.
@@ -71,6 +71,48 @@ evolution of the adopted modules only.
 
 Adoption does not convert the project: no file is rewritten, no layout is imposed, no manifest claims the rest.
 
+**Adoption 1.1 (v2.2 increment 4)** keeps everything above and adds the boundary an adopted project may grow
+inside, every item optional and all of them checked as a whole (`propose` prints a skeleton with the permissions
+deliberately empty; nothing in it grants anything until the operator writes it):
+
+```json
+{
+  "schema": "fastapi-architect/adoption/1.1",
+  "project": {"path": "/path/to/workshop"},
+  "modules": [{"name": "items", "router": {"file": "app/routers/items.py", "name": "router"}, "files": ["app/routers/items.py", "app/schemas.py"]}],
+  "package": "app",
+  "unmanaged": ["app/routers/users.py", "app/storage.py"],
+  "mount": {"file": "app/main.py", "function": "create_app", "app": "application", "after_call": "application.include_router", "prefix": "/api"},
+  "new_modules": {"layout": "package", "router_variable": "router", "import_style": "absolute", "test_app": {"module": "app.main", "attribute": "app"}},
+  "dependencies": {"allowed": ["app.deps:require_api_key", "app.services:count_items"]},
+  "operations": ["add_module", "mount_router", "add_endpoint", "add_field"],
+  "alembic": {"ini": "alembic.ini", "script_location": "alembic", "metadata": "app.db:Base", "session_dependency": "app.db:get_session", "async": true}
+}
+```
+
+- `package` must equal the discovered application package. `unmanaged` are globs the tool never writes, its own
+  generated files included. `mount` names the one place new routers are registered: the file, the function (or
+  `null` for module level), the application variable in that scope, `after_call` (`<app>.include_router`; new
+  registrations go after its last call) and the prefix new modules hang under. `new_modules` are the conventions a
+  generated module follows (`layout: package` only; `router_variable: router | {module}_router`; `import_style:
+  absolute` only; `test_app`: what the generated tests import, an instance or a zero-argument factory).
+  `dependencies.allowed` are the `module:name` symbols an evolution may depend on or delegate to. `operations` is the
+  list of what evolutions may do: `add_module`, `mount_router`, `add_endpoint`, `add_field`, `add_persistence`.
+  `alembic` declares the project's own environment. `mount` and `new_modules` come together; `alembic` and
+  `add_persistence` come together. Under 1.1 `modules` may be empty when a mount is declared (a project adopted for
+  new modules only).
+- `adopt` verifies every item against the project and refuses by name: the mount scope must resolve to exactly one
+  function or the module, the application variable must be bound there, at least one direct `include_router` call
+  must exist and none may hide inside a loop, conditional, `with` or `try` (dynamic registration), a file with
+  several application factories needs the function named, the mount file may not be an adopted module file nor a
+  symlink, every allowed dependency and the test application must resolve to exactly one top-level definition, and
+  the Alembic facts of section 13 must hold. The record (`.fastapi-architect/adoption.json`, still the only file
+  written) keeps the extensions, the mount's digest, anchor, existing registrations and application factories, the
+  verified Alembic facts (`alembic.verified`), and later `generated_modules` (files with digests, the definition,
+  prefix, routes, the mount statements, the revision) and `migrations`. The discovery reports `mount_point_unchanged
+  | mount_point_modified` and `generated_unchanged | generated_modified | generated_missing` next to the adopted and
+  unadopted statuses.
+
 ## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read; 1.2 adds the phased keys of section 9; 1.3 adds the renames of section 10)
 
 ```json
@@ -83,7 +125,7 @@ Adoption does not convert the project: no file is rewritten, no layout is impose
      "entities": [{"name": "Product", "add_fields": [{"name": "barcode", "type": "str", "max_length": 64, "required": false},
                                                       {"name": "active", "type": "bool", "required": true, "default": true}],
                    "add_operations": ["update"]}]},
-    {"name": "items", "add_endpoints": [{"method": "GET", "path": "/stats", "name": "items_stats", "summary": "...", "response": {"module": "items"}}],
+    {"name": "items", "add_endpoints": [{"method": "GET", "path": "/reports/stats", "name": "items_stats", "summary": "...", "response": {"module": "items"}}],
                       "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": false}]}
   ],
   "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged"],
@@ -218,8 +260,11 @@ the project is written through the recoverable writer.
 
 - Generated projects: new modules, new nullable or defaulted fields, new operations and dependencies on existing
   modules; no removals, renames, type changes, new entities inside an existing module, or layout migrations.
-- Adopted projects: handlers that return a literal and optional fields on pydantic classes, inside adopted files
-  only; no changes to existing handlers, no generated modules, no persistence.
+- Adopted projects (1.0): handlers that return a literal and optional fields on pydantic classes, inside adopted
+  files only; no changes to existing handlers. Since v2.2 increment 4 (adoption 1.1, section 13): generated modules
+  at one declared mount point, bounded extensions of adopted routers and persistence on the project's own verified
+  Alembic environment; existing handlers are still never rewritten, and a generated module edited by hand is no
+  longer regenerated.
 - Migrations: one additive revision per evolution (tables, nullable or defaulted columns, nullable foreign keys);
   since v2.1 the phased form of section 9 (expand, concurrent index, declarative backfill, authorised contract);
   renames (other than the phased renames of sections 10 and 11), drops (other than the destructive contract of
@@ -561,3 +606,94 @@ file by the developer (or a line-ending change) is a whole-file change: nothing 
 for the JSON merge but today's evolutions never change it; manual keys in it are preserved without a merge.
 Report `evolution_report/1.6`: `plan.merges`, `plan.files.merged`, `verification.merges`,
 `contract_authorization.allow_merge`. Example: `examples/evolutions/team-notes-add-reminders-merge.json`.
+
+## 13. Adopted projects II: generated modules at a mount point, bounded extensions, persistence (contract `fastapi-architect/evolution/1.6`, adoption 1.1, v2.2 increment 4)
+
+Decision record: `docs/architecture/adr-2.2-06-adopted-projects-ii.md`. Guide: section 8 of
+`docs/guides/evolving-generated-projects.md`. Everything here needs an adoption 1.1 record (section 2); an adoption
+1.0 record keeps the behaviour of section 5 and blocks `add_modules` with `change_supported_for_adopted`.
+
+**New modules (`add_modules`, operations `add_module` + `mount_router`).** Each entry is a module definition as for
+generated projects (`name`, `description`, `entities[] {name, fields[], operations[]}`) plus, under 1.6,
+`persistence: in_memory | postgresql` (default `in_memory`), `prefix` (default `<mount.prefix>/<name>`) and
+`dependencies` (symbols from `adoption.dependencies.allowed`, attached to the router as `Depends`). The plan renders
+a self-contained package `<pkg>/<name>/` (`__init__.py`, `schemas.py` from the blueprint's pydantic rendering,
+`router.py` with the declared operations, `repository.py`; with persistence `model.py` on the declared base and one
+revision) and `tests/test_<name>.py` (an in-memory round trip against `test_app`; with persistence or router-level
+dependencies only the mount is asserted, through the OpenAPI document), and edits the mount file by exactly two
+span-exact insertions: `from <pkg>.<name>.router import router as <name>_router` after the last import and
+`<app>.include_router(<name>_router, prefix="...")` after the last existing registration of the declared scope. Both
+insertions carry the additive proof of the span primitives (every pre-existing node unchanged, exactly the inserted
+nodes added); the diff removes nothing. Refusals, by name and with the project intact: `change_supported_for_adopted`,
+`adoption_operation_allowed`, `mount_file_unchanged_since_adoption` (adopt again to re-verify), `unsafe_path`
+(symlink), `module_is_new` (an adopted module, or a module already generated with another definition),
+`file_in_the_way` (the package, a sibling `<pkg>/<name>.py` or any target file exists), `mount_prefix_conflict`
+(another router already serves that effective prefix, in the project or in the same contract), `mount_symbol_free`
+(the alias is already bound in the mount file), `unmanaged_path`, `dependency_allowed`, `module_definition_valid`,
+`table_name_free`, `persistence_unsupported_for_adopted`, `adopted_alembic_resolvable`. Repeating the contract is
+`noop`; a module already generated with the same definition is a no-op entry inside a larger contract; a second
+module chains after the first registration.
+
+**Plan and report.** `plan.mount {file, function, app, after_call, steps[] {module, import, statement},
+sha256_before, sha256_after, expected_routes[], region}`, `plan.generated_modules {name: {files, persistence, prefix,
+routes, dependencies, migration, revision, tables}}`, `plan.transforms[]` with the mount evidence,
+`plan.public_contracts.routes_added` with the effective paths, `plan.migration` (section below), the risks (the mount
+file's two insertions, in-memory storage, the downgrade of new tables). Report `evolution_report/1.7` adds
+`plan.mount`, `plan.generated_modules` and `verification.mount {file, expected_routes, unresolved[]}`.
+
+**Verification in the copy.** Besides the existing checks (static audit against the project's own, public route
+contracts, protected files, the project's suite under the trust model, now including the module's tests), every
+expected route of the mounted module must resolve at its effective path in the copy's static route table; an
+unresolved route is a rejection reason.
+
+**Journal.** Steps `generate` (the module files, per module: files, persistence, prefix, revision), `mount` (the
+file, the scope, the statements, both digests; the writer refuses a plan whose mount edit no longer matches its
+planned digest: `mount edit of … changed after the plan was computed`) and `transform` (section 5). A manual change
+of the mount file between plan and apply is the writer's `concurrent change` refusal; nothing is written and no
+operation is pending.
+
+**Extensions of adopted routers (`modify_modules[].add_endpoints`, operation `add_endpoint`).** Under 1.6 an
+endpoint may declare `parameters[] {name, in: path|query, type: str|int|float|bool, required?, default?}` (path
+placeholders and declared path parameters must match; a default belongs to query parameters and to the declared
+type), `dependencies[]` (from the allowed list; each resolved again at plan time to exactly one top-level definition
+and imported), `delegate {callable: "module:function", arguments: [parameter names]}` (the body is `return
+<fn>(args)`, `await`ed when the function is async; a class, a missing symbol or a file outside the project is
+`delegate_resolves`) and `response_model` (a pydantic class defined exactly once in the adopted module's files,
+imported when it lives in another adopted file; otherwise `response_model_found`). `response` and `delegate` are
+exclusive and one is required. No Python travels from the contract to the file. The generated handler is appended
+through the transform of section 5 (imports added after the last import, one per symbol). A new handler that an
+earlier route of the same method would capture first (same number of segments, each earlier segment a parameter or
+equal to the new literal: `GET /stats` after `GET /{item_id}`) is `route_not_shadowed`: FastAPI resolves routes in
+declaration order and the existing code is not reordered. An exact duplicate is still the transform's refusal.
+
+**Changes to generated modules (`modify_modules` on a module the tool generated inside the adopted project).**
+`entities[].add_fields` (optional or defaulted; a required field without a default is `field_compatible`) and
+`entities[].add_operations`; the files are regenerated from the recorded definition and must be exactly as the tool
+left them (`generated_module_files_unchanged`; the discovery shows `generated_modified`); the mount file is not
+touched; with persistence a new column lands in a second additive revision. `add_endpoints`, `add_fields` with a
+class and `add_depends_on` on a generated module are `change_supported_for_generated`; `entities[]` on an adopted
+module is `change_supported_for_adopted`.
+
+**Persistence (`persistence: postgresql`, operation `add_persistence`, adoption `alembic`).** Verified at adoption
+and again at plan time (`alembic.verified`, `adopted_alembic_resolvable`): `alembic.ini` and the script directory
+exist and agree with the discovery's `script_location`, the chain has exactly one head and no unknown parent,
+`env.py` assigns `target_metadata` from the declared `module:Base` (parsed, never imported), the base resolves to a
+class and the session dependency to a function, and the new tables (`<entity plural>`) collide with no
+`__tablename__` or `create_table` of the project (`table_name_free`). The model subclasses the declared base
+(`Mapped` columns, `__tablename__`), the router takes `session: AsyncSession = Depends(<session_dependency>)`, the
+revision `<script_location>/versions/<rev>_<module>.py` chains after the current head (`create_table`, downgrade
+`drop_table`), its id is `sha1("adopted|<pkg>|<module>|<head>")[:12]`; a column added later is
+`<rev>_<module>_columns.py` (`add_column` nullable or with a server default, downgrade `drop_column`). `plan.migration
+{required, kind, head_before, head_after, files, tables, columns, reversible, downgrade}`; the adoption record keeps
+`alembic.verified.head` current and lists `migrations[] {file, revision, down_revision, module, tables|columns}`.
+Historical revisions are never edited, no second Alembic environment is created, no existing table is adopted;
+running `alembic upgrade head` is the operator's, with the project's own environment (the downgrade drops the new
+tables or columns with their data, stated in the risks). Without a verified environment the plan is
+`persistence_unsupported_for_adopted` and the in-memory variant remains available.
+
+**Limits, stated.** One mount point per adoption; packages with absolute imports only; the generated module is the
+tool's (a manual edit there blocks its regeneration; adopt it as a module of your own if you take it over);
+extensions never rewrite an existing handler and delegate to one callable; a shadowed handler is refused rather
+than reordered; persistence needs PostgreSQL, the project's own Alembic environment and a linear chain; the generated
+tests of a module with router-level dependencies or persistence assert the mount only, the project's own suite
+remains the acceptance; nothing runs outside the trust model.

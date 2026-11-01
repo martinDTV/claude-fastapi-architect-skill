@@ -86,7 +86,7 @@ for f in ('README.md','VERIFICATION.md','LIMITATIONS.md','pyproject.toml','uv.lo
 assert 'verified' in (example/'VERIFICATION.md').read_text(encoding='utf-8'), 'VERIFICATION.md does not state the label'
 # v2.0: design engine (contract, advisor, blueprint, generator, verification, report), tool (skill + root shim), examples, fixtures, docs
 design=base/'scripts/fastapi_design'
-for mod in ('__init__.py','spec.py','advisor.py','blueprint/__init__.py','blueprint/_base.py','blueprint/_helpers.py','blueprint/scaffold.py','blueprint/security.py','blueprint/persistence.py','blueprint/modules.py','blueprint/testing.py','blueprint/security_tests.py','generator.py','verify.py','report.py','pipeline.py','discovery.py','evolution.py','journal.py','transforms.py','adoption.py'):
+for mod in ('__init__.py','spec.py','advisor.py','blueprint/__init__.py','blueprint/_base.py','blueprint/_helpers.py','blueprint/scaffold.py','blueprint/security.py','blueprint/persistence.py','blueprint/modules.py','blueprint/testing.py','blueprint/security_tests.py','generator.py','verify.py','report.py','pipeline.py','discovery.py','evolution.py','journal.py','transforms.py','adoption.py','adopted.py'):
     assert (design/mod).is_file(), f'Missing fastapi_design/{mod}'
     compile((design/mod).read_text(encoding='utf-8'),str(design/mod),'exec')
 design_tool=base/'scripts/design_fastapi.py'
@@ -229,6 +229,16 @@ assert (base/'scripts/fastapi_design/merging.py').is_file(), 'Missing the merge 
 assert '<<<<<<<' not in (base/'scripts/fastapi_design/merging.py').read_text(encoding='utf-8') and '<<<<<<<' not in (base/'scripts/fastapi_design/merge.py').read_text(encoding='utf-8'), 'the merge never writes conflict markers'
 assert 'architecture/adr-2.2-05-three-way-merge.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the merge decision record'
 assert 'fastapi-architect/evolution/1.5' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'files.merge' in skill and 'allow-merge' in skill, 'contract 1.5 (files.merge) is not documented'
+
+# v2.2 increment 4: adopted projects II (adoption 1.1, evolution 1.6, report 1.7)
+for rel in ('tests/fixtures/adoption22/workshop/app/main.py','tests/fixtures/adoption22/workshop/app/services.py','tests/fixtures/adoption22/workshop/app/deps.py','tests/fixtures/adoption22/workshop/tests/test_items.py','tests/fixtures/adoption22/notes_pg/alembic.ini','tests/fixtures/adoption22/notes_pg/alembic/env.py','tests/fixtures/adoption22/notes_pg/alembic/versions/0001_notes.py','tests/fixtures/adoption22/notes_pg/app/db.py','tests/fixtures/adoption22/notes_pg/pyproject.toml','tests/test_adopted_v22.py','tests/test_adopted_v22_postgresql.py','docs/architecture/adr-2.2-06-adopted-projects-ii.md'):
+    assert (root/rel).is_file(), f'Missing {rel} (v2.2 increment 4)'
+for name, schema in (('workshop-adopt.json','fastapi-architect/adoption/1.1'),('notes-pg-adopt.json','fastapi-architect/adoption/1.1'),('workshop-add-reviews.json','fastapi-architect/evolution/1.6'),('workshop-extend-items.json','fastapi-architect/evolution/1.6'),('notes-pg-add-tasks.json','fastapi-architect/evolution/1.6')):
+    assert json.loads((root/'tests/fixtures/adoption22'/name).read_text(encoding='utf-8')).get('schema')==schema, f'tests/fixtures/adoption22/{name}: expected schema {schema}'
+_ref=(base/'references/evolution-contracts.md').read_text(encoding='utf-8')
+assert 'fastapi-architect/adoption/1.1' in _ref and 'fastapi-architect/evolution/1.6' in _ref and 'route_not_shadowed' in _ref and 'adopted_alembic_resolvable' in _ref, 'adoption 1.1 / evolution 1.6 (adopted projects II) are not documented in references/evolution-contracts.md'
+assert 'adoption/1.1' in skill and 'mount' in skill, 'SKILL.md does not describe adoption 1.1 (the mount point of adopted projects)'
+assert 'adr-2.2-06-adopted-projects-ii.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index ADR 2.2-06'
 assert 'Merging a hand-modified integration point' in (root/'docs/guides/evolving-generated-projects.md').read_text(encoding='utf-8'), 'the merge walkthrough is missing from the evolution guide'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'

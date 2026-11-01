@@ -664,3 +664,43 @@ checks rather than left to the statement.
 A network partition in the middle of the `DROP COLUMN` statement itself (PostgreSQL rolls the transaction back on its
 side; the client sees an error; not injected here). A distributed deployment. The additive revision of a defaulted
 column with a long name may exceed the generated project's 120-column Ruff limit (v2.1 template, cosmetic, untouched).
+
+# v2.2 increment 4: a module with PostgreSQL persistence inside an adopted hand-written project
+
+`tests/test_adopted_v22_postgresql.py` (opt-in: `FA_DESIGN_PG=1`, PostgreSQL 16 binaries and `uv` on the PATH; a
+throwaway cluster per class, nothing of the user's touched). The project is `tests/fixtures/adoption22/notes_pg`: a
+hand-written notes API on SQLAlchemy (async) and Alembic with one revision (`0001_notes`), a declarative base and a
+session dependency in `app/db.py`, an Alembic environment under `alembic/` that targets `Base.metadata`. Measured on
+2026-11-01 (macOS, arm64, Python 3.13.5 for the tool, the project's own `uv` environment for its migrations and tests).
+
+## Scenario B (`test_01`)
+
+| Step | Result |
+|---|---|
+| `alembic upgrade head` of the project as written | `0001_notes` (1.4–1.5 s including the environment) |
+| adoption 1.1 with `alembic {ini, script_location: alembic, metadata: app.db:Base, session_dependency: app.db:get_session}` | only `.fastapi-architect/adoption.json` written; `alembic.verified`: head `0001_notes`, `env.py` targets `app.db:Base`, the base is a class, the session dependency an async function, existing tables `{notes}` |
+| plan `add_modules tasks (persistence: postgresql)` | 7 files created (`app/tasks/{__init__,schemas,router,repository,model}.py`, `alembic/versions/<rev>_tasks.py`, `tests/test_tasks.py`), `app/main.py` and the adoption record modified; `migration {head_before: 0001_notes, head_after: <rev>, tables: [tasks], reversible}`; the revision revises `0001_notes`, `create_table` / `drop_table`; the model subclasses `app.db.Base`; a dry run |
+| apply (verification: the project's own suite through `uv run --group dev pytest` under the trust model, the module's mount test, routes resolved at `/api/tasks`) | `verified` (1.8–2.7 s); `0001_notes.py` and `app/models.py` byte-identical |
+| `alembic upgrade head` | version `<rev>` (0.26–0.28 s); columns `id uuid NOT NULL`, `title NOT NULL`, `done NOT NULL DEFAULT false`, `due date NULL`, `created_at timestamptz NOT NULL DEFAULT now()` |
+| round trip against the database (the project's environment, `TestClient`) | `POST 201`, `GET` by id equal, list of 1, `PATCH done=true`, `DELETE 204`; `/api/notes` and `/health` still answer |
+| `alembic downgrade -1`, then `upgrade head` | the table is gone and the version is `0001_notes`; re-upgraded to `<rev>`; the adoption record's verified head and `migrations[]` follow |
+| second contract: `modify_modules tasks` adding `priority int default 1` | one new revision `<rev2>_tasks_columns.py` revising `<rev>` (`add_column … server_default 1 NOT NULL` / `drop_column`), `schemas.py` and `model.py` regenerated, the mount file untouched; `verified`; after `upgrade head` the column is `NOT NULL DEFAULT 1`; the round trip returns `priority: 1`; the same contract again is `noop`; the original module definition is now stale (`module_is_new`) and the current one is `noop` |
+
+## Ambiguous Alembic situations (`test_02`, every refusal with the project byte-identical)
+
+| Situation | Refusal |
+|---|---|
+| a module whose entity maps to the existing table `notes`; two modules of one contract mapping the same table | `table_name_free` |
+| a second root revision (two heads) | `adopted_alembic_resolvable` (the chain is not linear); the in-memory variant of the same module is still planned |
+| `env.py` assigning `target_metadata` from another object | adoption refused: `env.py assigns target_metadata from …; the metadata is not unambiguously the declared one` |
+| a session dependency that does not resolve; a metadata that is a function | adoption refused (`alembic.session_dependency`, `not a declarative base`) |
+| `script_location` that is not the ini's | adoption refused (`alembic.ini points at 'alembic'`) |
+| `add_persistence` without `alembic` | contract error (`adoption.alembic: required`); without `add_persistence` a PostgreSQL module is `persistence_unsupported_for_adopted` |
+
+## What this does not show
+
+The project's own suite does not touch the database (its tests check the application and its routes), so the
+database-backed behaviour of the generated module is shown by the round trip of the test, not by the project's suite;
+a project whose suite needs a database verifies the module with it. Concurrency on the new table, large data volumes
+and the behaviour of a downgrade with rows present (the data goes with the table: stated in the plan's risks) are not
+measured here.

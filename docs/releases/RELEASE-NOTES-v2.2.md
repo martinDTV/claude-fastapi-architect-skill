@@ -404,3 +404,109 @@ section 12 of `references/evolution-contracts.md`.
 | `tests/test_merge_integration_v22.py` | 14 OK on 3.13 (18.8 s) and 13 OK + 1 skipped on 3.9 (the end-to-end flow with the generated suite needs an interpreter that imports FastAPI): the authorisation refused by name (schema gate, globs, directories, escapes, the manifest and revisions, duplicates, transforms, `on_conflict`, ownership shapes, regions, unknown keys, preserve contradiction), the default still a refusal and both halves required; scenario A (import, middleware, decorated helper with comments preserved; apply; `history[].merged`; journal `merge` step; repeat as `noop`; a later evolution merging the same hunks again), B (same insertion point: `insertions_at_the_same_point` with both sides' text), C (manual keys of the audit configuration preserved; three-way JSON merge and conflict on synthetic documents), D (comments, decorators, imports, a positional-only and keyword-only signature), E (`manual_change_in_generator_region`, `generated_change_in_developer_region`, `generated_change_outside_authorized_region`, `merge_region_unresolved`); the whole flow plan → verify (generated suite through the trust model, `verification.merges` ok) → apply → repeat `noop`; adversarial: base absent, corrupt and from another contract; LOCAL changed after the plan and NEW changed after verification refused by the writer with the tree untouched; signature, decorator, duplicate-import, conflicting-import and duplicate-route conflicts named; CRLF (`line_endings_changed`), a tab-indented line (`local_does_not_parse`), a tab inside a comment preserved, a lost comment; a symlink (`unsafe_path`), a renamed target, a lock held by another process (`locked`), an interrupted journal, rollback restoring the developer's version, the retry applied, the repetition `noop`; the command line planning without writing |
 | Existing behaviour | full suite 733 OK on 3.13 (136.0 s, 136 MB) and 733 OK on 3.9 (141.7 s, 183 MB); PostgreSQL regression (the evolution paths touch every PostgreSQL scenario): `test_renames_v22_postgresql.py` 4 OK (47.6 s), `test_retire_contract_v22_postgresql.py` 3 OK (77.3 s), `test_migrations_v21_postgresql.py` 4 OK (58.1 s), `test_acceptance_v21.py` 4 OK (56.0 s), `test_acceptance_v20.py` 3 OK (40.8 s), `test_design_v20_postgresql.py` 9 OK (65.9 s); no Docker executor path was modified, so no real container run was repeated |
 | `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; the Docker executor was not modified (its tests kept their place in the suite; no real container run) |
+
+## Increment 4: Advanced Project Adoption
+
+A hand-written project adopted since v2.0 could only receive a handler returning a literal or an optional field inside
+its adopted files. Increment 4 lets it grow, inside a boundary the operator declares and the tool verifies: new
+self-contained modules registered at **one** declared mount point, bounded extensions of adopted routers that
+delegate to the project's own code, generated modules that evolve additively, and persistence on the project's own
+Alembic environment when, and only when, that environment is unambiguous. Nothing is inferred as a permission; the
+project is never converted; no file outside the declared boundary is written; existing handlers are never rewritten.
+The decision record is [`docs/architecture/adr-2.2-06-adopted-projects-ii.md`](../architecture/adr-2.2-06-adopted-projects-ii.md);
+the guide is section 8 of [`docs/guides/evolving-generated-projects.md`](../guides/evolving-generated-projects.md); the
+contracts are sections 2 and 13 of `references/evolution-contracts.md`.
+
+### Design
+
+- **Adoption 1.1: the boundary is declared, verified and recorded.** `package`, `unmanaged` globs, `mount` (`file`,
+  `function` or module level, `app`, `after_call: <app>.include_router`, `prefix`), `new_modules` conventions
+  (`layout: package`, `router_variable`, `import_style: absolute`, `test_app`), `dependencies.allowed`
+  (`module:name` symbols), `operations` (`add_module`, `mount_router`, `add_endpoint`, `add_field`,
+  `add_persistence`) and `alembic` (`ini`, `script_location`, `metadata`, `session_dependency`, `async`). `mount` and
+  `new_modules` come together, `alembic` and `add_persistence` come together. `adopt` resolves the mount scope to
+  exactly one function or the module, requires the application bound there and direct `include_router` calls only
+  (a registration inside a loop, conditional, `with` or `try` is dynamic and refused), names the function when a file
+  has several application factories, refuses an adopted module file or a symlink as mount file, resolves every
+  allowed symbol and the test application to exactly one definition, verifies the Alembic facts, and records the
+  mount's digest, anchor and existing registrations. `propose` lists the mount candidates and the Alembic facts and
+  prints a skeleton whose permissions are empty on purpose. The discovery reports `mount_point_*` and `generated_*`
+  ownership next to the adopted and unadopted statuses.
+- **A new module lands at the mount point only.** `add_modules` (evolution 1.6: `persistence`, `prefix`,
+  `dependencies`) renders a package `<pkg>/<name>/` (schemas from the blueprint's own pydantic rendering, router,
+  repository; with persistence a model on the declared base and one revision) and `tests/test_<name>.py`, and
+  inserts exactly one import after the last import and one `include_router` statement after the last existing
+  registration of the declared scope, through the span primitives of increment 0 (additive proof in the plan; the
+  diff removes nothing). Refused by name with the project intact: an adopted or differently generated module, a
+  package, sibling module file or target file that exists, an effective prefix another router serves, an alias
+  already bound in the mount file, an `unmanaged` path, a dependency outside the allowed list, a mount file changed
+  since the adoption or turned into a symlink, operations not allowed, an adoption without a mount. The copy must
+  resolve every expected route of the module at its effective path (`verification.mount`), existing routes stay
+  unchanged, and the project's suite plus the module's tests run under the trust model. Repeating the contract is
+  `noop`; a second module chains after the first registration.
+- **Extensions stay bounded.** `add_endpoints` may declare typed `parameters` (path or query; `str|int|float|bool`;
+  `required`, `default`), allowed `dependencies` (resolved again at plan time), one `delegate` (`module:function`,
+  arguments among the parameters, awaited when async; a class or a missing symbol is refused) and a `response_model`
+  defined once in the adopted module. Either a JSON `response` or a `delegate`; no Python travels from the contract.
+  A handler an earlier parametrised route of the same method would capture first (`GET /stats` after
+  `GET /{item_id}`) is `route_not_shadowed`: routes resolve in declaration order and the existing code is not
+  reordered. The handlers use the `Annotated` style the generated projects use.
+- **Generated modules evolve like generated modules.** `entities[].add_fields` (optional or defaulted) and
+  `add_operations` regenerate the module from its recorded definition; its files must be exactly as the tool left
+  them (`generated_module_files_unchanged`: a manual edit makes the module the developer's). The two vocabularies do
+  not mix (`change_supported_for_generated`, `change_supported_for_adopted`). A definition is compared canonically,
+  so a module regenerated with its operations spelled out still matches the one the operator wrote.
+- **Persistence on the project's own, verified Alembic environment.** `persistence: postgresql` needs
+  `add_persistence` and `alembic`; verified at adoption and again at plan time: ini and script directory present and
+  agreeing with the discovery, exactly one head and no unknown parent, `env.py` assigning `target_metadata` from the
+  declared `module:Base` (parsed, never imported), the base a class, the session dependency a function, no table
+  collision with any `__tablename__` or `create_table` of the project. The model subclasses the declared base, the
+  revision chains after the current head (`create_table` / `drop_table`), a later column is a second additive
+  revision (`add_column` nullable or with a server default / `drop_column`); `plan.migration` names `head_before`,
+  `head_after`, `tables`, `columns` and the downgrade's cost; the adoption record keeps the verified head current.
+  Historical revisions are never edited, no second Alembic environment is created, no table is adopted. Two heads,
+  an environment that is not the ini's, another metadata, a duplicate table are refusals; the in-memory variant
+  stays available.
+- **Journal and report.** Steps `generate`, `mount` (the writer refuses a mount edit whose planned digest changed)
+  and `transform`; a concurrent change of the mount file between plan and apply is the writer's refusal with nothing
+  written and no pending operation; an interruption rolls back to the digests before the operation. Report
+  `evolution_report/1.7` adds `plan.mount`, `plan.generated_modules`, `verification.mount`.
+
+### Contracts and schemas (all additive)
+
+| Artefact | Change |
+|---|---|
+| `fastapi-architect/adoption/1.1` | `package`, `unmanaged`, `mount`, `new_modules`, `dependencies`, `operations`, `alembic`; `modules` may be empty with a mount; the record adds `mount`, `generated_modules`, `migrations`, `alembic.verified`; 1.0 still read and written as before |
+| `fastapi-architect/evolution/1.6` | `add_modules[].persistence|prefix|dependencies`; `add_endpoints[].parameters|dependencies|delegate|response_model` (`response` optional when delegating); 1.0–1.5 keep their meaning |
+| `evolution_report/1.7` | `plan.mount`, `plan.generated_modules`, `verification.mount` |
+| journal | step kinds `generate` and `mount` |
+| discovery | ownership `mount_point_unchanged|modified`, `generated_unchanged|modified|missing`; `adoption.schema|mount|generated_modules|operations` |
+| CLI | `propose` prints mount candidates, Alembic facts and an adoption 1.1 skeleton; `adopt` accepts 1.1 |
+| Fixtures | `tests/fixtures/adoption22/workshop` (application factory, services, dependencies), `tests/fixtures/adoption22/notes_pg` (SQLAlchemy async + Alembic), the five contracts next to them |
+
+### Deliberate differences from v2.1.0 and from the earlier increments
+
+- Generated projects are untouched: the oracle against the published engine is unchanged (fresh projects identical
+  except `core/db.py` of the PostgreSQL ones since increment 2; evolution plans differ only in their manifests, the
+  phased example aside); the five committed snapshots did not change.
+- The discovery proposed `mount_points[]`; the implementation requires one mount point per adoption (ADR-2.2-06).
+- A new handler that an earlier route would shadow is refused instead of inserted (`route_not_shadowed`). This is
+  an explicit, not a silent, change for adopted projects: the v2.0 scenario B appended `GET /stats` after the shop's
+  `GET /{item_id}` and reported it `verified` although the handler could never be reached (the earlier route captured
+  the request and answered 422); the increment found that defect, the rule follows Starlette's matching (a converter
+  such as `{id:int}` only captures what its pattern accepts, `{rest:path}` captures the rest) and the v2.0 examples
+  and tests moved to `/reports/stats` and `/reports/count`. `add_modules` on an adoption 1.0 record keeps its
+  historical blocker name (`change_supported_for_adopted`), with a detail that names the missing mount point.
+- The generated tests of a module with router-level dependencies or persistence assert the mount through the OpenAPI
+  document only (FastAPI 0.162 no longer lists included routers in `app.routes`); the project's suite is the
+  acceptance. Placeholders in an endpoint path must be covered by declared `parameters` only when the contract
+  declares `parameters` at all; 1.1 contracts without them keep their behaviour.
+
+### Validation
+
+| Check | Result |
+|---|---|
+| `tests/test_adopted_v22.py` | 16 OK on 3.13 (6.3 s) and 11 OK + 5 skipped on 3.9 (the scenarios that run the fixture's suite need an interpreter that imports FastAPI): adoption 1.0 still read and 1.1 keys gated; malformed extensions rejected with their paths (package, unmanaged, mount, new_modules, dependencies, operations, alembic; mount and new_modules required together); evolution 1.6 keys gated and validated (persistence, prefix, dependencies; parameters, defaults, delegate arguments, response and delegate exclusive, undeclared placeholders); the proposal's mount candidates, Alembic facts and a skeleton that grants nothing; `adopt` verifying the mount (scope, anchor, registrations, factories, digest) and writing only the record, the discovery's `mount_point_unchanged` and `generated_unchanged`; refusals with nothing written (wrong application name, missing function, two factories unnamed, dynamic registration, mount file adopted, dependency or test application unresolved, package mismatch, Alembic declared on a project without it, symlinked mount file); scenario A (a module mounted inside `create_app` with exactly two added lines and nothing removed, verified with the project's suite, users.py and storage untouched, the record and ownership updated, the module exercised over HTTP, `noop` repetition, a second module chaining after the first; extended endpoints delegating to a sync and an async function, depending on the API key, typing a query parameter with a default and a path parameter, exercised over HTTP; a generated module gaining a field and an operation, `noop` again, a required field without default refused, a manual edit of a generated file blocking its regeneration, the vocabularies kept apart; the handmade shop mounted at module level); scenario C (the mount file edited after the plan refused by the writer with nothing written and nothing pending, re-adoption, a tampered mount edit refused); lock held (`locked`), interruption after the second file, journal steps `generate`/`mount`/`manifest`, rollback to the previous digests, retry applied, `noop`; a transform-only operation with `transform`/`manifest` steps; adversarial refusals of module generation (adopted name, sibling module file, existing package, prefix taken in the project and twice in one contract, dependency not allowed, PostgreSQL without an environment, invalid fragment, `unmanaged` glob, operations without `add_module`, a 1.0 adoption, alias bound in the mount file, symlinked mount file, non-parsing mount file) and of extensions (dependency not allowed, dependency and delegate that no longer resolve after a manual change, a class as delegate, a missing delegate, a response model outside the module, an exact duplicate, an unadopted module, operations without `add_endpoint`, a manual change after adoption, shadowed paths `/stats` and `/{code}` refused while `POST /stats` is planned); a module whose routes do not resolve rejected by the copy; `propose`, `adopt` (accepted and refused) and `plan` through the command line without writing |
+| `tests/test_adopted_v22_postgresql.py` (opt-in, PostgreSQL 16 throwaway cluster, the project's own `uv` environment) | 2 OK (9.0 s alone, 10.8 s with the suite running): scenario B as recorded in `examples/generated/VERIFICATION.md` (baseline upgrade 1.4–1.5 s, evolve verified 1.8–2.7 s, upgrade of the generated revision 0.26–0.28 s; the columns, the round trip, downgrade and re-upgrade, the second additive column revision, `noop` and stale definitions) and the Alembic refusals (duplicate table in the project and within one contract, two heads, another metadata, unresolved session dependency, metadata that is a function, script location not the ini's, `add_persistence` without `alembic` and PostgreSQL without `add_persistence`) with the project byte-identical |
+| Existing behaviour | full suite 751 OK on 3.13 (130.0 s, 146 MB, 40 skipped) and 751 OK on 3.9 (134.7 s, 189 MB, 61 skipped); the five committed snapshots unchanged; oracle against the published engine unchanged (fresh projects identical except `core/db.py` of the PostgreSQL ones since increment 2; plans differ only in their manifests, the phased example aside); PostgreSQL regression of the earlier increments on a throwaway cluster, all OK: `test_renames_v22_postgresql.py` 4 (33.5 s), `test_retire_contract_v22_postgresql.py` 3 (57.6 s), `test_migrations_v21_postgresql.py` 4 (41.7 s), `test_acceptance_v21.py` 4 (46.5 s), `test_acceptance_v20.py` 3 (33.8 s), `test_design_v20_postgresql.py` 9 (63.0 s) |
+| `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff (the engine, the tests, and the generated output of an in-memory two-entity module and a PostgreSQL module with a dependency linted with the generated projects' rule set), `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; the Docker executor was not modified (no real container run) |
