@@ -52,6 +52,7 @@ from .blueprint.phased import contract_revision, index_name, index_revision, ope
 from .discovery import ProjectModel, discover
 from .generator import MANIFEST, GenerationError, WriteError, build_manifest, safe_join
 from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
+from .locking import LockHeld
 from .migrations import backfill_params, contract_preconditions, load_evidence, validate_authorization, validate_backfill, validate_contract_fields, validate_indexes
 from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
@@ -1088,7 +1089,17 @@ class EvolveOptions:
 
 
 def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None, *, durable: bool = True) -> Operation:
-    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable)
+    """One journaled operation; its steps (journal 1.1) say what produced each file: regenerated files, structural
+    transforms with their evidence digests, and the manifest or adoption baseline."""
+    manifest_paths = [p for p in plan.files if p in (MANIFEST, ADOPTION)]
+    steps: List[Dict[str, Any]] = []
+    if plan.kind == "adopted":
+        steps.append({"kind": "transform", "paths": [t["path"] for t in plan.transforms], "evidence": {t["path"]: {"inserted": t["inserted"], "sha256_before": t["sha256_before"], "sha256_after": t["sha256_after"]} for t in plan.transforms}})
+    else:
+        regenerated = [p for p in sorted(plan.files) if p not in manifest_paths]
+        steps.append({"kind": "regenerate", "paths": regenerated, "evidence": {"create": list(plan.create), "modify": [p for p in plan.modify if p not in manifest_paths]}})
+    steps.append({"kind": "manifest", "paths": manifest_paths})
+    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable, steps=steps)
 
 
 def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any]:
@@ -1191,6 +1202,9 @@ def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None
             try:
                 op = _write_plan(Path(plan.project), plan, options.faults)
                 report["applied"] = {"written": [f.path for f in op.files], "state": "applied", "operation": op.op_id, "manifest": MANIFEST if plan.kind == "generated" else ADOPTION}
+            except LockHeld as exc:
+                report["applied"] = {"written": [], "state": "locked", "error": str(exc), "lock": {"holder": dict(exc.holder), "reason": exc.reason}, "retry": "wait for the holder to finish (or `evolve_fastapi.py ops list PROJECT`; `ops unlock` removes only a stale lock)"}
+                report["state"] = STATE_REJECTED
             except (WriteError, GenerationError, OSError) as exc:
                 pending = pending_operations(Path(plan.project))
                 report["applied"] = {"written": [], "state": "write_failed" if not pending else "interrupted", "error": str(exc), "pending_operations": [{"op_id": op.op_id, "state": op.state, "published": list(op.published)} for op in pending], "recover": "evolve_fastapi.py recover PROJECT [--forward]"}

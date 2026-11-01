@@ -39,10 +39,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fastapi_audit.remediate.container_cli import add_container_arguments, container_executor_from_args  # noqa: E402
 from fastapi_audit.remediate.executors import REGISTRY, TRUST_PROFILES, TRUST_UNTRUSTED, Authorization  # noqa: E402
 from fastapi_audit.remediate.isolation import DEFAULT_ALLOWED_COMMANDS, DEFAULT_ENV_PASSTHROUGH, ExecutionPolicy  # noqa: E402
+from fastapi_design import locking  # noqa: E402
 from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.evolution import EvolutionError, EvolveOptions, render_text, run_evolution, to_json  # noqa: E402
-from fastapi_design.journal import pending_operations, recover, unreadable_operations  # noqa: E402
+from fastapi_design.journal import classify, pending_operations, recover, unreadable_operations  # noqa: E402
 
 PROG = "evolve_fastapi"
 OK_STATES = ("planned", "noop", "audit_clean", "verified")
@@ -89,6 +90,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rc.add_argument("project")
     rc.add_argument("--forward", action="store_true", help="publish the pending files (default: roll back the published ones)")
     rc.add_argument("--op", metavar="ID", help="only this operation id")
+    rc.add_argument("--wait", type=float, default=0.0, metavar="SECONDS", help="wait up to SECONDS for the project lock (default: fail at once, naming the holder)")
+    ops = sub.add_parser("ops", help="inspect pending operations and the project lock (v2.2): list, show, unlock")
+    ops.add_argument("action", choices=("list", "show", "unlock"))
+    ops.add_argument("project")
+    ops.add_argument("--op", metavar="ID", help="operation id for `show`")
     for name in ("plan", "apply"):
         p = sub.add_parser(name, help="compute the change set (and verify it in a copy)" if name == "plan" else "verify in a copy, then write the project")
         p.add_argument("contract", help="evolution contract (JSON, schema fastapi-architect/evolution/1.0)")
@@ -106,7 +112,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--authorize-contract", action="store_true", help="authorise a contract phase (NOT NULL after a complete backfill): a human decision, never the continuation of a backfill; needs authorization.contract in the contract and fresh evidence")
         p.add_argument("--evidence", metavar="FILE", help="migration evidence written by `python -m <pkg>.ops.backfill verify` (overrides authorization.contract.evidence)")
         add_container_arguments(p)
-    for p in (d, pr, ad, rc, sub.choices["plan"], sub.choices["apply"]):
+    for p in (d, pr, ad, rc, ops, sub.choices["plan"], sub.choices["apply"]):
         p.add_argument("--output", metavar="FILE", help="write the JSON report to FILE")
         p.add_argument("--format", choices=("text", "json"), default="text")
     sub.choices["plan"].add_argument("--strict", action="store_true", help=argparse.SUPPRESS)
@@ -128,6 +134,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stdout.write(payload if args.format == "json" else _render_discovery(model))
         return 0
 
+    if args.command == "ops":
+        project = os.path.abspath(args.project)
+        lock_state = locking.inspect(project)
+        if args.action == "unlock":
+            payload_obj = {"project": project, "lock": lock_state, "unlock": locking.unlock_stale(project)}
+            text = (f"lock removed ({payload_obj['unlock']['reason']})\n" if payload_obj["unlock"]["removed"] else f"lock not removed: {payload_obj['unlock']['reason']}" + (f" (pid {lock_state.get('pid')} on {lock_state.get('host')}, {lock_state.get('kind')}: {lock_state.get('description')}, started {lock_state.get('started_at')})" if lock_state else "") + "\n")
+        else:
+            pending = pending_operations(project)
+            unreadable = unreadable_operations(project)
+            if args.action == "show":
+                pending = [op for op in pending if not args.op or op.op_id == args.op]
+                unreadable = [u for u in unreadable if not args.op or u["op_id"] == args.op]
+                shown = [{**op.to_dict(), "files_now": classify(project, op)} for op in pending]
+            else:
+                shown = [{"op_id": op.op_id, "kind": op.kind, "description": op.description, "state": op.state, "files": len(op.files), "published": len(op.published), "steps": [s.get("kind") for s in op.steps], "parent_op": op.parent_op} for op in pending]
+            payload_obj = {"project": project, "lock": lock_state, "pending": shown, "unreadable": unreadable}
+            text = ("lock: free\n" if lock_state is None else f"lock: {lock_state.get('status')} by pid {lock_state.get('pid')} on {lock_state.get('host')} ({lock_state.get('kind')}: {lock_state.get('description')}, started {lock_state.get('started_at')}, age {lock_state.get('age_s')} s)\n")
+            text += "pending operations: none\n" if not shown else "".join(f"operation {o['op_id']} ({o['kind']}: {o['description']}): {o['state']}; " + (f"files {o['files']}, published {o['published']}, steps {', '.join(o['steps']) or '-'}" if args.action == "list" else "files " + ", ".join(f"{k}={v}" for k, v in o["files_now"].items()) + (f"; steps {json.dumps(o['steps'])}" if o["steps"] else "") + (f"; parent {o['parent_op']}" if o.get("parent_op") else "")) + "\n" for o in shown)
+            text += "".join(f"operation {u['op_id']}: needs_attention; {u['reason']} ({u['staged_files']} staged file(s) kept)\n" for u in unreadable)
+        payload = json.dumps(payload_obj, indent=2, sort_keys=True, default=str) + "\n"
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+        sys.stdout.write(payload if args.format == "json" else text)
+        attention = bool(payload_obj.get("unreadable")) or (lock_state is not None and lock_state.get("status") != "held" and args.action != "unlock") or (args.action == "unlock" and not payload_obj["unlock"]["removed"] and lock_state is not None)
+        return 1 if attention else 0
+
     if args.command in ("propose", "adopt", "recover"):
         try:
             if args.command == "propose":
@@ -140,7 +173,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ops = pending_operations(os.path.abspath(args.project))
                 if args.op:
                     ops = [op for op in ops if op.op_id == args.op]
-                reports = [recover(os.path.abspath(args.project), op, strategy="forward" if args.forward else "rollback").to_dict() for op in ops]
+                reports = [recover(os.path.abspath(args.project), op, strategy="forward" if args.forward else "rollback", wait_s=args.wait).to_dict() for op in ops]
                 unreadable = [u for u in unreadable_operations(os.path.abspath(args.project)) if not args.op or u["op_id"] == args.op]
                 payload_obj = {"project": os.path.abspath(args.project), "recovered": reports, "unreadable": unreadable}
                 text = ("no pending operation\n" if not reports and not unreadable else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
@@ -150,6 +183,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for error in exc.errors:
                 sys.stderr.write(f"  - {error}\n")
             return 2
+        except locking.LockHeld as exc:
+            sys.stderr.write(f"{PROG}: locked: {exc}\n")
+            return 3
         except (FileNotFoundError, ValueError, OSError) as exc:
             sys.stderr.write(f"{PROG}: error: {exc}\n")
             return 2

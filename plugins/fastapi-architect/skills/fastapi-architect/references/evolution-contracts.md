@@ -181,7 +181,13 @@ survive a crash or a power loss on a filesystem that honours `fsync`. Not guaran
 is synced, the entry is not, nothing fails). A failed sync of a file is an error, never a silent downgrade: `apply`
 reports `write_failed` (nothing landed) or `interrupted` (the journal is kept for `recover`). The verification copy is
 written without fsync. The tests inject failures before publication, after the n-th file, after the last file, before
-cleanup and during recovery.
+cleanup and during recovery. Since v2.2 (increment 0) one writer at a time touches a project: `apply`, `adopt` and
+`recover` take `.fastapi-architect/ops/LOCK` (holder pid, host, start time, operation), fail at once when it is held
+(`applied.state: locked`, exit 3 for `recover`; `recover --wait SECONDS` bounds an optional wait), never break a stale
+lock silently (`evolve_fastapi.py ops unlock` removes one whose holder is gone, after naming it); the journal is
+`fastapi-architect/operation/1.1` with `steps` (what produced each file: `regenerate`, `transform`, `manifest`, later
+`merge`) and `parent_op`, 1.0 journals are still read and recovered; `ops list` and `ops show` print pending
+operations, their steps and the lock.
 
 ## 7. Verification and states
 

@@ -40,6 +40,11 @@ than failing). ``durable=False`` exists for throwaway verification copies only; 
 
 Fault injection points (``FaultInjector``) exist so the tests can interrupt the protocol before, during and after
 publication and during recovery.
+
+v2.2 (increment 0), additive: the journal is ``fastapi-architect/operation/1.1`` (1.0 journals are still read and
+recovered); an operation may carry ``steps`` (what produced each file: ``regenerate``, ``merge``, ``transform``,
+``manifest`` …, with their evidence) and a ``parent_op``; ``write_recoverable`` and ``recover`` take the project lock
+of ``locking.py`` (fail-fast by default, bounded wait on request) so one writer at a time touches a project.
 """
 
 from __future__ import annotations
@@ -54,10 +59,12 @@ from typing import Dict, List, Optional
 from fastapi_common.fs import atomic_write, fsync_directory, sha256_bytes, sha256_path, symlink_on_path
 
 from .generator import GenerationError, WriteError, safe_join
+from .locking import LockHeld, project_lock  # noqa: F401  (LockHeld re-exported for callers of the writer)
 
 OPS_DIR = ".fastapi-architect/ops"
 JOURNAL = "journal.json"
-JOURNAL_SCHEMA = "fastapi-architect/operation/1.0"
+JOURNAL_SCHEMA = "fastapi-architect/operation/1.1"  # 1.1 (v2.2): steps and parent_op, additive
+JOURNAL_SCHEMAS = ("fastapi-architect/operation/1.0", JOURNAL_SCHEMA)
 STATES = ("prepared", "publishing", "published", "recovering_rollback", "recovering_forward", "needs_attention")
 
 
@@ -99,18 +106,20 @@ class Operation:
     published: List[str] = field(default_factory=list)  # paths renamed into place, in order
     recovered: List[str] = field(default_factory=list)  # paths handled by recovery, in order
     conflicts: Dict[str, str] = field(default_factory=dict)  # path -> detail (recovery)
+    steps: List[Dict[str, object]] = field(default_factory=list)  # 1.1: {kind, paths, evidence} per producing step
+    parent_op: Optional[str] = None  # 1.1: the operation this one continues (a chain of phases)
 
     @property
     def directory(self) -> str:
         return f"{OPS_DIR}/{self.op_id}"
 
     def to_dict(self) -> Dict[str, object]:
-        return {"schema": JOURNAL_SCHEMA, "op_id": self.op_id, "kind": self.kind, "description": self.description, "state": self.state, "files": [f.to_dict() for f in self.files], "published": list(self.published), "recovered": list(self.recovered), "conflicts": dict(self.conflicts)}
+        return {"schema": JOURNAL_SCHEMA, "op_id": self.op_id, "kind": self.kind, "description": self.description, "state": self.state, "files": [f.to_dict() for f in self.files], "published": list(self.published), "recovered": list(self.recovered), "conflicts": dict(self.conflicts), "steps": [dict(s) for s in self.steps], "parent_op": self.parent_op}
 
     @classmethod
     def from_dict(cls, data: Dict[str, object]) -> "Operation":
         files = [FileEntry(str(f["path"]), f.get("expected"), str(f["new"])) for f in data.get("files", [])]  # type: ignore[index,union-attr]
-        return cls(op_id=str(data["op_id"]), kind=str(data.get("kind", "")), description=str(data.get("description", "")), files=files, state=str(data.get("state", "prepared")), published=list(data.get("published", [])), recovered=list(data.get("recovered", [])), conflicts=dict(data.get("conflicts", {})))  # type: ignore[arg-type]
+        return cls(op_id=str(data["op_id"]), kind=str(data.get("kind", "")), description=str(data.get("description", "")), files=files, state=str(data.get("state", "prepared")), published=list(data.get("published", [])), recovered=list(data.get("recovered", [])), conflicts=dict(data.get("conflicts", {})), steps=[dict(s) for s in data.get("steps", []) if isinstance(s, dict)], parent_op=(str(data["parent_op"]) if data.get("parent_op") else None))  # type: ignore[arg-type,index]
 
 
 @dataclass
@@ -174,7 +183,7 @@ def _check_preconditions(target: Path, files: List[FileEntry]) -> None:
             raise WriteError(f"concurrent change: {entry.path} changed after the plan was computed (expected {entry.expected[:12]}, found {str(current)[:12]})")
 
 
-def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, durable: bool = True) -> Operation:
+def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, durable: bool = True, steps: Optional[List[Dict[str, object]]] = None, parent_op: Optional[str] = None) -> Operation:
     """Check every precondition, stage the new content and the backups, write the journal (state ``prepared``).
     Nothing in the project is modified. Raises WriteError/GenerationError and leaves no staging behind on failure.
     With ``durable`` (the default) every staged file, the journal and the directories that hold them are fsync'ed
@@ -192,7 +201,7 @@ def prepare(target: Path, files: Dict[str, str], expected: Dict[str, Optional[st
         if existing is not None and existing.state != "prepared":
             raise WriteError(f"operation {op_id} is already {existing.state}; recover it before preparing it again")
         shutil.rmtree(op_dir, ignore_errors=True)
-    op = Operation(op_id=op_id, kind=kind, description=description, files=entries)
+    op = Operation(op_id=op_id, kind=kind, description=description, files=entries, steps=[dict(s) for s in (steps or [])], parent_op=parent_op)
     try:
         for entry in entries:
             _write_atomic(op_dir / "new" / entry.path, files[entry.path].encode("utf-8"), durable=durable)
@@ -261,7 +270,7 @@ def load_operation(target: Path, op_id: str) -> Optional[Operation]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if data.get("schema") != JOURNAL_SCHEMA:
+    if data.get("schema") not in JOURNAL_SCHEMAS:
         return None
     return Operation.from_dict(data)
 
@@ -301,7 +310,7 @@ def unreadable_operations(target: Path) -> List[Dict[str, str]]:
             else:
                 if not isinstance(data, dict):
                     reason = "journal.json is not an object"
-                elif data.get("schema") != JOURNAL_SCHEMA or "op_id" not in data:
+                elif data.get("schema") not in JOURNAL_SCHEMAS or "op_id" not in data:
                     reason = f"journal.json has schema {data.get('schema')!r} or no op_id"
                 else:
                     reason = ""
@@ -326,11 +335,15 @@ def classify(target: Path, op: Operation) -> Dict[str, str]:
     return out
 
 
-def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: Optional[FaultInjector] = None, durable: bool = True) -> RecoveryReport:
+def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: Optional[FaultInjector] = None, durable: bool = True, lock: bool = True, wait_s: float = 0.0) -> RecoveryReport:
     """Finish (``forward``) or undo (``rollback``) an interrupted operation. Files in conflict are never touched.
-    Progress is journaled; calling it again continues or confirms (idempotent). Durable like ``publish``."""
+    Progress is journaled; calling it again continues or confirms (idempotent). Durable like ``publish``. Holds the
+    project lock while it runs (``LockHeld`` when another operation holds it)."""
     if strategy not in ("rollback", "forward"):
         raise ValueError("strategy must be 'rollback' or 'forward'")
+    if lock:
+        with project_lock(target, kind="recover", description=f"{strategy} {op.op_id}", wait_s=wait_s):
+            return recover(target, op, strategy=strategy, faults=faults, durable=durable, lock=False)
     target = Path(target).resolve()
     faults = faults or FaultInjector()
     op_dir = target / op.directory
@@ -384,9 +397,13 @@ def recover(target: Path, op: Operation, *, strategy: str = "rollback", faults: 
     return report
 
 
-def write_recoverable(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, faults: Optional[FaultInjector] = None, durable: bool = True) -> Operation:
-    """prepare + publish; on failure the journal stays for ``recover``. Returns the operation (state as left).
-    ``durable=False`` skips the fsyncs: for throwaway copies (verification) only, never for a project."""
-    op = prepare(target, files, expected, kind=kind, description=description, durable=durable)
+def write_recoverable(target: Path, files: Dict[str, str], expected: Dict[str, Optional[str]], *, kind: str, description: str, faults: Optional[FaultInjector] = None, durable: bool = True, steps: Optional[List[Dict[str, object]]] = None, parent_op: Optional[str] = None, lock: bool = True, wait_s: float = 0.0) -> Operation:
+    """prepare + publish under the project lock; on failure the journal stays for ``recover``. Returns the operation
+    (state as left). ``durable=False`` skips the fsyncs: for throwaway copies (verification) only, never for a
+    project. ``LockHeld`` is raised before anything is staged when another operation holds the project."""
+    if lock:
+        with project_lock(target, kind=kind, description=description, wait_s=wait_s):
+            return write_recoverable(target, files, expected, kind=kind, description=description, faults=faults, durable=durable, steps=steps, parent_op=parent_op, lock=False)
+    op = prepare(target, files, expected, kind=kind, description=description, durable=durable, steps=steps, parent_op=parent_op)
     publish(target, op, faults=faults, durable=durable)
     return op
