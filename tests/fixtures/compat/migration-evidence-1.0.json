@@ -1,0 +1,70 @@
+{
+  "schema": "fastapi-architect/migration-evidence/1.0",
+  "generated_at": "2026-10-01T12:00:00+00:00",
+  "expected_head": "<the index revision id printed by the expand plan>",
+  "application_version_declared": "<the evolved contract digest printed by the expand plan>",
+  "database": {
+    "name": "parcels",
+    "user": "fa_owner",
+    "server_version": "PostgreSQL 16.10",
+    "bypasses_rls": true
+  },
+  "alembic": {
+    "current": [
+      "<the index revision id>"
+    ],
+    "matches_expected_head": true
+  },
+  "operations": {
+    "66636e4277641692": {
+      "table": "shipments",
+      "column": "carrier",
+      "state_declared": "expand",
+      "column_present": true,
+      "nullable": true,
+      "pending_rows": 0,
+      "progress": {
+        "state": "complete",
+        "rows_processed": 2500,
+        "batches": 13,
+        "passes": 1,
+        "last_key": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "checksum": "<definition checksum>",
+        "updated_at": "2026-10-01T11:59:00+00:00",
+        "finished_at": "2026-10-01T11:59:00+00:00"
+      },
+      "backfill_complete": true
+    },
+    "5821fb0e87d4b355": {
+      "table": "shipments",
+      "column": "tracking_token",
+      "state_declared": "expand",
+      "column_present": true,
+      "nullable": true,
+      "pending_rows": 0,
+      "progress": {
+        "state": "complete",
+        "rows_processed": 2500,
+        "batches": 13,
+        "passes": 1,
+        "last_key": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "checksum": "<definition checksum>",
+        "updated_at": "2026-10-01T11:59:00+00:00",
+        "finished_at": "2026-10-01T11:59:00+00:00"
+      },
+      "backfill_complete": true
+    }
+  },
+  "indexes": [
+    {
+      "name": "ix_shipments_carrier",
+      "table": "shipments",
+      "present": true,
+      "valid": true,
+      "definition": "CREATE INDEX ix_shipments_carrier ON public.shipments USING btree (carrier)"
+    }
+  ],
+  "problems": [],
+  "ok": true,
+  "x-note": "Illustrative shape of what `python -m parcels.ops.backfill verify` writes. It is stale by design: a contract plan that reads it is refused (contract_evidence_fresh), which is the intended behaviour for a file committed to a repository. Real evidence is produced against the target database right before the contract phase."
+}

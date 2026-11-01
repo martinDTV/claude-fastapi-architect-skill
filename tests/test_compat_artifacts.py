@@ -3,7 +3,9 @@
 The fixtures under ``tests/fixtures/compat`` are frozen outputs of v2.0.0 (see its README for the provenance): a
 project with a manifest 1.0 and the contract it was generated from, a project with a manifest 1.1, evolution
 contracts 1.0 and 1.1, an operation journal 1.0 interrupted during publication, an adoption baseline 1.0 and an audit
-report 1.7 with its fingerprints. Nothing here regenerates them.
+report 1.7 with its fingerprints; and, since v2.2 increment 0, the outputs of v2.1.0: a project with a manifest 1.3,
+the two phased evolution contracts 1.2, a migration evidence 1.0 and an evolution report 1.3. Nothing here
+regenerates them.
 """
 
 from __future__ import annotations
@@ -26,13 +28,15 @@ from fastapi_audit.report import compare_reports, fingerprint_of  # noqa: E402
 from fastapi_common.artefacts import DEFAULT_WALK_SKIP  # noqa: E402
 from fastapi_design import journal  # noqa: E402
 from fastapi_design.adoption import read_adoption  # noqa: E402
-from fastapi_design.evolution import EvolutionContract, validate_evolution  # noqa: E402
+from fastapi_design.evolution import EvolutionContract, EvolveOptions, load_evolution, plan_evolution, run_evolution, validate_evolution  # noqa: E402
 from fastapi_design.generator import read_manifest  # noqa: E402
+from fastapi_design.migrations import contract_preconditions, load_evidence  # noqa: E402
 
 COMPAT = FIXTURES / "compat"
 PROJECT_10 = COMPAT / "generation-1.0" / "inventory-service"
 SPEC_10 = COMPAT / "generation-1.0" / "inventory-service.spec.json"
 PROJECT_11 = COMPAT / "generation-1.1" / "inventory-service"
+PROJECT_13 = COMPAT / "generation-1.3" / "parcels"
 HANDMADE = FIXTURES / "adoption20" / "handmade_shop"
 
 SUPPLIERS = {"name": "suppliers", "description": "Suppliers of the products", "entities": [{"name": "Supplier", "fields": [{"name": "name", "type": "str", "max_length": 120}], "operations": ["create", "get", "list"]}]}
@@ -180,3 +184,67 @@ class AuditReportCompatibilityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V21ArtefactCompatibilityTests(TempCase):
+    """What v2.1.0 wrote is still read and still means the same: the manifest 1.3 project, the phased contracts 1.2,
+    the migration evidence 1.0 and the evolution report 1.3."""
+
+    def test_a_manifest_13_project_is_discovered_and_plans_its_phased_expand(self) -> None:
+        project = self.copy(PROJECT_13, "parcels")
+        manifest = read_manifest(str(project))
+        self.assertEqual((manifest["schema"], manifest["tool"]["version"], manifest["phased_changes"], [m["phase"] for m in manifest["migrations"]]), ("fastapi-architect/generation/1.3", "2.1.0", [], ["initial"]))
+        model = design.discover(str(project), audit=False)
+        self.assertEqual(set(model.ownership.values()), {"managed_unchanged"})
+        doc = json.loads((COMPAT / "evolution-1.2-expand.json").read_text(encoding="utf-8"))
+        doc["project"]["path"] = str(project)
+        contract_path = self.tmp / "expand.json"
+        contract_path.write_text(json.dumps(doc), encoding="utf-8")
+        plan = plan_evolution(load_evolution(str(contract_path)))
+        self.assertEqual(plan.state, "planned", plan.blockers)
+        self.assertEqual([p["phase"] for p in plan.migration["phases"]], ["expand", "index"])
+        self.assertEqual(sorted(b["column"] for b in plan.migration["backfills"]), ["carrier", "tracking_token"])
+        frozen = json.loads((COMPAT / "evolution-report-1.3.json").read_text(encoding="utf-8"))
+        self.assertEqual(frozen["schema"], "evolution_report/1.3")
+        self.assertEqual([p["revision"] for p in frozen["plan"]["migration"]["phases"]], [p["revision"] for p in plan.migration["phases"]], "the same contract on the same project still yields the same revisions")
+        self.assertEqual({b["operation"] for b in frozen["plan"]["migration"]["backfills"]}, {b["operation"] for b in plan.migration["backfills"]})
+        self.assertIn("contract_authorization", frozen)
+
+    def test_a_contract_12_contract_phase_is_still_refused_without_authorization_and_with_stale_evidence(self) -> None:
+        project = self.copy(PROJECT_13, "parcels")
+        doc = json.loads((COMPAT / "evolution-1.2-contract.json").read_text(encoding="utf-8"))
+        doc["project"]["path"] = str(project)
+        doc["authorization"]["contract"]["evidence"] = str(COMPAT / "migration-evidence-1.0.json")
+        contract_path = self.tmp / "contract.json"
+        contract_path.write_text(json.dumps(doc), encoding="utf-8")
+        unknown = plan_evolution(load_evolution(str(contract_path)))
+        self.assertEqual(unknown.state, "blocked")
+        self.assertTrue(any(b.startswith("contract_operation_known") for b in unknown.blockers), unknown.blockers)  # the baseline has no phased change yet
+        expand = json.loads((COMPAT / "evolution-1.2-expand.json").read_text(encoding="utf-8"))
+        expand["project"]["path"] = str(project)
+        expand_path = self.tmp / "expand.json"
+        expand_path.write_text(json.dumps(expand), encoding="utf-8")
+        applied = run_evolution(str(expand_path), EvolveOptions(apply=True, verify=False))
+        self.assertEqual(applied["applied"]["state"], "applied", applied["plan"]["blockers"])
+        self.assertEqual({c["op_id"] for c in read_manifest(str(project))["phased_changes"]}, {"66636e4277641692", "5821fb0e87d4b355"}, "the operation ids of v2.1.0 are reproduced")
+        blocked = plan_evolution(load_evolution(str(contract_path)))
+        self.assertEqual(blocked.state, "blocked")
+        self.assertTrue(any(b.startswith("contract_authorized") for b in blocked.blockers), blocked.blockers)
+        authorised = plan_evolution(load_evolution(str(contract_path)), authorize_contract=True)
+        self.assertEqual(authorised.state, "blocked")
+        self.assertTrue(any(b.startswith("contract_evidence_fresh") for b in authorised.blockers), authorised.blockers)
+
+    def test_a_migration_evidence_10_is_loaded_and_evaluated_as_before(self) -> None:
+        evidence, errors = load_evidence(str(COMPAT / "migration-evidence-1.0.json"))
+        self.assertEqual((errors, evidence["schema"]), ([], "fastapi-architect/migration-evidence/1.0"))
+        op_id, entry = next(iter(evidence["operations"].items()))
+        change = {"op_id": op_id, "table": entry["table"], "column": entry["column"], "state_declared": "expand", "application_version": evidence["application_version_declared"]}
+        checks = {name: ok for name, ok, _detail in contract_preconditions(change, evidence, head_before=evidence["expected_head"], authorized=True, declared_by="compat test", max_age_hours=24)}
+        self.assertFalse(checks["contract_evidence_fresh"], "the frozen sample is stale by design")
+        self.assertTrue(checks["contract_authorized"] and checks["contract_operation_pending"])
+
+    def test_the_12_contract_keys_are_still_rejected_under_11(self) -> None:
+        doc = json.loads((COMPAT / "evolution-1.2-expand.json").read_text(encoding="utf-8"))
+        doc["schema"] = "fastapi-architect/evolution/1.1"
+        _contract, errors = validate_evolution(doc, source=None)
+        self.assertTrue(any("backfill" in e for e in errors), errors)

@@ -1,0 +1,42 @@
+[project]
+name = "parcels"
+version = "0.1.0"
+description = "Parcel tracking for one depot: the smallest PostgreSQL backend that shows a schema evolving in phases (expand, backfill, verify, contract) without a maintenance window."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7,<3",
+  "pydantic-settings>=2.4,<3",
+  "sqlalchemy[asyncio]>=2.0.36,<2.1",
+  "asyncpg>=0.30,<0.31",
+  "alembic>=1.13,<2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.27,<1",
+  "anyio>=4.4",
+  "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/parcels"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
