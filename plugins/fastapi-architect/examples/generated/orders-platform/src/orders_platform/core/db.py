@@ -2,7 +2,8 @@
 
 Tables are created by Alembic migrations only (``alembic upgrade head``); nothing here calls ``create_all``.
 The naming convention gives every constraint and index a deterministic name, so the migration scripts and the
-models agree and the test suite can compare them.
+models agree and the test suite can compare them. Every connection announces APPLICATION_NAME (package and
+generation) to PostgreSQL, so the migration evidence can tell which builds are connected.
 """
 
 from collections.abc import AsyncIterator
@@ -13,6 +14,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
+APPLICATION_NAME = "orders_platform@4fc20c627c0f"  # this generation, as pg_stat_activity.application_name
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",
@@ -26,7 +28,8 @@ class Base(DeclarativeBase):
 
 
 def make_engine(url: str) -> AsyncEngine:
-    return create_async_engine(url, pool_pre_ping=True)
+    settings = {"server_settings": {"application_name": APPLICATION_NAME}}
+    return create_async_engine(url, pool_pre_ping=True, connect_args=settings)
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:

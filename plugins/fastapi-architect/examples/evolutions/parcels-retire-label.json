@@ -1,0 +1,35 @@
+{
+  "schema": "fastapi-architect/evolution/1.4",
+  "project": {
+    "path": "../generated/parcels"
+  },
+  "authorization": {
+    "contract": {
+      "declared_by": "release owner",
+      "evidence": "parcels-rename-evidence.sample.json",
+      "max_evidence_age_hours": 24
+    }
+  },
+  "modify_modules": [
+    {
+      "name": "shipments",
+      "entities": [
+        {
+          "name": "Shipment",
+          "retire_fields": [
+            {"name": "label", "operation": "550095ef4c391dd0"},
+            {"name": "weight", "operation": "a8d969447e81ec47"}
+          ]
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    "existing_routes_unchanged",
+    "historical_migrations_unchanged",
+    "declared_contracts_unchanged",
+    "no_destructive_schema_change",
+    "protected_files_unchanged"
+  ],
+  "x-note": "v2.2 increment 2, second evolution of a rename: retire. Applies to the parcels project after parcels-rename-label.json, its backfills and a fresh `verify` (the evidence file is the sample). The generated code (state C) knows `label` and `weight` only; the retire revision moves the truth to the new columns (NOT NULL carried over, the sync function stamped with retired_at) and keeps the old columns, equal by the trigger, for the transitional version. Nothing is dropped."
+}

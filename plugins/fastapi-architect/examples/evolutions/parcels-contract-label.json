@@ -1,0 +1,41 @@
+{
+  "schema": "fastapi-architect/evolution/1.4",
+  "project": {
+    "path": "../generated/parcels"
+  },
+  "authorization": {
+    "contract": {
+      "declared_by": "release owner",
+      "evidence": "parcels-retire-evidence.sample.json",
+      "max_evidence_age_hours": 24
+    },
+    "destructive": {
+      "approved_by": "release owner, after the review of the retire evidence",
+      "old_versions_stopped": true,
+      "min_retire_age_hours": 24,
+      "ignore_sessions": [],
+      "reviewed_functions": []
+    }
+  },
+  "modify_modules": [
+    {
+      "name": "shipments",
+      "entities": [
+        {
+          "name": "Shipment",
+          "contract_fields": [
+            {"name": "label", "operation": "550095ef4c391dd0"},
+            {"name": "weight", "operation": "a8d969447e81ec47"}
+          ]
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    "existing_routes_unchanged",
+    "historical_migrations_unchanged",
+    "declared_contracts_unchanged",
+    "protected_files_unchanged"
+  ],
+  "x-note": "v2.2 increment 2, third evolution of a rename: the destructive contract. Applies after parcels-retire-label.json was deployed and verified again with the retired generation. It drops `reference` and `weight_kg` with their sync triggers and functions, RESTRICT, in one transaction, only when the sixteen preconditions hold; it needs `--authorize-contract` and `--confirm-irreversible \"drop shipments.reference, shipments.weight_kg\"` on the command line. `no_destructive_schema_change` is left out on purpose. The downgrade recreates the columns from the new ones' current values (offline); the dropped content is not recoverable from the database."
+}

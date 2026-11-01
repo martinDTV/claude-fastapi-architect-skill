@@ -1,4 +1,5 @@
 {
+  "application_tag": "parcels@4c21c35dafd1",
   "concurrent_indexes": [],
   "files": {
     ".audit-fastapi.json": "f3a5097700daa9d54f890ff1964403a84672a5855e9225f59275a26c92aea32f",
@@ -16,7 +17,7 @@
     "src/parcels/api/shipments.py": "9923a270a2645b0ae7e0c5bfdf4bedd24c43cc06d8b4ee06d09983ea81bde968",
     "src/parcels/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/parcels/core/config.py": "4b3b0cf9e6fa7ec341339044fc5e0d7b089199a0543b331eb753a20bfbb759f1",
-    "src/parcels/core/db.py": "f337509e4880130355222fe1a833c5aa283e665f9605b7889ae8bff40c929e0f",
+    "src/parcels/core/db.py": "247b48715c818ada51da16f1b7c6efbb83b801bcc59c747692410d5156459cd4",
     "src/parcels/core/errors.py": "11d6475cfaeca833702657f0708788e6d8044255b1879b6dc4c6078901a81993",
     "src/parcels/core/security.py": "801ddcd659ea6de3a3574b945724ad29bd0a3fb09303d8a6727ec2a1483b5938",
     "src/parcels/dependencies/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -60,7 +61,7 @@
   ],
   "package": "parcels",
   "phased_changes": [],
-  "schema": "fastapi-architect/generation/1.4",
+  "schema": "fastapi-architect/generation/1.5",
   "security": {
     "authentication": "api_key",
     "authorization_declared": null,

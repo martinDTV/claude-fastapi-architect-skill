@@ -1,0 +1,138 @@
+{
+  "schema": "fastapi-architect/migration-evidence/1.2",
+  "generated_at": "2026-10-03T12:00:00+00:00",
+  "expected_head": "<the retire revision id printed by the retire plan>",
+  "application_version_declared": "<the evolved contract digest printed by the retire plan (version C)>",
+  "database": {
+    "name": "parcels",
+    "user": "fa_owner",
+    "server_version": "PostgreSQL 16.10",
+    "bypasses_rls": true
+  },
+  "alembic": {
+    "current": [
+      "<the retire revision id printed by the retire plan>"
+    ],
+    "matches_expected_head": true
+  },
+  "operations": {
+    "550095ef4c391dd0": {
+      "table": "shipments",
+      "column": "label",
+      "kind": "rename",
+      "source_column": "reference",
+      "state_declared": "retire",
+      "column_present": true,
+      "nullable": false,
+      "source_present": true,
+      "columns": {
+        "reference": {
+          "present": true,
+          "nullable": false,
+          "type": "character varying",
+          "default": null
+        },
+        "label": {
+          "present": true,
+          "nullable": false,
+          "type": "character varying",
+          "default": null
+        }
+      },
+      "pending_rows": 0,
+      "mismatch_rows": 0,
+      "columns_agree": true,
+      "source_of_truth": "to_column",
+      "progress": {
+        "state": "complete",
+        "rows_processed": 1500,
+        "batches": 8,
+        "passes": 1,
+        "last_key": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "checksum": "<definition checksum>",
+        "updated_at": "2026-10-01T11:59:00+00:00",
+        "finished_at": "2026-10-01T11:59:00+00:00"
+      },
+      "backfill_complete": true,
+      "sync": {
+        "mechanism": "trigger",
+        "trigger": "trg_shipments_550095ef4c391dd0_sync",
+        "function": "fn_shipments_550095ef4c391dd0_sync",
+        "present": true,
+        "enabled": true,
+        "truth": "label",
+        "retired_at": "2026-10-02T09:30:00+00:00"
+      },
+      "dependents": [],
+      "unmanaged_dependents": [],
+      "other_triggers": [],
+      "functions_mentioning": []
+    },
+    "a8d969447e81ec47": {
+      "table": "shipments",
+      "column": "weight",
+      "kind": "rename",
+      "source_column": "weight_kg",
+      "state_declared": "retire",
+      "column_present": true,
+      "nullable": true,
+      "source_present": true,
+      "columns": {
+        "weight_kg": {
+          "present": true,
+          "nullable": true,
+          "type": "numeric",
+          "default": null
+        },
+        "weight": {
+          "present": true,
+          "nullable": true,
+          "type": "numeric",
+          "default": null
+        }
+      },
+      "pending_rows": 0,
+      "mismatch_rows": 0,
+      "columns_agree": true,
+      "source_of_truth": "to_column",
+      "progress": {
+        "state": "complete",
+        "rows_processed": 1500,
+        "batches": 8,
+        "passes": 1,
+        "last_key": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "checksum": "<definition checksum>",
+        "updated_at": "2026-10-01T11:59:00+00:00",
+        "finished_at": "2026-10-01T11:59:00+00:00"
+      },
+      "backfill_complete": true,
+      "sync": {
+        "mechanism": "trigger",
+        "trigger": "trg_shipments_a8d969447e81ec47_sync",
+        "function": "fn_shipments_a8d969447e81ec47_sync",
+        "present": true,
+        "enabled": true,
+        "truth": "weight",
+        "retired_at": "2026-10-02T09:30:00+00:00"
+      },
+      "dependents": [],
+      "unmanaged_dependents": [],
+      "other_triggers": [],
+      "functions_mentioning": []
+    }
+  },
+  "indexes": [],
+  "sessions": [
+    {
+      "application_name": "parcels@<tag of C, see the manifest's application_tag>",
+      "user": "parcels_app",
+      "count": 4,
+      "oldest_backend_start": "2026-10-02T10:00:00+00:00",
+      "identified": true
+    }
+  ],
+  "tool_session": "parcels.ops.backfill",
+  "problems": [],
+  "ok": true,
+  "x-note": "A sample of what the retired generation's runner writes after parcels-retire-label.json, `alembic upgrade head` (the retire revision stamps retired_at) and the old versions were stopped: the destructive contract (parcels-contract-label.json) reads it. Every session carries the tag of C; the catalog lists no dependent of the old columns beyond their own NOT NULL and default."
+}

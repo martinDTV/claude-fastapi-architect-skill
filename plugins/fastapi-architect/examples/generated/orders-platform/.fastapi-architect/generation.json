@@ -1,4 +1,5 @@
 {
+  "application_tag": "orders_platform@4fc20c627c0f",
   "concurrent_indexes": [],
   "files": {
     ".audit-fastapi.json": "332951001a6e6eaac17b432b1d5bf91ec93e7be220ab42cce6e5d1ade8d2d15d",
@@ -15,7 +16,7 @@
     "src/orders_platform/api/router.py": "dd350a867bfb44b071dc971a8d53be8299081867efe3db7cf1dfe5bcec987988",
     "src/orders_platform/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "src/orders_platform/core/config.py": "b5d27997285958eb390ada895a5ebdba90663ddeefac6978bb75f6fbaa69c1fe",
-    "src/orders_platform/core/db.py": "f337509e4880130355222fe1a833c5aa283e665f9605b7889ae8bff40c929e0f",
+    "src/orders_platform/core/db.py": "10a136d02f471461866c3930e23369722588c6d6f345e44f11e7f360d45909ff",
     "src/orders_platform/core/errors.py": "11d6475cfaeca833702657f0708788e6d8044255b1879b6dc4c6078901a81993",
     "src/orders_platform/core/security.py": "3503b6e3c02063f4ae35db2e9a1a3fc3e09a1008a66a9887f5d25c5af36037d9",
     "src/orders_platform/main.py": "be9804931653590eabe9d84171260eef86c99549c40e7678606442c2582eb278",
@@ -83,7 +84,7 @@
   ],
   "package": "orders_platform",
   "phased_changes": [],
-  "schema": "fastapi-architect/generation/1.4",
+  "schema": "fastapi-architect/generation/1.5",
   "security": {
     "authentication": "api_key",
     "authorization_declared": "resource",

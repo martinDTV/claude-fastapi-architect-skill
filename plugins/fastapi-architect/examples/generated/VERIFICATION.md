@@ -520,5 +520,74 @@ completes as the owner; a rename of the tenant column is refused.
 ## What this does not show
 
 A real distributed deployment (load balancers, rolling restarts, clock skew): the two versions are two processes on one
-machine sharing one database. Tables beyond 1 500 rows. Retire and contract of a rename: not available in this
-increment, so the old columns, the triggers and both names stay.
+machine sharing one database. Tables beyond 1 500 rows. Retire and contract of a rename are the next section.
+
+# v2.2 increment 2: retire and the destructive contract on a real PostgreSQL
+
+`FA_DESIGN_PG=1 python3 -m unittest discover -s tests -p test_retire_contract_v22_postgresql.py` on a throwaway
+PostgreSQL 16.10 cluster, macOS, CPython 3.13.5, uv: **3 tests OK in 94.5 s, 134 MB** (the measured
+timings are in `retire-timings.json` of the evidence directory when `FA_DESIGN_PG_EVIDENCE` is set). Three
+generations as separate processes from their own virtual environments on one database: **A** (in `test_01` the parcels
+project exactly as v2.1.0 published it, `tests/fixtures/compat/generation-1.3/parcels`, which announces no
+`application_name`; in `test_02` the regenerated snapshot, which announces the baseline tag), **B** (the rename
+evolution) and **C** (the retire evolution). Every number below was measured in that run.
+
+## B and C on the retire schema (`test_01`)
+
+| Step | Result |
+|---|---|
+| A's baseline, 1 500 live rows; B's rename evolution applied, expand revision, both backfills complete | as in increment 1 |
+| B's evidence (`verify --application-version <B digest>`), then C's retire evolution verified in a copy (its own suite on a separate database through the trust model: 20 selected, 16 passed, 4 skipped, 0 failed, among them the sync-trigger mirror and contradiction tests and the schema-drift test that tolerates the retired columns; audit: no new blocking finding) and applied | 12.1 s |
+| Retire revision on the shared database | `label` NOT NULL, `weight` still nullable, `reference` and `weight_kg` kept, both function comments `truth=label` / `truth=weight` with `retired_at`; 2.6 s |
+| C creates with `label` and `weight` only | 201, no `reference` in the response; the database shows `reference` and `weight_kg` filled by the trigger; B reads it under both names, A under the old one |
+| B creates with the former name; C reads it | 201; C sees `label` only |
+| A creates with `reference` on the retire schema | 201; mirrored; C reads it (tolerated: nothing is lost, A is outside the retire contract) |
+| Partial updates: C changes `weight`, B sets `weight_kg` to NULL, B renames through `reference` | the pair stays equal; NULL propagates; C reads B's value |
+| B receives both names in one request (different values; equal values) | 422 both times: one name per request; one name alone is 201 |
+| One statement sets `reference` and `label` to different values (UPDATE; INSERT) | refused by the trigger (SQLSTATE 23514, "set to different values in one statement"); the row is untouched; nothing inserted |
+| NULL through the old name after the retire | refused: the new column carries the NOT NULL |
+| 30 interleaved updates of one row from B (`reference`) and C (`label`) | all 200; the pair equal; the value one of the sent ones; 0.06 s; 0 rows differ in either pair afterwards |
+| Evidence written by C's runner (schema 1.2) | `ok`; both operations `state_declared: retire`, `sync.truth` the new column, `retired_at` set, `columns_agree`, no unmanaged dependent; the sessions list B's tag, C's tag and the empty name of A |
+| Retire revision downgraded, then upgraded again | `label` nullable again and `truth=reference`, 0 rows differ; then NOT NULL again |
+
+## The destructive contract (`test_02`)
+
+600 rows; A, B and C connected. The plan is refused while A and B are connected (`contract_deployments_identified`:
+A's baseline tag and B's tag are not `compatible_tags`), with or without the flags; B stopped, A still blocks; A
+stopped, fresh evidence lists C's tag only and the plan is `planned` with `--authorize-contract` and
+`--confirm-irreversible`, blocked without the phrase, and the command line prints the phrase it needs. The
+destructive evolution is verified in a copy (D's own suite on a fresh database runs the chain through the drop: 20 selected,
+14 passed, 6 skipped, 0 failed; audit: no new blocking finding) and applied: 18.6 s (the suite of the unit tests was running at the same time). Then, on the live database, each of these makes `alembic upgrade head` fail with the schema intact
+(`alembic_version` unchanged, both old columns present, both triggers enabled): a manual view on `reference`
+("dependents the tool does not manage"), a manual index on `reference`, an unknown trigger whose function names
+`reference`, the sync trigger disabled, a row where the columns differ (fixed by a backfill run), another session
+holding every row under `FOR UPDATE` (`lock timeout`, 5.7 s: the revision fails rather than queue). C inserts five
+rows after the evidence; the drop then succeeds in 0.56 s: old columns, triggers and functions gone, the late rows
+present. C keeps working (create, list); B restarted answers 500 (it still maps the dropped column: incompatible,
+as documented). The evidence of the contracted state reports `source_present: false` and no trigger. The downgrade
+(0.54 s) recreates `reference` and `weight_kg` from the new columns' current values (0 rows differ), NOT NULL on
+`reference`, both triggers enabled with `truth=label`; B restored reads a row C created after the drop under both
+names; the upgrade drops again; a second contract of the same operation is `contract_operation_pending`.
+
+## Wrong order (`test_03`)
+
+On a live B project: a contract before the retire is `contract_rename_retire_first`; a retire without evidence is
+`contract_evidence_valid`; a retire with evidence from a database whose backfill never ran is `retire_columns_agree`
+and `retire_backfill_complete`; the live database was never touched.
+
+## Defects the scenarios found before passing
+
+- The generated runner and the drop revision used PostgreSQL's word boundaries (`\m`, `\M`) in a Python regular
+  expression as well: `verify` crashed on every rename. Python's `\b` for trigger sources, PostgreSQL's for `~*`.
+- The generated contradiction test set the old column to the value it already had, so only one column changed and the
+  trigger mirrored instead of refusing; it now uses three distinct literals per type (decimal had two equal ones).
+- The first boundary rule ("both names with different values") let equal values through, where `extra="forbid"` had
+  already refused the second key: the rule is now one name per request, equal or not, with the reason in the 422.
+- `order` is a reserved word: a database of that name cannot be created.
+
+## What this does not show
+
+A distributed deployment: three processes on one machine sharing one database; the sessions check is a snapshot of
+`pg_stat_activity` and cannot see instances that connect intermittently. A connection failure in the middle of the
+drop transaction (PostgreSQL rolls it back; not injected here). Tables beyond 1 500 rows; a full-table downgrade copy
+on a large table is offline by design and was not timed at scale.

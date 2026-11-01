@@ -23,7 +23,11 @@ fifth example through a phased migration (v2.1: `parcels-expand-carrier.json`, `
 committed `parcels-migration-evidence.sample.json` is deliberately stale, so the contract is refused from the repository
 alone) and through a rename in transition (v2.2: `parcels-rename-label.json` renames `reference` to `label` and
 `weight_kg` to `weight` as `expand_contract`: new columns next to the old ones, a sync trigger per rename, the old
-columns the source of truth; retire and contract come in later increments); see [`VERIFICATION.md`](VERIFICATION.md). What the
+columns the source of truth), then through its retire (`parcels-retire-label.json`: the code knows the new names only, the
+truth moves to the new columns, nothing dropped) and its destructive contract (`parcels-contract-label.json`: the old
+columns, triggers and functions dropped with `RESTRICT` after sixteen preconditions, `--authorize-contract` and
+`--confirm-irreversible`; the committed evidence samples are deliberately stale, so neither is applied from the
+repository alone); see [`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in
 `references/design-contracts.md`.
