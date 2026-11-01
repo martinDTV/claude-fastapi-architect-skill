@@ -86,7 +86,7 @@ class Inc4Case(unittest.TestCase):
 
 
 PRODUCT_FIELDS = [{"name": "catalog", "entities": [{"name": "Product", "add_fields": [{"name": "barcode", "type": "str", "max_length": 64, "required": False}, {"name": "active", "type": "bool", "required": True, "default": True}]}]}]
-SHOP_CHANGES = [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/stats", "name": "items_stats", "summary": "Number of items", "response": {"module": "items", "schema_version": 2}}], "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": False}]}]
+SHOP_CHANGES = [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/reports/stats", "name": "items_stats", "summary": "Number of items", "response": {"module": "items", "schema_version": 2}}], "add_fields": [{"class": "ItemIn", "name": "sku", "type": "str", "required": False}]}]
 
 
 # --------------------------------------------------------------------------- #
@@ -358,14 +358,14 @@ class AdoptionTests(Inc4Case):
     def test_evolution_refuses_unadopted_modules_manual_changes_and_duplicates(self) -> None:
         shop = self.copy(HANDMADE, "shop")
         self.adopt_items(shop)
-        plan = self.plan(self.modify_contract(shop, [{"name": "users", "add_endpoints": [{"method": "GET", "path": "/stats", "name": "users_stats", "response": {}}]}]))
+        plan = self.plan(self.modify_contract(shop, [{"name": "users", "add_endpoints": [{"method": "GET", "path": "/reports/stats", "name": "users_stats", "response": {}}]}]))
         self.assertEqual(plan.state, "blocked")
         self.assertTrue(any("module_is_adopted" in b for b in plan.blockers))
         self.assertEqual(sha(shop / "app" / "routers" / "users.py"), sha(HANDMADE / "app" / "routers" / "users.py"))
         plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/{item_id}", "name": "get_item_again", "response": {}}]}], name="dup-route.json"))
         self.assertEqual(plan.state, "blocked")
         self.assertTrue(any("duplicate endpoint" in b for b in plan.blockers), plan.blockers)
-        plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/count", "name": "list_items", "response": {}}]}], name="dup-symbol.json"))
+        plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/reports/count", "name": "list_items", "response": {}}]}], name="dup-symbol.json"))
         self.assertTrue(any("duplicate symbol" in b for b in plan.blockers), plan.blockers)
         plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_fields": [{"class": "UserIn", "name": "x", "type": "str"}]}], name="class.json"))
         self.assertEqual(plan.state, "planned", plan.blockers)  # UserIn lives in the adopted app/schemas.py: allowed
@@ -401,7 +401,7 @@ class AdoptionTests(Inc4Case):
         self.assertEqual(sorted(plan["files"]["modify"]), [adoption.ADOPTION, "app/routers/items.py", "app/schemas.py"])
         self.assertEqual([t["inserted"] for t in plan["transforms"]], [["items_stats"], ["ItemIn.sku"]])
         self.assertTrue(all(t["evidence"]["steps"][0].get("existing_nodes_unchanged") for t in plan["transforms"]))
-        self.assertEqual(report["verification"]["routes"]["added"], ["GET /stats (items_stats)"])
+        self.assertEqual(report["verification"]["routes"]["added"], ["GET /reports/stats (items_stats)"])
         self.assertEqual(report["verification"]["routes"]["missing"], [])
         self.assertEqual(report["verification"]["protected_files"]["unexpectedly_changed"], [])
         self.assertEqual(tree(shop), before)
@@ -421,7 +421,7 @@ class AdoptionTests(Inc4Case):
         items = (shop / "app" / "routers" / "items.py").read_text()
         self.assertTrue(items.startswith((HANDMADE / "app" / "routers" / "items.py").read_text().rstrip("\n")))
         self.assertIn("# explicit 404", items)
-        self.assertIn('@router.get("/stats", summary="Number of items")', items)
+        self.assertIn('@router.get("/reports/stats", summary="Number of items")', items)
         self.assertIn("    sku: str | None = None", (shop / "app" / "schemas.py").read_text())
         model = discover(shop, audit=False)
         self.assertEqual(model.ownership_of("app/routers/items.py"), "adopted_unchanged")  # the baseline followed the change
@@ -431,7 +431,7 @@ class AdoptionTests(Inc4Case):
         self.assertEqual(again["state"], "blocked")  # the same endpoint again is a duplicate, not a silent no-op
         self.assertTrue(any("duplicate" in b for b in again["plan"]["blockers"]))
         # a concurrent manual edit after the plan is computed blocks the write
-        plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/count", "name": "items_count", "response": {"count": 0}}]}], name="count.json"))
+        plan = self.plan(self.modify_contract(shop, [{"name": "items", "add_endpoints": [{"method": "GET", "path": "/reports/count", "name": "items_count", "response": {"count": 0}}]}], name="count.json"))
         self.assertEqual(plan.state, "planned", plan.blockers)
         (shop / "app" / "routers" / "items.py").write_text(items + "\n# concurrent\n")
         with self.assertRaises(journal.WriteError):

@@ -148,7 +148,7 @@ class PlanningTests(ProjectCase):
         project = self.copy(PARCELS)
         report = run_evolution(str(self.write("rename.json", rename_doc(project))), EvolveOptions(apply=True, verify=False))
         self.assertEqual(report["applied"]["state"], "applied", report["plan"]["blockers"])
-        self.assertEqual(report["schema"], "evolution_report/1.6")
+        self.assertEqual(report["schema"], "evolution_report/1.7")
         manifest = read_manifest(str(project))
         self.assertEqual(manifest["schema"], "fastapi-architect/generation/1.6")
         entry = manifest["phased_changes"][0]

@@ -291,7 +291,7 @@ class RetireAndContractTests(unittest.TestCase):
         self.assertEqual(phases["retire"]["reversible"], True)
         self.assertIn("B and C may run together", phases["retire"]["coexistence"])
         self.assertEqual(len(plan["migration"]["retires"]), 2)
-        self.assertEqual(s.retire_report["schema"], "evolution_report/1.6")
+        self.assertEqual(s.retire_report["schema"], "evolution_report/1.7")
         self.assertTrue(any(c["classification"] == "potentially_incompatible" and c["kind"] == "retire_rename" for c in plan["changes"]))
         runner_defs = s.read(s.c_project, "src/parcels/ops/backfills.py")
         self.assertIn("'state_declared': 'retire'", runner_defs)
