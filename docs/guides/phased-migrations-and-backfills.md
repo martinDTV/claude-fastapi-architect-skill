@@ -143,8 +143,9 @@ phase.
 ## Renames in transition (v2.2, increment 1)
 
 A field rename is the same discipline with a second column and three application versions in play: **A** knows only
-the old name, **B** knows both, **C** will know only the new one. v2.2 increment 1 delivers the expand evolution and
-the transition between A and B; retire (C) and the contract that drops the old column are later increments.
+the old name, **B** knows both, **C** knows only the new one. Increment 1 delivers the expand evolution and the
+transition between A and B; increment 2 (next section) the retire evolution (C) and the destructive contract that
+drops the old column.
 
 ```json
 {"rename_fields": [{"from": "reference", "to": "label", "strategy": "expand_contract"}]}
@@ -155,13 +156,16 @@ What `evolve_fastapi.py apply` produces from the fifth example (`parcels-rename-
 
 - an expand revision that adds `label` and `weight` nullable next to the old columns and creates one **sync trigger**
   per rename: `BEFORE INSERT OR UPDATE FOR EACH ROW`; whichever column a writer touched, the other follows inside the
-  same statement and transaction; when one statement sets both to different values the old column wins. The trigger
-  only assigns to `NEW` (it cannot recurse), runs as the writer and leaves row-level security to the policies. The
-  downgrade drops trigger, function and new columns without losing data: the old columns hold everything;
+  same statement and transaction; one statement that sets both to different values is refused (SQLSTATE 23514; the
+  writer's transaction rolls back), the only exception being an INSERT where a column default made both non-NULL,
+  where the declared source of truth wins. The trigger only assigns to `NEW` (it cannot recurse), runs as the writer
+  and leaves row-level security to the policies; its comment records `op=<id> truth=<column>`. The downgrade drops
+  trigger, function and new columns without losing data: the old columns hold everything;
 - the transitional code (B): the model maps both columns (`label` nullable, `reference` as before and marked as the
-  source of truth), the request schemas accept both names (`AliasChoices`), the read schema fills `label` from
+  source of truth), the request schemas accept either name (`AliasChoices`) and refuse a request that sends both (422,
+  equal or not: the boundary never resolves an ambiguity by precedence), the read schema fills `label` from
   `reference` and still exposes `reference` as deprecated, the service writes both on create and update, and the
-  module tests cover both names;
+  module tests cover both names and the refusal;
 - a phased operation of strategy `mirror_column` per rename (`python -m parcels.ops.backfill run <op>`): the v2.1
   runner with the predicate `label IS DISTINCT FROM reference`, so it reconciles the rows written **before** the
   trigger existed (and any drift injected behind a disabled trigger) and nothing else; its evidence adds
@@ -169,8 +173,8 @@ What `evolve_fastapi.py apply` produces from the fifth example (`parcels-rename-
 
 Policies, stated once: the **source of truth** is the old column until the rename is retired; **B reads** the old
 column; **B writes** both; **A writes** the old one; the trigger mirrors either write; **A and B coexist** on the
-expanded schema; **C is not available yet**. `complete` keeps its meaning (zero rows where the columns differ at the
-time of the count) and a later run reopens the operation only for rows that differ.
+expanded schema; **C arrives with the retire evolution**. `complete` keeps its meaning (zero rows where the columns
+differ at the time of the count) and a later run reopens the operation only for rows that differ.
 
 Operations, in order: `apply` the rename evolution, `alembic upgrade head` on every database, keep A running if you
 need to, run the backfill of each rename as the owner, `verify`. Deploy B whenever you like: before the backfill it
@@ -178,9 +182,9 @@ reads the old column and is correct; after it, the new column is equal to the ol
 the table.
 
 Refused: `in_place`, a sync other than the trigger, renames of `id`, `owner_id`, `created_at`, the tenant column and
-foreign keys, a target that exists, a column already in transition, renames on in-memory projects, and the retire or
-contract of a rename. Hand-written SQL that names the old column keeps working; hand-written SQL that expects the new
-column to be filled must wait for the backfill.
+foreign keys, a target that exists, a column already in transition, a column covered by a concurrent index, renames on
+in-memory projects, and the contract of a rename that was not retired first. Hand-written SQL that names the old column
+keeps working; hand-written SQL that expects the new column to be filled must wait for the backfill.
 
 Verified on this project's machine with `FA_DESIGN_PG=1 tests/test_renames_v22_postgresql.py`: the committed
 `parcels` snapshot (A) and the evolved project (B) run as two processes from their own environments against one
@@ -192,6 +196,87 @@ a hand-made column of the new name makes the expand revision fail with the datab
 row-level-security table mirrors the application role's writes. The numbers are in
 `docs/releases/RELEASE-NOTES-v2.2.md`. Not demonstrated: a real distributed deployment; the two drivers are two
 processes on one machine sharing one database.
+
+## Retire and the destructive contract (v2.2, increment 2)
+
+Two more evolutions finish the rename. Both read the **migration evidence** (`verify`), both are planned by
+`evolve_fastapi.py` like any other evolution, and only the last one drops anything.
+
+### Retire: the truth moves to the new column
+
+```json
+{"schema": "fastapi-architect/evolution/1.4",
+ "authorization": {"contract": {"declared_by": "release owner", "evidence": "evidence-b.json"}},
+ "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+    "retire_fields": [{"name": "label", "operation": "550095ef4c391dd0"}, {"name": "weight", "operation": "a8d969447e81ec47"}]}]}]}
+```
+
+Preconditions, from B's evidence: the trigger present and enabled, its truth marker on the old column, zero rows where
+the columns differ, backfill complete, the transitional version declared (`verify --application-version <B digest>`),
+evidence fresh and at the manifest head, `declared_by` present. No command-line flag: the step is reversible and online.
+
+What it produces: the code of **C** (the fresh code of the contract under the new name: `label` and `weight` only, no
+alias, no dual write, no deprecated field) and a `retire` revision that, statement by statement, re-checks the trigger
+and the equality on the live database, replaces the sync function under the same trigger, carries the old column's NOT
+NULL to the new one online (`NOT VALID`, `VALIDATE`, `SET NOT NULL`) and its default, and stamps the function comment
+`truth=label retired_at=<now>`. Nothing is dropped: `reference` and `weight_kg` stay, equal to the new columns by the
+trigger, for B. The manifest records `state_declared: retire`, the policies on `to_column` and `compatible_tags`.
+
+Policies, stated once more: the **source of truth** is the new column from the retire revision on; **C reads** the new
+column and **writes** it (the trigger fills the old one); **B reads** the old one (equal) and **writes** both; **A's
+writes** to the old column are still mirrored (nothing is lost) but A is outside this phase's contract and must be gone
+before the contract; **B and C coexist** on the retire schema. Downgrade of the retire revision: `DROP NOT NULL`,
+`DROP DEFAULT`, the comment back to the old column; no data moves.
+
+Operations: `apply` the retire evolution, `alembic upgrade head`, deploy C, retire A and B, `verify` with C's runner
+(`verify --application-version <C digest>`): the evidence now lists the **sessions** of the database by
+`application_name` (every generated application announces `<package>@<12 hex>`, a hash of its phased states; A, generated
+before v2.2, announces nothing), the **truth marker** and `retired_at`, the **dependents** of the old column in the
+catalog and every trigger or user function that names it.
+
+### The destructive contract: the old column goes
+
+```json
+{"schema": "fastapi-architect/evolution/1.4",
+ "authorization": {"contract": {"declared_by": "release owner", "evidence": "evidence-c.json"},
+                   "destructive": {"approved_by": "release owner", "old_versions_stopped": true, "min_retire_age_hours": 24}},
+ "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+    "contract_fields": [{"name": "label", "operation": "550095ef4c391dd0"}, {"name": "weight", "operation": "a8d969447e81ec47"}]}]}],
+ "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "protected_files_unchanged"]}
+```
+
+```
+evolve_fastapi.py plan contract.json --authorize-contract --confirm-irreversible "drop shipments.reference, shipments.weight_kg"
+```
+
+The plan prints the phrase it expects when it is missing or wrong; the confirmation is distinct from
+`--authorize-contract` and never implied by it. `no_destructive_schema_change` is left out of the invariants on
+purpose; with it the plan blocks. The sixteen preconditions are listed in `references/evolution-contracts.md`, section
+11; the ones operators meet most often: a session of A (unidentified) or of B (its tag) still connected
+(`contract_deployments_identified`: stop them, or name an external client in `ignore_sessions`); the retire too recent
+(`contract_retire_age`, configurable, never sufficient on its own); a view, an index, a policy or a foreign key on the old
+column (`contract_dependencies_reviewed`: catalog dependents must go by hand; a user function that names the column can
+be accepted by name in `reviewed_functions` after review); the evidence older than the retire or written by B's runner
+(`contract_evidence_after_retire`, `contract_retire_applied`).
+
+What it produces: a `drop` revision in **one transaction**: `lock_timeout = 5s`, `LOCK TABLE … ACCESS EXCLUSIVE`, every
+database-side condition re-checked on the live catalog, `DROP TRIGGER`, `DROP FUNCTION`, `ALTER TABLE … DROP COLUMN …
+RESTRICT`. Never `CASCADE`: a dependent the checks missed fails the statement and the whole revision rolls back,
+`alembic_version` included. The approver and the phrase are written in the revision's docstring and in the manifest
+(`destructive {approved_by, declared_by, confirmation, evidence_generated_at}`).
+
+Reversibility, kept apart. **DDL**: conditional; the downgrade recreates the column, copies the new column's *current*
+values back, restores NOT NULL and default and recreates the sync trigger (truth on the new column), offline: a
+full-table `UPDATE` in one transaction. **Data**: the content the old column had at the drop is not recoverable from the
+database (after the checks it equalled the new column, which stays); take a backup before the upgrade if it matters.
+**Compatibility**: B works again after the downgrade; there is no online rollback: stop, downgrade, redeploy. C keeps
+working across the drop because it never named the old column.
+
+Verified on this project's machine with `FA_DESIGN_PG=1 tests/test_retire_contract_v22_postgresql.py` (A, B and C as
+three processes from their own environments on one database): the numbers and the scenario list are in
+`plugins/fastapi-architect/examples/generated/VERIFICATION.md` (section "v2.2 increment 2") and in
+`docs/releases/RELEASE-NOTES-v2.2.md`. Not demonstrated: a distributed deployment; the sessions check is a snapshot and
+cannot see instances that connect intermittently.
 
 ## What is deliberately not in v2.1
 

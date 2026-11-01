@@ -1,8 +1,8 @@
 # ADR 2.2-01 — Safe column renames: expand, transition, retire, contract
 
-Status: accepted (2026-10-31, decisions of the v2.2.0 review) and implemented for its first two states in increment 1
-(expand and transition). Retire and contract are later increments; nothing in v2.2 increment 1 removes a name or
-drops a column.
+Status: accepted (2026-10-31, decisions of the v2.2.0 review); expand and transition implemented in increment 1,
+retire and the destructive contract in increment 2 (2026-11-01). The only destructive operation of the tool is the
+contract of a retired rename, and it is disabled unless everything in the second half of this record holds.
 
 ## Context
 
@@ -19,7 +19,7 @@ That last point decides the synchronisation mechanism. Three logical versions sh
 |---|---|---|---|
 | A (old) | the old column only | the old column | the old column |
 | B (transitional) | both | both, in the same statement | the old column (the source of truth), exposing both names |
-| C (new) | the new name | both until contract (retire keeps the mirror) | the new column |
+| C (new) | the new name | the new column; the trigger fills the old one until contract | the new column |
 
 A's writes reach only the old column. If nothing mirrors them, B's new column is stale for every row A touches, the
 backfill has to be re-run forever and the equivalence of the two columns is never a stable property. The discovery
@@ -39,29 +39,75 @@ that recommendation covered B and C, which the generator writes. It cannot cover
 3. **A scoped sync trigger keeps the pair equal for every write, whoever makes it.** The expand revision creates a
    `BEFORE INSERT OR UPDATE … FOR EACH ROW` trigger per rename with these rules: on insert, if the old column is not
    NULL the new one takes its value, else if the new one is not NULL the old one takes it; on update, if the old
-   column changed the new one follows, else if the new one changed the old one follows. The old column wins when one
-   statement sets both to different values. The function only assigns to `NEW`: it never issues another statement, so
-   it cannot recurse; it runs inside the writer's statement and transaction, so a rollback covers both columns; it is
-   `SECURITY INVOKER`, so it carries no privilege; row-level security policies still check the final row. It is named
-   after the operation (`trg_<table>_<op>_sync`, `fn_<table>_<op>_sync`), recorded in the manifest and the runner's
-   definitions, reported by the evidence (present, enabled) and exercised by the generated tests. The expand
-   revision's downgrade drops the trigger, the function and the new column: no data is lost because the old column
-   holds it all.
+   column changed the new one follows, else if the new one changed the old one follows. **A statement that sets both
+   names to different values is refused** (`RAISE EXCEPTION`, SQLSTATE 23514, the writer's transaction rolls back):
+   the trigger cannot read the writer's intent from `OLD`/`NEW` in that case, so it does not guess (increment 2
+   replaced the "old column wins" rule of increment 1 before anything shipped). The one exception is an INSERT where
+   a column default made both non-NULL, where the declared source of truth wins. The function only assigns to `NEW`:
+   it never issues another statement, so it cannot recurse; it runs inside the writer's statement and transaction, so
+   a rollback covers both columns; it is `SECURITY INVOKER`, so it carries no privilege; row-level security policies
+   still check the final row. It is named after the operation (`trg_<table>_<op>_sync`, `fn_<table>_<op>_sync`), its
+   comment records `op=<id> truth=<column>` (and `retired_at` after the retire), it is recorded in the manifest and
+   the runner's definitions, reported by the evidence (present, enabled, truth, retired_at) and exercised by the
+   generated tests. The expand revision's downgrade drops the trigger, the function and the new column: no data is
+   lost because the old column holds it all. The transitional application refuses, at its own boundary (422), a
+   request that sends both names of a field, equal or not: one name per request, so no precedence is ever applied to
+   input.
 4. **Visibility.** The trigger is generated code in an Alembic revision the auditor reads (its migration rules report
    nothing for it: 0 findings before and after on the fifth example, measured), it appears in the plan's `renames` and
    `transition` phase with its policies, in the manifest and in the runner's definitions, the generated tests exercise
    it in both directions, and `verify` fails when it is missing or disabled. "Invisible" no longer applies.
 5. **What the plan refuses**: `in_place`, any sync other than `trigger`, a source that does not exist, a target that
    exists, the identity, ownership, tenant and timestamp columns, foreign keys, a column already in transition, a
-   rename on an in-memory project or a new table, and the retire or contract of a rename (not available in this
-   version). A repeated rename is a no-op.
+   column covered by a concurrent index, a rename on an in-memory project or a new table, and the contract of a
+   rename that was not retired first. A repeated rename is a no-op.
 6. **Cross-version compatibility, by pair**: A/B compatible on the expanded schema (demonstrated with two processes
-   from two environments against one database); B/C compatible later because C keeps writing both until contract;
-   A/C incompatible (C relies on the new column being complete). C is defined by this record and not generated yet.
+   from two environments against one database); B/C compatible on the retire schema (demonstrated the same way); A
+   keeps working on the retire schema through the trigger but is outside its contract; A and B are incompatible with
+   the contract schema (B maps the dropped column and fails, demonstrated), and the plan identifies both before the
+   drop through the sessions of the evidence.
+7. **Retire moves the truth, drops nothing.** A second evolution (`retire_fields`, contract 1.4) needs fresh evidence
+   from B's runner (trigger enabled, zero rows where the columns differ, backfill complete, the transitional version
+   declared) and an identity (`authorization.contract.declared_by`). It generates the code of C (the fresh code of
+   the contract under the new name: no alias, no dual write) and a `retire` revision that re-checks the database,
+   swaps the sync function under the same trigger, carries the old column's NOT NULL (online) and default to the new
+   column and stamps `truth=<new> retired_at=<now>` in the function comment. The old column stays for B. The
+   downgrade moves the truth back; no data moves either way. There is no command-line flag: the step is reversible.
+8. **The destructive contract is exceptional, explicit, verified and disabled by default.** A third evolution
+   (`contract_fields` on a retired rename) drops the old column, its trigger and its function, `RESTRICT`, in one
+   transaction under `ACCESS EXCLUSIVE` with `lock_timeout = 5s`, after sixteen named preconditions evaluated by the
+   plan from the evidence of C's runner and re-checked by the revision on the live catalog: the operation's identity;
+   retire declared and applied (the truth marker); evidence fresh and newer than the retire; zero differing rows;
+   backfill complete; the retired version declared; every connected session identified as a generation that does not
+   map the old column (the application tag, below), the runner's own or an ignored name, plus the operator's explicit
+   declaration that older versions stopped; the configurable minimum age since the retire (default 24 h, never
+   sufficient on its own); NOT NULL, type and default carried; no dependent in `pg_depend` beyond the column's own
+   default and NOT NULL, no trigger function or user function naming the column unless reviewed by name; one Alembic
+   head on disk and in the database; no managed file edited by hand; `--authorize-contract` with `declared_by`; the
+   approver's identity; `--confirm-irreversible` with the exact phrase the plan prints (`drop <table>.<column>`),
+   distinct from the authorization and never implied by it; no lock held and no interrupted operation. `CASCADE` is
+   never generated; a dependent the checks missed fails the statement and rolls everything back. The invariant
+   `no_destructive_schema_change` must be left out of that contract on purpose.
+9. **Reversibility, kept apart.** DDL reversibility of the drop is *conditional*: the downgrade recreates the column,
+   copies the new column's current values back, restores NOT NULL and default and recreates the trigger, offline. Data
+   recovery of the dropped content is not provided by the tool (a backup taken before the upgrade is the only way to
+   the historical content). Compatibility restoration means stop, downgrade, redeploy B. There is no online rollback
+   after a destructive contract, and the tool never says otherwise.
+10. **Generations identify themselves.** Every generated application announces `application_name =
+    <package>@<12 hex>` to PostgreSQL, a hash of the declared phased states, so B and C carry different tags; `verify`
+    lists the sessions; the drop refuses while an unidentified session (A, or an external client not named in
+    `ignore_sessions`) or a B tag is connected. A snapshot of `pg_stat_activity` cannot see instances that connect
+    intermittently; that is why the declaration, the age and the sessions are all required and none is proof alone.
 
 ## Alternatives rejected
 
 - `ALTER TABLE … RENAME COLUMN`: instant, but code and schema must switch together; refused by the review.
+- "Old column wins" when one statement sets both names (increment 1): silent loss of one of the two values; replaced by
+  a refusal in increment 2, with the single documented exception of defaults on INSERT.
+- `DROP COLUMN … CASCADE`: would take views, policies and foreign keys with it; refused.
+- Inferring that older instances are gone from the time elapsed since the retire: a wait is a policy, not evidence;
+  kept as a configurable minimum but never sufficient.
+- Trusting the operator's declaration of deployments alone: necessary, never sufficient; the sessions are checked.
 - Application-level dual write only (B writes both, no trigger): A's updates leave the new column stale; the mirror
   is never a stable invariant and B could not read the new column safely until A is gone.
 - A stored generated column: one-way, read-only, cannot carry the transition to C.
@@ -70,14 +116,19 @@ that recommendation covered B and C, which the generator writes. It cannot cover
 
 ## Consequences
 
-- The evolution contract is `fastapi-architect/evolution/1.3` (`rename_fields`), the manifest 1.4 (`kind`,
-  `from_column`, `from_field`, `sync`, `source_of_truth`, `read_policy`, `write_policy`, `transition`), the evidence
-  1.1 (`mismatch_rows`, `columns_agree`, `sync`), the report 1.4 (`plan.migration.renames`, the `transition` phase).
+- The evolution contract is `fastapi-architect/evolution/1.3` (`rename_fields`) and `1.4` (`retire_fields`,
+  `contract_fields` on a retired rename, `authorization.destructive`), the manifest 1.4 (`kind`, `from_column`,
+  `from_field`, `sync`, `source_of_truth`, `read_policy`, `write_policy`, `transition`) and 1.5 (`application_tag`,
+  the retire and contract states, `compatible_tags`, `dropped`, `destructive`), the evidence 1.1 (`mismatch_rows`,
+  `columns_agree`, `sync`) and 1.2 (`columns`, `sync.truth`, `sync.retired_at`, `dependents`, `other_triggers`,
+  `functions_mentioning`, `sessions`), the report 1.4 (`plan.migration.renames`, the `transition` phase) and 1.5
+  (`retires`, the `retire` and destructive `contract` phases, `confirm_irreversible`).
 - Operators run, after the expand evolution: `alembic upgrade head` (new column and trigger), the backfill of each
   rename as the owner, `verify`; the old version may keep running the whole time.
 - Hand-written SQL that names the old column keeps working; hand-written SQL that expects the new column to be filled
   must wait for the backfill. The plan says so.
-- Still unavailable in this increment: the retire evolution (C: new name only in code, mirror kept) and the contract
-  evolution (drop the old column and the trigger, with evidence newer than the retire, equality of the columns, a
-  declared deployment compatibility, explicit human authorisation, a minimum wait that is never sufficient proof, and a
-  downgrade that recreates the column and copies the data back).
+- Operators run, after the retire evolution: `alembic upgrade head` (the retire revision), deploy C, stop A and B,
+  `verify` with C's runner; after the destructive contract: a backup if the historical content matters, `alembic
+  upgrade head`; the downgrade of the drop is an offline, conditional recovery.
+- Still unavailable: renames of columns covered by a concurrent index (refused), in-place renames, type changes,
+  removal of entities, and any proof of a distributed deployment beyond what one database can observe.

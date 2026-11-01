@@ -316,9 +316,11 @@ Refused with the path or the precondition: an unknown key, a strategy or a sync 
 name twice, two renames sharing a source or a target, a source that is not a field (`rename_source_exists`), a target
 that exists (`rename_target_free`), the identity, ownership, tenant and timestamp columns and foreign keys
 (`rename_protected_column`), a column already in a phased change (`rename_column_in_transition`), an in-memory
-project or a new table (`rename_needs_existing_postgresql_table`). A repeated rename is a no-op. `contract_fields`
-naming a rename, `remove_fields` and `change_fields` stay refused: **retire and contract of renames are not available
-in this version**; nothing is renamed in place, retired or dropped.
+project or a new table (`rename_needs_existing_postgresql_table`), a source column that a concurrent index covers
+(`rename_indexed_column_unsupported`, since increment 2: the index would vanish with the column at the contract). A
+repeated rename is a no-op. `contract_fields` naming a rename that was not retired is refused
+(`contract_rename_retire_first`); `remove_fields` and `change_fields` stay refused. Retire and contract are the two
+further evolutions of section 11; nothing is renamed in place.
 
 What the plan produces (one `expand` revision plus a `transition` entry under `plan.migration.phases`, and
 `plan.migration.renames[]`):
@@ -335,3 +337,121 @@ The auditor's migration rules report nothing for the sync trigger (0 findings be
 its visibility comes from the plan, the manifest, the runner's definitions, the evidence and the generated tests.
 `docs/guides/phased-migrations-and-backfills.md` walks the fifth example through it and
 `docs/architecture/adr-2.2-01-safe-renames.md` records the decision.
+
+## 11. Retire and destructive contract of a rename (contract `fastapi-architect/evolution/1.4`, v2.2 increment 2; PostgreSQL projects)
+
+A rename is three evolutions. After the expand of section 10, the backfill and a fresh `verify`:
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.4",
+  "project": {"path": "../generated/parcels"},
+  "authorization": {"contract": {"declared_by": "release owner", "evidence": "evidence-b.json", "max_evidence_age_hours": 24}},
+  "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+     "retire_fields": [{"name": "label", "operation": "550095ef4c391dd0"}]}]}]
+}
+```
+
+and, once the retired generation is deployed and verified again:
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.4",
+  "project": {"path": "../generated/parcels"},
+  "authorization": {
+    "contract": {"declared_by": "release owner", "evidence": "evidence-c.json", "max_evidence_age_hours": 24},
+    "destructive": {"approved_by": "release owner", "old_versions_stopped": true, "min_retire_age_hours": 24,
+                    "ignore_sessions": [], "reviewed_functions": []}
+  },
+  "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+     "contract_fields": [{"name": "label", "operation": "550095ef4c391dd0"}]}]}],
+  "invariants": ["existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "protected_files_unchanged"]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `retire_fields[] {name, operation}` | the new field name and the operation id of a rename declared `expand`: its truth moves to the new column. Needs `authorization.contract.declared_by` and the evidence; no command-line flag (the step is reversible and online) |
+| `contract_fields[] {name, operation}` on a rename declared `retire` | the **destructive contract**: the old column, its sync trigger and function are dropped (`RESTRICT`). Needs everything the NOT NULL contract needs plus `authorization.destructive`, `--authorize-contract` **and** `--confirm-irreversible "<phrase>"` |
+| `authorization.destructive.approved_by` | required: the person who approves the drop (recorded in the manifest and in the revision's docstring) |
+| `authorization.destructive.old_versions_stopped` | the operator's explicit declaration that no version mapping the old column is running; never sufficient on its own: the sessions of the evidence are checked too |
+| `authorization.destructive.min_retire_age_hours` | the minimum age of the retire, measured from the `retired_at` the retire revision stamped in the database (default 24, `0` allowed); a wait is never proof that older instances are gone |
+| `authorization.destructive.ignore_sessions` | `application_name` values of external clients (monitoring, consoles) the session check may ignore, by name |
+| `authorization.destructive.reviewed_functions` | `schema.function` names whose source mentions the table and the old column and that a human reviewed; catalog dependents (indexes, constraints, views, policies, foreign keys) can never be reviewed away |
+| the invariant `no_destructive_schema_change` | must be **left out** of a destructive contract, on purpose; with it the plan blocks (`no_destructive_schema_change`) |
+
+The `--confirm-irreversible` phrase is computed by the plan and printed in the blocker when missing or wrong: `drop
+<table>.<old column>[, <table>.<old column>]`. It is distinct from `--authorize-contract` and never implied by it.
+
+**Retire** (`retire_*` preconditions, all from the evidence of B's runner): operation known, `declared_by` present,
+evidence present, fresh, at the manifest head and about this rename, sync trigger present and enabled, the function's
+truth marker on the old column, zero rows where the columns differ, backfill complete, the transitional application
+version declared, indexes valid. What it produces: the code of state **C** (the new name only: no alias, no dual
+write, no deprecated field; the fresh code of the contract under the new name) and a `retire` revision (autocommit,
+reversible) that re-checks the trigger and the equality on the live database, replaces the sync function under the same
+trigger, carries the old column's NOT NULL (online: `NOT VALID`, `VALIDATE`, `SET NOT NULL`) and default to the new one
+and stamps the function comment `fastapi-architect sync op=<id> truth=<new> retired_at=<now>`. Nothing is dropped; the
+old column stays, equal by the trigger, for B. The manifest entry becomes `state_declared: retire` with
+`retire_revision`, `source_of_truth`/`read_policy`/`write_policy: to_column` and `compatible_tags` (the application
+tags of every generation that does not map the old column). Downgrade: `DROP NOT NULL`, `DROP DEFAULT`, the comment back
+to the old column; no data moves.
+
+**Destructive contract** (the sixteen `contract_*` preconditions the plan evaluates; the revision re-checks the
+database-side ones under `ACCESS EXCLUSIVE` with `lock_timeout = 5s`):
+
+| # | Precondition | Satisfied when |
+|---|---|---|
+| 1 | `contract_operation_known` | the operation is a rename the manifest records, with its stable identity |
+| 2 | `contract_rename_retired`, `contract_retire_applied` | declared `retire` in the manifest; the function comment records `truth=<new>`; the evidence was written by the retired generation's runner |
+| 3 | `contract_evidence_present`, `_fresh`, `_after_retire` | evidence present, within `max_evidence_age_hours`, generated after `retired_at` |
+| 4 | `contract_columns_agree` | zero rows where the columns differ |
+| 5 | `contract_backfill_complete` | progress `complete` |
+| 6 | `contract_application_version_accredited` | the operator declared the retired generation's contract digest (`verify --application-version`) |
+| 7 | `contract_deployments_identified`, `contract_old_versions_declared_stopped` | every session of the database (a snapshot of `pg_stat_activity` taken by `verify`) carries a tag in `compatible_tags`, is the runner's own (`<pkg>.ops.backfill`) or is named in `ignore_sessions`; the operator declared `old_versions_stopped` |
+| 8 | `contract_retire_age` | `now - retired_at >= min_retire_age_hours` |
+| 9 | `contract_constraints_carried` | the new column has the old one's NOT NULL, type and default |
+| 10 | `contract_dependencies_reviewed` | `pg_depend` lists nothing on the old column beyond its own default and NOT NULL; no other trigger function of the table and no user function (outside `reviewed_functions`) names the table and the column |
+| 11 | `contract_single_head` | one head on disk, one row in `alembic_version` |
+| 12 | `contract_baseline_clean` | no managed file edited by hand |
+| 13 | `contract_authorized` | `--authorize-contract` and `authorization.contract.declared_by` |
+| 14 | `contract_approver_identified` | `authorization.destructive.approved_by` |
+| 15 | `contract_irreversible_confirmed` | `--confirm-irreversible` equals the printed phrase |
+| 16 | `contract_no_pending_operations` | no interrupted operation in the journal (every plan refuses otherwise), no project lock held by another process |
+
+Plus the informational `contract_database_at_head`, `contract_evidence_matches`, `contract_sync_enabled`,
+`contract_indexes_valid`, `contract_restrict_only` and `contract_data_recovery_declared`.
+
+What it produces: the `drop` revision (**one transaction**: `SET LOCAL lock_timeout`, `LOCK TABLE … ACCESS EXCLUSIVE`,
+every check above against the live catalog, `DROP TRIGGER`, `DROP FUNCTION`, `ALTER TABLE … DROP COLUMN … RESTRICT`;
+never `CASCADE`; a failure anywhere rolls the whole revision back and `alembic_version` does not move), the code of
+C regenerated (unchanged in its modules), the manifest entry `state_declared: contract` with `contract_revision`,
+`dropped {column, trigger, function}` and `destructive {approved_by, declared_by, confirmation, evidence_generated_at}`,
+and `history[].phased.dropped`. The approver and the phrase are also written in the revision's docstring.
+
+Reversibility, kept apart: **DDL reversibility is conditional** (the downgrade recreates the column nullable, copies the
+new column's *current* values back, restores NOT NULL and default, recreates the sync function and trigger with the
+truth on the new column and a fresh `retired_at`; a full-table `UPDATE` in one transaction: offline by nature);
+**data recovery is not provided** (the content the old column had at the time of the drop is not recoverable from the
+database; after the checks it equalled the new column, which stays; a backup taken before the upgrade is the only way
+back to the historical content); **compatibility restoration** means stop, downgrade, redeploy B; there is **no online
+rollback** after a destructive contract.
+
+Application tags: every generated application announces `application_name = <package>@<12 hex>` to PostgreSQL
+(`core/db.py`), a hash of the package and the declared state of every phased change, so A (no tag, generated before
+v2.2), B and C carry different names; `verify` lists the sessions grouped by name; the plan refuses the drop while a
+session is unidentified or belongs to a generation that still maps the old column. The snapshot sees connected
+sessions only: instances that connect intermittently are not seen, which is why the declaration, the age and the
+sessions are all required and none is sufficient. A contract with an explicit `files.allow_modify` list must include
+`src/<pkg>/core/db.py` for evolutions that change a phased state.
+
+Evidence `fastapi-architect/migration-evidence/1.2` (1.0 and 1.1 still read; a drop needs 1.2): rename operations add
+`source_present`, `columns {<old>, <new>: present, nullable, type, default}`, `sync.function`, `sync.truth`,
+`sync.retired_at`, `dependents[] {kind, deptype, description, managed}`, `unmanaged_dependents[]`, `other_triggers[]
+{name, function, mentions_column}`, `functions_mentioning[]`; the document adds `sessions[] {application_name, user,
+count, oldest_backend_start, identified}` and `tool_session`. Report `evolution_report/1.5`: `plan.migration.retires[]`,
+destructive entries in `plan.migration.contract[]` (`destructive: true`, `reversible: "conditional"`, `drops`,
+`confirmation`, `approved_by`), the `retire` phase and a destructive `contract` phase (`ddl_reversibility`,
+`data_recovery`, `compatibility_restoration`), `plan.phased.retiring/dropping`, `history[].phased.retired/dropped`,
+`contract_authorization.confirm_irreversible` and `approved_by`, and the change classification `destructive`.
+Examples: `examples/evolutions/parcels-retire-label.json`, `parcels-contract-label.json`, with
+`parcels-rename-evidence.sample.json` and `parcels-retire-evidence.sample.json`.

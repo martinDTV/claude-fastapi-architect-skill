@@ -1,7 +1,7 @@
 # FastAPI Architect v2.2.0 — Discovery & Architecture Planning: Safe Evolution II
 
 Status: **reviewed and decided** (2026-10-31; the decisions are in section 11 and override anything above them);
-increments 0 and 1 are implemented (`docs/releases/RELEASE-NOTES-v2.2.md`; the rename decision record is
+increments 0, 1 and 2 are implemented (`docs/releases/RELEASE-NOTES-v2.2.md`; the rename decision record is
 `adr-2.2-01-safe-renames.md`), increments 2 to 6 need an authorisation each.
 The analysis sections were written before any code changed. The baseline is the published v2.1.0
 (`origin/main` = `7aff2b1b04604acfaedc79c7ea3e98c1f1b08b07`; release at `219383d`). Decisions the author takes on

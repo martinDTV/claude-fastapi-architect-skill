@@ -179,3 +179,110 @@ Ruff 0.17.3. The measured numbers of the coexistence run are in `plugins/fastapi
 | `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`, `git diff --check`, secrets scan on the diff and every new file | pass |
 | Not run | the real-Docker suite (the executor and its integration are untouched; its fake-runtime tests ran inside the full suite) |
 | Defects the scenarios found before the increment closed | the trigger state read as the single-byte `"char"` type (asyncpg returns bytes: every trigger looked disabled); the generated trigger test inserting only the renamed column (a NOT NULL neighbour failed the insert); generated lines over the 120-column limit; all fixed and covered |
+
+## Increment 2: Retire & Controlled Contract
+
+The two evolutions that finish a rename. **Retire** moves the source of truth to the new column: the generated code
+(state C) knows the new name only and the retire revision carries the old column's NOT NULL and default to the new one
+online, swaps the sync function under the same trigger and stamps `truth=<new> retired_at=<now>` in its comment;
+nothing is dropped and B keeps working. The **destructive contract** drops the old column, its sync trigger and
+function, `RESTRICT`, in one transaction, and only after sixteen named preconditions evaluated by the plan from fresh
+evidence and re-checked by the revision on the live catalog under an exclusive lock. It is the only destructive
+operation of the tool: disabled by default, exceptional, explicit (`--authorize-contract` plus a distinct
+`--confirm-irreversible "drop <table>.<column>"`, an approver's identity and an explicit declaration that older
+versions stopped), verifiable (every condition has a name in the plan) and honest about what its downgrade can do.
+The decision record is [`docs/architecture/adr-2.2-01-safe-renames.md`](../architecture/adr-2.2-01-safe-renames.md)
+(decisions 7 to 10), the guide section is "Retire and the destructive contract" in
+[`docs/guides/phased-migrations-and-backfills.md`](../guides/phased-migrations-and-backfills.md), the contract is section 11
+of `references/evolution-contracts.md`.
+
+### Design
+
+- **Retire (B → C), reversible, no flag.** `retire_fields[] {name, operation}` under contract 1.4 needs
+  `authorization.contract.declared_by` and B's evidence: trigger present and enabled, its truth marker on the old
+  column, zero rows where the columns differ, backfill complete, the transitional version declared, evidence fresh and
+  at the manifest head. It regenerates the code under the new name (no alias, no dual write, no deprecated field; the
+  generated schema-drift test tolerates the retired old columns) and appends a `retire` revision (autocommit: the
+  re-checks, `CREATE OR REPLACE FUNCTION`, `_set_not_null_online`, `SET DEFAULT`, `COMMENT ON FUNCTION`); its
+  downgrade is `DROP NOT NULL`, `DROP DEFAULT` and the comment back. The manifest entry becomes `state_declared:
+  retire` with `retire_revision`, the policies on `to_column` and `compatible_tags`.
+- **Contradictions are refused, not resolved.** The sync trigger of increment 1 let the old column win when one
+  statement set both names to different values; it now raises (SQLSTATE 23514, the writer's transaction rolls back),
+  with the single exception of an INSERT where a column default made both non-NULL, where the declared truth wins.
+  The transitional application refuses, at its own boundary, a request that sends both names of a field, equal or
+  not (422, `model_validator(mode="before")`: one name per request). Generated tests cover both.
+- **B and C coexist; A is tolerated, then identified.** C writes the new column and the trigger fills the old one; B
+  writes both and reads the old one, kept equal; A's writes to the old column are still mirrored (nothing is lost) but
+  A is outside the retire contract. Every generated application now announces `application_name = <package>@<12
+  hex>` (a hash of its declared phased states, `core/db.py`): A, generated before v2.2, announces nothing; B and C
+  carry different tags; `verify` lists the sessions of the database grouped by name.
+- **The destructive contract (C → D).** `contract_fields` on a retired rename plus `authorization.destructive
+  {approved_by, old_versions_stopped, min_retire_age_hours (default 24, 0 allowed), ignore_sessions,
+  reviewed_functions}`; the invariant `no_destructive_schema_change` must be left out on purpose. Sixteen named
+  preconditions (`references/evolution-contracts.md`, section 11): identity; retire declared and applied (the truth
+  marker in the catalog, the evidence written by C's runner); evidence fresh and newer than `retired_at`; equal
+  columns; backfill complete; the retired version declared; every connected session identified (a `compatible_tags`
+  tag, the runner's own name or an `ignore_sessions` name) plus the operator's declaration; the minimum age; NOT
+  NULL, type and default carried; no dependent in `pg_depend` beyond the column's own default and NOT NULL and no
+  trigger or user function naming the column unless reviewed by name; one Alembic head on disk and in the database;
+  no managed file edited by hand; `--authorize-contract` with `declared_by`; the approver; `--confirm-irreversible`
+  with the exact phrase the plan prints; no lock held by another process. The `drop` revision is one transaction:
+  `SET LOCAL lock_timeout = '5s'`, `LOCK TABLE … ACCESS EXCLUSIVE`, every database-side check again (including the
+  catalog dependents through `pg_depend` and the sources of the table's other triggers), `DROP TRIGGER`, `DROP
+  FUNCTION`, `DROP COLUMN … RESTRICT`. `CASCADE` is never generated. The approver and the phrase are recorded in the
+  revision's docstring and in the manifest.
+- **Reversibility, kept apart and said plainly.** DDL: conditional (the downgrade recreates the column, copies the new
+  column's current values back, restores NOT NULL and default and recreates the trigger; offline). Data: the dropped
+  content is not recoverable from the database (take a backup before the upgrade). Compatibility: stop, downgrade,
+  redeploy B; no online rollback. The plan's destructive phase carries `ddl_reversibility`, `data_recovery` and
+  `compatibility_restoration` as three separate statements.
+- **Refused by name** (new): `rename_indexed_column_unsupported` (a concurrent index on the source column would
+  vanish with it), `contract_rename_retire_first`, `retire_rename_only`, `retire_operation_known/pending`,
+  `no_destructive_schema_change`, and every `retire_*`/`contract_*` precondition above. A second contract of a
+  contracted operation is `contract_operation_pending`.
+
+### Contracts and schemas (all additive)
+
+| Artefact | Change |
+|---|---|
+| `fastapi-architect/evolution/1.4` | `retire_fields[] {name, operation}`; `contract_fields` on a retired rename; `authorization.destructive {approved_by, old_versions_stopped, min_retire_age_hours, ignore_sessions, reviewed_functions}`; `rename_fields` accepted under 1.3 and 1.4; 1.0–1.3 keep their meaning |
+| `fastapi-architect/generation/1.5` | `application_tag`; rename entries in state `retire` (`retire_revision`, `compatible_tags`, policies on `to_column`) and `contract` (`dropped`, `destructive`); `history[].phased.retired/dropped`; the `retire` phase and `destructive`/`reversible: "conditional"` on migration entries; 1.0–1.4 still read |
+| `fastapi-architect/migration-evidence/1.2` | rename operations: `source_present`, `columns`, `sync.function/truth/retired_at`, `dependents`, `unmanaged_dependents`, `other_triggers`, `functions_mentioning`; document: `sessions`, `tool_session`; 1.0 and 1.1 still read (a drop needs 1.2) |
+| `evolution_report/1.5` | `plan.migration.retires[]`, destructive `contract[]` entries, the `retire` and destructive `contract` phases, `plan.phased.retiring/dropping`, `contract_authorization.confirm_irreversible/approved_by`, classification `destructive` |
+| CLI | `evolve_fastapi.py plan|apply --confirm-irreversible PHRASE` |
+| Examples | `parcels-retire-label.json`, `parcels-contract-label.json`, `parcels-rename-evidence.sample.json`, `parcels-retire-evidence.sample.json` |
+
+### Deliberate differences from v2.1.0 and from increment 1
+
+- Every generated `core/db.py` now announces an `application_name` (one line and a `connect_args`); the five committed
+  snapshots were regenerated: the three PostgreSQL projects changed `core/db.py` and every manifest moved to 1.5.
+  `src/<pkg>/core/db.py` joined the default integration points an evolution may regenerate (its tag changes with the
+  phased states); a contract with an explicit `files.allow_modify` list must include it for such evolutions.
+- The sync trigger refuses contradictory statements instead of letting the old column win (increment 1 never shipped).
+- The generated contract revision of v2.1 (NOT NULL) wraps one line that exceeded the project's 120 columns; the
+  phased example's plan differs from the published engine in that file, the runner, its definitions, its tests and
+  `core/db.py`, all explained; the seven fresh projects are byte-identical to the published engine except `core/db.py`.
+- Test expectations pin `generation/1.5`, `evolution_report/1.5` and `migration-evidence/1.2` for fresh artefacts; the
+  increment-1 test that expected retire and contract to be refused now expects `contract_rename_retire_first`.
+
+### Validation
+
+Environment: macOS (Darwin 27.0.0), CPython 3.13.5 and 3.9.6, PostgreSQL 16.10 as throwaway clusters, uv, Ruff 0.17.3.
+The scenario list and the measured numbers of the PostgreSQL run are in
+`plugins/fastapi-architect/examples/generated/VERIFICATION.md` (section "v2.2 increment 2").
+
+| Check | Result |
+|---|---|
+| Unit module `tests/test_retire_contract_v22.py` (no database) | 12 OK on 3.13 (20.6 s) and 3.9 (27.4 s): contract 1.4 and the destructive block by name, the examples and the evidence samples, evidence 1.0–1.2 still read, every retire precondition broken one at a time, the sixteen drop preconditions all evaluated and each adversarial condition blocking by its name (B's tag connected, an unidentified session, a console, differing rows, stale evidence, retire not applied on the database, too young, trigger disabled, a view, an index, a foreign key, an unknown trigger, a user function, another head, two heads, NOT NULL or type not carried, evidence written by B's runner, the wrong version, evidence 1.1, another operation), the reviewed function and the ignored session accepted by name, a zero wait, the lock held by another process, a hand-edited file, the drop revision's text (one transaction, RESTRICT, never CASCADE, lock timeout, the approver and the phrase in the docstring, the conditional downgrade), C's code without the old name, the application tags of A, B and C, the manifest and history records, a second contract refused, and both generated projects passing their own Ruff configuration and compiling |
+| Real PostgreSQL, `FA_DESIGN_PG=1 tests/test_retire_contract_v22_postgresql.py` | 3 OK in 94.5 s, 134 MB (final run, with the unit suite running alongside). A as v2.1.0 published it, B and C as three processes from their own environments on one database: B and C coexist on the retire schema (C writes the new name only and the trigger fills the old column; B writes both; partial updates and NULLs consistent; 30 interleaved updates leave the pair equal in 0.06 s); B refuses both names in one request (422) and the trigger refuses one statement setting both to different values (23514) with the row untouched; A tolerated and listed as an unidentified session; the retire revision applied in 2.6 s, downgraded and upgraded again; the destructive contract refused while A or B are connected, blocked without the phrase (the command line prints it), verified in a copy (18.6 s) and refused on the live database by a view, an index, an unknown trigger naming the column, a disabled trigger, differing rows and a lock holder (`lock timeout` after 5.7 s), each leaving `alembic_version`, the columns and the triggers intact; the drop in 0.56 s while C writes; C keeps working, B answers 500; the downgrade (0.54 s) recreates the columns with 0 differing rows and B works again; the wrong order refused on a live project |
+| The generated suites of the evolved projects, in the verification copies | C: 20 selected, 16 passed, 4 skipped, 0 failed (the trigger mirror and contradiction tests, the schema-drift test tolerating the retired columns); D (contracted): 20 selected, 14 passed, 6 skipped, 0 failed, its migrations run through the drop on a fresh database; B's own suite 23 passed (the one-name-per-request test among them); audit: no new blocking finding in any of them |
+| Generation equivalence | per-file oracle against the published v2.1.0 engine on every specification: the five fresh projects identical except `core/db.py` in the three PostgreSQL ones (179 of 182 files); in the evolution plans only the manifests (1.5) differ, except the phased example (`core/db.py`, the runner, its definitions, its tests: evidence 1.2 and the tags) and the contracts the published engine cannot read (1.3, 1.4) |
+| Existing behaviour | full suite 713 OK on 3.13 (177.3 s, 140 MB) and 713 OK on 3.9 (191.9 s, 184 MB); PostgreSQL regression: `test_migrations_v21_postgresql.py` 4 OK (60.1 s), `test_acceptance_v21.py` 4 OK (75.9 s), `test_acceptance_v20.py` 3 OK (57.3 s), `test_design_v20_postgresql.py` 9 OK (93.5 s), `test_renames_v22_postgresql.py` (increment 1) 4 OK (47.2 s) after its premature-contract expectation moved to `contract_rename_retire_first` |
+| `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate` (marketplace and plugin), Ruff, `tests/test_docs_links.py`, `git diff --check`, secrets scan on the diff and every new file | pass; the Docker executor was not modified, so the container tests kept their place in the suite and no real container run was repeated |
+
+Limits, stated: the sessions check is a snapshot of `pg_stat_activity` (instances that connect intermittently are
+invisible; a connection pooler in transaction mode may hide the application name); the minimum age is a policy, never
+proof; the function scan is textual (dynamic SQL and functions that name neither the table nor the column are not
+seen); the downgrade's full-table copy is offline and was not timed at scale; a connection failure inside the drop
+transaction was not injected (PostgreSQL rolls the transaction back); nothing here demonstrates a distributed
+deployment. The version stays 2.1.0 until the release increment; increments 3 to 6 need their own authorisation.
