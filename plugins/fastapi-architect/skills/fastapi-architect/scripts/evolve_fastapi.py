@@ -3,7 +3,7 @@
 
     python3 evolve_fastapi.py discover PROJECT [--format text|json] [--output FILE]
     python3 evolve_fastapi.py propose PROJECT                  # candidate modules of a hand-written project (nothing adopted)
-    python3 evolve_fastapi.py adopt ADOPTION.json              # record the adoption baseline (adoption/1.0)
+    python3 evolve_fastapi.py adopt ADOPTION.json              # record the adoption baseline (adoption/1.0 or 1.1 with mount point)
     python3 evolve_fastapi.py recover PROJECT [--forward]      # finish or undo an interrupted operation
     python3 evolve_fastapi.py plan CONTRACT.json [--baseline-contract SPEC.json] [--no-verify] [--format ...] [--output FILE]
     python3 evolve_fastapi.py apply CONTRACT.json [--baseline-contract SPEC.json]
@@ -85,7 +85,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pr = sub.add_parser("propose", help="candidate modules of a hand-written project for adoption (nothing is adopted)")
     pr.add_argument("project")
     ad = sub.add_parser("adopt", help="record the adoption baseline of the modules named in an adoption contract")
-    ad.add_argument("contract", help="adoption contract (JSON, schema fastapi-architect/adoption/1.0)")
+    ad.add_argument("contract", help="adoption contract (JSON, schema fastapi-architect/adoption/1.0, or 1.1 with the mount point, conventions, operations and alembic facts)")
     rc = sub.add_parser("recover", help="finish or undo an interrupted operation (journal under .fastapi-architect/ops)")
     rc.add_argument("project")
     rc.add_argument("--forward", action="store_true", help="publish the pending files (default: roll back the published ones)")

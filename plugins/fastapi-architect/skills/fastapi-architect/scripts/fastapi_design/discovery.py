@@ -111,7 +111,7 @@ class ProjectModel:
             "alembic": self.alembic,
             "declared_contracts": self.declared_contracts,
             "audit_summary": self.audit_summary,
-            "adoption": {"modules": {name: {"router": data.get("router"), "files": sorted(data.get("files", {})), "routes": len(data.get("routes", []))} for name, data in self.adoption.get("modules", {}).items()}, "history": self.adoption.get("history", [])} if self.adoption else None,
+            "adoption": {"schema": self.adoption.get("schema"), "modules": {name: {"router": data.get("router"), "files": sorted(data.get("files", {})), "routes": len(data.get("routes", []))} for name, data in self.adoption.get("modules", {}).items()}, "generated_modules": {name: {"files": sorted(data.get("files", {})), "persistence": data.get("persistence"), "prefix": data.get("prefix"), "routes": len(data.get("routes", []))} for name, data in (self.adoption.get("generated_modules") or {}).items()}, "mount": {k: self.adoption["mount"].get(k) for k in ("file", "function", "app", "after_call", "prefix")} if self.adoption.get("mount") else None, "operations": list(self.adoption.get("operations") or []), "history": self.adoption.get("history", [])} if self.adoption else None,
             "uncertainties": list(self.uncertainties),
         }
 
@@ -143,10 +143,13 @@ def _read_adoption(root: Path, notes: List[str]) -> Optional[Dict[str, Any]]:
     except (OSError, ValueError) as exc:
         notes.append(f".fastapi-architect/adoption.json is not readable JSON ({exc}); the adoption is ignored")
         return None
-    if not isinstance(data, dict) or data.get("schema") != "fastapi-architect/adoption/1.0" or not isinstance(data.get("modules"), dict):
+    if not isinstance(data, dict) or data.get("schema") not in ADOPTION_SCHEMAS_KNOWN or not isinstance(data.get("modules"), dict):
         notes.append(".fastapi-architect/adoption.json has an unknown schema; the adoption is ignored")
         return None
     return data
+
+
+ADOPTION_SCHEMAS_KNOWN = ("fastapi-architect/adoption/1.0", "fastapi-architect/adoption/1.1")
 
 
 def _package_and_source_root(root: Path, manifest: Optional[Dict[str, Any]], notes: List[str]) -> Tuple[Optional[str], str]:
@@ -342,14 +345,25 @@ def discover(project_root: str, *, audit: bool = True) -> ProjectModel:
         adopted: Dict[str, str] = {}
         for data in adoption.get("modules", {}).values():
             adopted.update({str(k): str(v) for k, v in (data.get("files") or {}).items()})
+        generated: Dict[str, str] = {}
+        for data in (adoption.get("generated_modules") or {}).values():
+            generated.update({str(k): str(v) for k, v in (data.get("files") or {}).items()})
+        mount = adoption.get("mount") or {}
         for rel in list(model.ownership):
             if rel in adopted:
                 model.ownership[rel] = "adopted_unchanged" if adopted[rel] == on_disk.get(rel) else "adopted_modified"
+            elif rel in generated:
+                model.ownership[rel] = "generated_unchanged" if generated[rel] == on_disk.get(rel) else "generated_modified"
+            elif mount and rel == mount.get("file"):
+                model.ownership[rel] = "mount_point_unchanged" if mount.get("file_sha256") == on_disk.get(rel) else "mount_point_modified"
             else:
                 model.ownership[rel] = "unadopted"
         for rel in adopted:
             if rel not in on_disk:
                 model.ownership[rel] = "adopted_missing"
+        for rel in generated:
+            if rel not in on_disk:
+                model.ownership[rel] = "generated_missing"
     elif manifest is None:
         notes.append("no generation manifest: file ownership is unknown for every file (nothing can be told apart from a manual file)")
 

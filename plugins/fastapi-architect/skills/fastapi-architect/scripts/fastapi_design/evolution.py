@@ -28,6 +28,7 @@ contracts: refused). ``verified`` requires executed tests; ``audit_clean`` means
 
 from __future__ import annotations
 
+import ast
 import difflib
 import fnmatch
 import hashlib
@@ -45,6 +46,7 @@ from fastapi_audit.remediate.isolation import ExecutionPolicy, Workspace
 from fastapi_audit.report import compare_reports
 from fastapi_common.fs import resolve_against
 
+from .adopted import PERSISTENCE_KINDS, alembic_facts, extended_endpoint_code, module_fragment, mount_edit, path_parameters, render_module, resolve_symbol, revision_id, unmanaged_hit
 from .adoption import ADOPTION
 from .advisor import recommend
 from .blueprint import Layout, Lineage, PhaseState, added_columns, build, delta_revision
@@ -83,20 +85,22 @@ from .migrations import (
     validate_rename_fields,
 )
 from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
-from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
+from .transforms import StructuralEdit, TransformError, compose, ensure_import, insert_class_field, insert_function
 from .verify import run_generated_tests
 
-EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.5"  # 1.5 (v2.2 inc. 3): files.merge (opt-in three-way merge of hand-modified generated files)  # 1.4 (v2.2 inc. 2): retire_fields, contract_fields on a retired rename (destructive), authorization.destructive  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
-EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3", "fastapi-architect/evolution/1.4", "fastapi-architect/evolution/1.5")
+EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.6"  # 1.6 (v2.2 inc. 4): add_modules on adopted projects (persistence, prefix, dependencies), add_endpoints with parameters, dependencies, delegate and response_model  # 1.5 (v2.2 inc. 3): files.merge (opt-in three-way merge of hand-modified generated files)  # 1.4 (v2.2 inc. 2): retire_fields, contract_fields on a retired rename (destructive), authorization.destructive  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
+EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3", "fastapi-architect/evolution/1.4", "fastapi-architect/evolution/1.5", "fastapi-architect/evolution/1.6")
 EVOLUTION_SCHEMA_12 = "fastapi-architect/evolution/1.2"
 EVOLUTION_SCHEMA_13 = "fastapi-architect/evolution/1.3"
 EVOLUTION_SCHEMA_14 = "fastapi-architect/evolution/1.4"
 EVOLUTION_SCHEMA_15 = "fastapi-architect/evolution/1.5"
-PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
-RENAME_SCHEMAS = (EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
-RETIRE_SCHEMAS = (EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
-MERGE_SCHEMAS = (EVOLUTION_SCHEMA_15,)
-REPORT_SCHEMA = "evolution_report/1.6"  # 1.6 (v2.2 inc. 3): plan.merges, plan.files.merged, verification.merges, contract_authorization.allow_merge (additive)  # 1.5 (v2.2 inc. 2): plan.migration.retires, destructive contract entries, the retire phase, contract_authorization.confirm_irreversible (additive)  # 1.4 (v2.2): plan.migration.renames and the transition phase  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
+EVOLUTION_SCHEMA_16 = "fastapi-architect/evolution/1.6"
+PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15, EVOLUTION_SCHEMA_16)
+RENAME_SCHEMAS = (EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15, EVOLUTION_SCHEMA_16)
+RETIRE_SCHEMAS = (EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15, EVOLUTION_SCHEMA_16)
+MERGE_SCHEMAS = (EVOLUTION_SCHEMA_15, EVOLUTION_SCHEMA_16)
+ADOPTED_SCHEMAS = (EVOLUTION_SCHEMA_16,)  # the adopted-project extensions of increment 4
+REPORT_SCHEMA = "evolution_report/1.7"  # 1.7 (v2.2 inc. 4): plan.mount, plan.generated_modules, verification.mount (additive)  # 1.6 (v2.2 inc. 3): plan.merges, plan.files.merged, verification.merges, contract_authorization.allow_merge (additive)  # 1.5 (v2.2 inc. 2): plan.migration.retires, destructive contract entries, the retire phase, contract_authorization.confirm_irreversible (additive)  # 1.4 (v2.2): plan.migration.renames and the transition phase  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
 DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "src/{pkg}/core/db.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
@@ -251,17 +255,55 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
                 errors.append(f"{q}: expected an object")
                 continue
             for key in ep:
-                if key not in ("method", "path", "name", "summary", "response") and not str(key).startswith("x-"):
+                if key in ("parameters", "dependencies", "delegate", "response_model"):
+                    if schema not in ADOPTED_SCHEMAS:
+                        errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_16}")
+                elif key not in ("method", "path", "name", "summary", "response") and not str(key).startswith("x-"):
                     errors.append(f"{q}.{key}: unknown property")
+            parameters = ep.get("parameters", [])
+            if not isinstance(parameters, list):
+                errors.append(f"{q}.parameters: expected a list of {{name, in, type, required}}")
+                parameters = []
+            for k, prm in enumerate(parameters):
+                if not isinstance(prm, dict) or not isinstance(prm.get("name"), str) or not IDENT_RE.match(prm.get("name", "")) or prm.get("in") not in ("path", "query") or prm.get("type") not in ("str", "int", "float", "bool") or any(key not in ("name", "in", "type", "required", "default") for key in prm):
+                    errors.append(f"{q}.parameters[{k}]: expected {{name: identifier, in: path|query, type: str|int|float|bool, required?: bool, default?: value of that type}}")
+                    continue
+                if "default" in prm:
+                    expected = {"str": str, "int": int, "float": (int, float), "bool": bool}[prm["type"]]
+                    if prm["in"] == "path" or isinstance(prm["default"], bool) and prm["type"] != "bool" or not isinstance(prm["default"], expected):
+                        errors.append(f"{q}.parameters[{k}].default: a query parameter default of type {prm['type']} (path parameters have none)")
+            if "dependencies" in ep and (not isinstance(ep["dependencies"], list) or any(not isinstance(d, str) or ":" not in d for d in ep["dependencies"])):
+                errors.append(f"{q}.dependencies: expected a list of 'dotted.module:name' from adoption.dependencies.allowed")
+            delegate = ep.get("delegate")
+            if delegate is not None:
+                if not isinstance(delegate, dict) or not isinstance(delegate.get("callable"), str) or ":" not in delegate["callable"] or not isinstance(delegate.get("arguments", []), list) or any(not isinstance(a, str) or not IDENT_RE.match(a) for a in delegate.get("arguments", [])):
+                    errors.append(f"{q}.delegate: expected {{callable: 'dotted.module:name', arguments: [parameter names]}}")
+                else:
+                    names = {p.get("name") for p in parameters if isinstance(p, dict)}
+                    unknown_args = [a for a in delegate.get("arguments", []) if a not in names]
+                    if unknown_args:
+                        errors.append(f"{q}.delegate.arguments: {unknown_args} are not parameters of the handler")
+            if "response_model" in ep and (not isinstance(ep["response_model"], str) or not re.match(r"^[A-Z][A-Za-z0-9]*$", ep["response_model"])):
+                errors.append(f"{q}.response_model: expected a CapitalizedWord pydantic class of the adopted module")
+            for prm in parameters:
+                if isinstance(prm, dict) and prm.get("in") == "path" and isinstance(ep.get("path"), str) and f"{{{prm.get('name')}}}" not in ep["path"]:
+                    errors.append(f"{q}.parameters: path parameter {prm.get('name')!r} does not appear in the path")
+            if isinstance(ep.get("path"), str) and "parameters" in ep:  # declared parameters must cover the placeholders; contracts without parameters keep the 1.1 behaviour
+                declared = {p.get("name") for p in parameters if isinstance(p, dict) and p.get("in") == "path"}
+                for placeholder in path_parameters(ep["path"]):
+                    if placeholder not in declared:
+                        errors.append(f"{q}.path: {{{placeholder}}} has no declared path parameter")
             if ep.get("method") not in HTTP_METHODS:
                 errors.append(f"{q}.method: expected one of {', '.join(HTTP_METHODS)}")
             if not isinstance(ep.get("path"), str) or (ep.get("path") != "" and not ep["path"].startswith("/")):
                 errors.append(f"{q}.path: expected a path starting with '/' (or '' for the router root)")
             if not isinstance(ep.get("name"), str) or not IDENT_RE.match(ep.get("name", "")):
                 errors.append(f"{q}.name: handler name must be a lowercase python identifier")
-            if "response" not in ep:
-                errors.append(f"{q}.response: required (a JSON value the handler returns)")
-            else:
+            if "response" not in ep and ep.get("delegate") is None:
+                errors.append(f"{q}.response: required (a JSON value the handler returns) unless the handler delegates")
+            elif "response" in ep and ep.get("delegate") is not None:
+                errors.append(f"{q}: response and delegate are exclusive")
+            elif "response" in ep:
                 try:
                     json.dumps(ep["response"])
                 except (TypeError, ValueError):
@@ -345,6 +387,16 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
             errors.append(f"evolution.add_modules[{i}]: expected an object")
         elif not isinstance(m.get("name"), str) or not IDENT_RE.match(m.get("name", "")):
             errors.append(f"evolution.add_modules[{i}].name: module name must be a lowercase python identifier")
+        else:
+            for key in ("persistence", "prefix", "dependencies"):
+                if key in m and schema not in ADOPTED_SCHEMAS:
+                    errors.append(f"evolution.add_modules[{i}].{key}: needs schema {EVOLUTION_SCHEMA_16} (new modules of adopted projects)")
+            if "persistence" in m and m["persistence"] not in PERSISTENCE_KINDS:
+                errors.append(f"evolution.add_modules[{i}].persistence: expected one of {', '.join(PERSISTENCE_KINDS)}")
+            if "prefix" in m and (not isinstance(m["prefix"], str) or not m["prefix"].startswith("/") or m["prefix"].endswith("/")):
+                errors.append(f"evolution.add_modules[{i}].prefix: expected a path starting with '/' and not ending with one")
+            if "dependencies" in m and (not isinstance(m["dependencies"], list) or any(not isinstance(d, str) or ":" not in d for d in m["dependencies"])):
+                errors.append(f"evolution.add_modules[{i}].dependencies: expected a list of 'dotted.module:name' from adoption.dependencies.allowed")
     changes = _validate_module_changes(document.get("modify_modules"), errors, str(schema) if isinstance(schema, str) else None)
     if not modules and not changes and not any(e.startswith("evolution.modify_modules") or e.startswith("evolution.add_modules") for e in errors):
         errors.append("evolution: nothing to do (add_modules and modify_modules are both empty)")
@@ -439,6 +491,8 @@ class EvolutionPlan:
     merged: List[str] = field(default_factory=list)  # v2.2: hand-modified files merged three ways (opt-in)
     merges: List[Dict[str, Any]] = field(default_factory=list)  # v2.2: per merged (or refused) file: digests, hunks, conflicts, checks
     merge_bases: Dict[str, str] = field(default_factory=dict)  # v2.2: the authenticated BASE text of each merged file (not serialised)
+    mount: Dict[str, Any] = field(default_factory=dict)  # v2.2 inc. 4: the mount point edit of an adopted project (file, scope, statements, expected routes)
+    generated_modules: Dict[str, Any] = field(default_factory=dict)  # v2.2 inc. 4: modules generated inside an adopted project by this plan
     conflicts: List[Dict[str, str]] = field(default_factory=list)
     public_contracts: Dict[str, Any] = field(default_factory=dict)
     migration: Dict[str, Any] = field(default_factory=dict)
@@ -493,6 +547,8 @@ class EvolutionPlan:
             "blockers": list(self.blockers),
             "files": {"create": list(self.create), "modify": list(self.modify), "unchanged": len(self.unchanged), "kept": list(self.kept), "preserved_manual_changes": list(self.preserved_manual), "merged": list(self.merged)},
             "merges": list(self.merges),
+            "mount": dict(self.mount),
+            "generated_modules": dict(self.generated_modules),
             "conflicts": list(self.conflicts),
             "public_contracts": dict(self.public_contracts),
             "migration": dict(self.migration),
@@ -1211,27 +1267,187 @@ def _endpoint_code(router: str, ep: Dict[str, Any]) -> str:
 
 
 def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionPlan:
+    """Adopted hand-written projects: the anchored transforms of adopted modules (1.0), and, under adoption 1.1,
+    generated modules at the declared mount point, bounded handler extensions and additive persistence."""
     contract = plan.contract
     project = Path(plan.project)
     adoption = model.adoption or {}
     pre = plan.preconditions
-    pre.append(Precondition("adoption_baseline_present", True, f"{len(adoption.get('modules', {}))} adopted module(s)"))
+    modules = adoption.get("modules", {})
+    generated_modules: Dict[str, Any] = dict(adoption.get("generated_modules") or {})
+    mount_record = adoption.get("mount") or {}
+    conventions = adoption.get("new_modules") or {}
+    operations = list(adoption.get("operations") or [])
+    allowed_dependencies = list(((adoption.get("dependencies") or {}).get("allowed")) or [])
+    unmanaged = list(adoption.get("unmanaged") or [])
+    alembic_record = adoption.get("alembic") or {}
+    pre.append(Precondition("adoption_baseline_present", True, f"{len(modules)} adopted module(s), {len(generated_modules)} generated module(s), mount {'declared' if mount_record else 'not declared'}"))
     plan.package = model.package
     plan.style = f"adopted ({model.layout} layout, hand-written)"
-    if contract.add_modules:
-        block("change_supported_for_adopted", "add_modules generates whole modules; an adopted hand-written project is only transformed inside its adopted modules (modify_modules.add_endpoints / add_fields)")
-    modules = adoption.get("modules", {})
     adopted_files: Dict[str, str] = {}
     for data in modules.values():
         adopted_files.update({str(k): str(v) for k, v in (data.get("files") or {}).items()})
+    generated_files: Dict[str, str] = {}
+    for data in generated_modules.values():
+        generated_files.update({str(k): str(v) for k, v in (data.get("files") or {}).items()})
     changed = sorted(rel for rel, sha in adopted_files.items() if model.digests.get(rel) != sha)
     if changed:
         block("adopted_files_unchanged_since_adoption", "manual changes after adoption on: " + ", ".join(changed) + " (adopt again to refresh the baseline before transforming them)")
     sources: Dict[str, str] = {}
     edits: Dict[str, List] = {}
+    new_adoption = json.loads(json.dumps(adoption))
+    pkg = model.package or ""
+    chain: Dict[str, Any] = {}  # the Alembic head the plan chains after, and the revisions it adds, in order
+
+    def read(rel: str) -> str:
+        if rel not in sources:
+            sources[rel] = (project / rel).read_text(encoding="utf-8")
+        return sources[rel]
+
+    # -- new modules at the mount point (adoption 1.1) ----------------------------------------------------------------
+    if contract.add_modules:
+        if not mount_record or not conventions:
+            block("change_supported_for_adopted", "add_modules generates whole modules; an adopted project receives them only at a mount point declared and verified by an adoption 1.1 contract (mount, new_modules); without it the project is only transformed inside its adopted modules")
+        elif "add_module" not in operations or "mount_router" not in operations:
+            block("adoption_operation_allowed", f"adoption.operations does not allow add_module and mount_router (allowed: {operations or 'none'})")
+        elif (project / mount_record["file"]).is_symlink():
+            block("unsafe_path", f"{mount_record['file']} is a symlink")
+        elif model.digests.get(mount_record["file"]) != mount_record.get("file_sha256"):
+            block("mount_file_unchanged_since_adoption", f"{mount_record['file']} changed since the adoption recorded it (expected {str(mount_record.get('file_sha256'))[:12]}, found {str(model.digests.get(mount_record['file']))[:12]}); adopt again to re-verify the mount point")
+    if contract.add_modules and not plan.blockers:
+        from .adopted import MountPoint
+
+        point = MountPoint(file=mount_record["file"], function=mount_record.get("function"), app=mount_record["app"], after_call=mount_record["after_call"], prefix=mount_record.get("prefix", ""), existing=list(mount_record.get("existing_registrations") or []))
+        mount_source = read(point.file)
+        from .transforms import module_names as _module_names
+
+        bound_in_mount = _module_names(ast.parse(mount_source))
+        existing_prefixes = {p for r in model.routers for p in (r.get("effective_prefixes") or [])}
+        alembic_facts_now: Optional[Dict[str, Any]] = None
+        head: Optional[str] = None
+        new_tables: Dict[str, str] = {}
+        mount_steps: List[Dict[str, str]] = []
+        expected_routes: List[Dict[str, Any]] = []
+        for module_doc in contract.add_modules:
+            name = str(module_doc["name"])
+            label = f"add_modules.{name}"
+            persistence = str(module_doc.get("persistence") or "in_memory")
+            prefix = str(module_doc.get("prefix") or (f"{point.prefix}/{name}" if point.prefix else f"/{name}"))
+            dependencies = [str(d) for d in (module_doc.get("dependencies") or [])]
+            previous = generated_modules.get(name)
+            if previous is not None:
+                same = _module_definition_key(previous.get("spec") or {}) == _module_definition_key(module_doc)
+                if same:
+                    plan.changes.append({"kind": "add_module", "target": label, "classification": COMPATIBLE, "detail": "already generated with this definition; no-op"})
+                    continue
+                block("module_is_new", f"{label}: module {name!r} was already generated inside this project with another definition; change it with modify_modules")
+                continue
+            if name in modules:
+                block("module_is_new", f"{label}: {name!r} is an adopted (hand-written) module; it cannot be generated over")
+                continue
+            sibling = [rel for rel in (f"{pkg}/{name}.py", f"{pkg}/{name}/__init__.py") if (project / rel).exists() or rel in model.digests]
+            if sibling or (project / pkg / name).exists():
+                block("file_in_the_way", f"{label}: {sibling or [f'{pkg}/{name}/']} already exist; a generated package of that name would shadow or collide with it")
+                continue
+            if persistence == "postgresql":
+                if "add_persistence" not in operations or not alembic_record:
+                    block("persistence_unsupported_for_adopted", f"{label}: persistence 'postgresql' needs adoption.alembic (the project's own, verified environment) and add_persistence in adoption.operations; without them the module is generated in memory only")
+                    continue
+                if alembic_facts_now is None:
+                    alembic_facts_now, alembic_errors = alembic_facts(project, model, {k: v for k, v in alembic_record.items() if k != "verified"})
+                    for error in alembic_errors:
+                        block("adopted_alembic_resolvable", f"{label}: {error}")
+                    head = alembic_facts_now.get("head")
+                if plan.blockers:
+                    continue
+            if any(":" in d and d not in allowed_dependencies for d in dependencies):
+                block("dependency_allowed", f"{label}: dependencies {sorted(set(dependencies) - set(allowed_dependencies))} are not in adoption.dependencies.allowed")
+                continue
+            spec_fragment, module_spec, errors = module_fragment(pkg, dict(module_doc), persistence)
+            if spec_fragment is None or module_spec is None:
+                for error in errors:
+                    block("module_definition_valid", f"{label}: {error}")
+                continue
+            if prefix in existing_prefixes:
+                block("mount_prefix_conflict", f"{label}: prefix {prefix!r} is already the effective prefix of a router of the project")
+                continue
+            existing_prefixes.add(prefix)
+            router_var = "router" if conventions.get("router_variable", "router") == "router" else f"{name}_router"
+            alias = f"{name}_router"
+            if alias in bound_in_mount:
+                block("mount_symbol_free", f"{label}: {alias!r} is already bound in {point.file}; the import of the new router would collide")
+                continue
+            bound_in_mount[alias] = 1
+            if persistence == "postgresql" and alembic_facts_now is not None:
+                for entity in module_spec.entities:
+                    where = alembic_facts_now.get("tables", {}).get(entity.plural) or new_tables.get(entity.plural)
+                    if where:
+                        block("table_name_free", f"{label}: table {entity.plural!r} already exists ({where})")
+                    new_tables[entity.plural] = f"module {name}"
+                if plan.blockers:
+                    continue
+            revision = revision_id(pkg, name, head) if persistence == "postgresql" and head else None
+            previous_head = head
+            files = render_module(pkg, module_spec, spec_fragment, conventions=conventions, persistence=persistence, prefix=prefix, dependencies=dependencies, alembic=alembic_record if persistence == "postgresql" else None, revision=revision, head=head, source_root=model.source_root)
+            if persistence == "postgresql" and alembic_facts_now is not None and revision:
+                chain.setdefault("head_before", alembic_facts_now.get("head"))
+                chain.setdefault("revisions", [])
+                head = revision  # the next module of this plan chains after this one
+            clash = [rel for rel in files if rel in model.digests or (project / rel).exists()]
+            if clash:
+                block("file_in_the_way", f"{label}: {clash[:3]} already exist; the generated module needs a free location")
+                continue
+            blocked_paths = [rel for rel in files if unmanaged_hit(rel, unmanaged)]
+            if blocked_paths:
+                block("unmanaged_path", f"{label}: {blocked_paths[:3]} fall under adoption.unmanaged")
+                continue
+            module_path = f"{pkg}.{name}.router"
+            import_line = f"from {module_path} import {router_var}" + (f" as {alias}" if router_var != alias else "")
+            statement = f'{point.app}.include_router({alias}, prefix={json.dumps(prefix)})'
+            try:
+                edit = mount_edit(point, mount_source, import_line=import_line, statement=statement)
+            except TransformError as exc:
+                block("mount_edit_preconditions", f"{label}: {exc}")
+                continue
+            mount_source = edit.source
+            mount_steps.append({"module": name, "import": import_line, "statement": statement})
+            routes = []
+            for entity in module_spec.entities:
+                ops = set(entity.operations or OPERATIONS)
+                collection = "" if len(module_spec.entities) == 1 else f"/{entity.plural}"
+                item = f"{collection}/{{{entity.snake}_id}}"
+                for op_name, method, route_path, function in (("create", "POST", collection, f"create_{entity.snake}"), ("get", "GET", item, f"get_{entity.snake}"), ("list", "GET", collection, f"list_{entity.plural}"), ("update", "PATCH", item, f"update_{entity.snake}"), ("delete", "DELETE", item, f"delete_{entity.snake}")):
+                    if op_name in ops:
+                        routes.append({"method": method, "path": route_path, "effective_path": f"{prefix}{route_path}", "function": function})
+            expected_routes.extend(routes)
+            for rel, content in files.items():
+                plan.create.append(rel)
+                plan.files[rel] = content
+                plan.expected[rel] = None
+            plan.generated_modules[name] = {"files": sorted(files), "persistence": persistence, "prefix": prefix, "routes": routes, "dependencies": dependencies, "migration": next((rel for rel in files if "/versions/" in rel), None), "revision": revision, "tables": [e.plural for e in module_spec.entities] if persistence == "postgresql" else []}
+            if revision:
+                chain["revisions"].append(revision)
+            new_adoption.setdefault("generated_modules", {})[name] = {"files": {rel: hashlib.sha256(content.encode("utf-8")).hexdigest() for rel, content in files.items()}, "spec": json.loads(json.dumps(module_doc)), "persistence": persistence, "prefix": prefix, "routes": routes, "mount": {"import": import_line, "statement": statement}, "migration": plan.generated_modules[name]["migration"], "revision": revision, "dependencies": dependencies}
+            if revision:
+                new_adoption.setdefault("migrations", []).append({"file": plan.generated_modules[name]["migration"], "revision": revision, "down_revision": previous_head, "module": name, "tables": [e.plural for e in module_spec.entities]})
+            plan.changes.append({"kind": "add_module", "target": label, "classification": COMPATIBLE, "detail": f"a self-contained module ({persistence}) under {pkg}/{name}/ with its router mounted at {prefix} by one import and one include_router statement in {point.file}; existing handlers untouched"})
+        if mount_steps and not plan.blockers:
+            original = (project / point.file).read_text(encoding="utf-8")
+            plan.modify.append(point.file)
+            plan.files[point.file] = mount_source
+            plan.expected[point.file] = model.digests.get(point.file)
+            plan.diffs[point.file] = "\n".join(difflib.unified_diff(original.splitlines(), mount_source.splitlines(), fromfile=f"a/{point.file}", tofile=f"b/{point.file}", lineterm="", n=2))[:20000]
+            plan.transforms.append({"path": point.file, "inserted": [s["statement"] for s in mount_steps] + [s["import"] for s in mount_steps], "evidence": {"anchor": f"after the last {point.after_call}(...) in {point.function or 'module'}", "steps": mount_steps}, "sha256_before": model.digests.get(point.file), "sha256_after": hashlib.sha256(mount_source.encode("utf-8")).hexdigest()})
+            plan.mount = {"file": point.file, "function": point.function, "app": point.app, "after_call": point.after_call, "steps": mount_steps, "sha256_before": model.digests.get(point.file), "sha256_after": hashlib.sha256(mount_source.encode("utf-8")).hexdigest(), "expected_routes": expected_routes, "region": "one import after the last import, one statement after the last existing registration; every other byte of the file unchanged (proved by the span primitives)"}
+            new_adoption["mount"] = {**mount_record, "file_sha256": plan.mount["sha256_after"]}
+        plan.added_modules = [str(m["name"]) for m in contract.add_modules if str(m["name"]) in plan.generated_modules]
+    # -- adopted modules: the anchored transforms (1.0) and the bounded extensions (1.1) ---------------------------------
     plan.modified_modules = [c.name for c in contract.modify_modules]
     for change in contract.modify_modules:
         data = modules.get(change.name)
+        if data is None and change.name in generated_modules:
+            _plan_generated_module_change(plan, model, block, change, generated_modules[change.name], new_adoption, conventions, allowed_dependencies, unmanaged, alembic_record)
+            continue
         if data is None:
             block("module_is_adopted", f"module {change.name!r} is not adopted (adopted: {', '.join(sorted(modules)) or 'none'}); unadopted files are protected")
             continue
@@ -1240,14 +1456,66 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
             continue
         router_file, router_name = data["router"]["file"], data["router"]["name"]
         module_files = sorted(data.get("files", {}))
+        existing_routes = [(r["method"], r["path"]) for r in model.routes if r.get("file") == router_file] + [(r["method"], r["path"]) for r in data.get("routes", [])]
         for ep in change.add_endpoints:
             label = f"{change.name}: {ep['method']} {ep['path']} ({ep['name']})"
-            rel = router_file
-            if rel not in sources:
-                sources[rel] = (project / rel).read_text(encoding="utf-8")
-            code = _endpoint_code(router_name, ep)
-            edits.setdefault(rel, []).append((label, lambda p, s, code=code, ep=ep, router_name=router_name: insert_function(p, s, code, name=ep["name"], router=router_name, method=ep["method"], route_path=ep["path"])))
-            plan.changes.append({"kind": "add_endpoint", "target": label, "classification": COMPATIBLE, "detail": "a new handler appended to the adopted router file; existing handlers untouched"})
+            shadow = [f"{m} {p or '/'}" for m, p in existing_routes if m == ep["method"] and p != ep["path"] and _shadows(p, ep["path"])]  # an exact duplicate is reported by the transform
+            if shadow:
+                block("route_not_shadowed", f"{label}: an existing handler of the router matches the same requests first ({', '.join(sorted(set(shadow)))}); FastAPI resolves routes in declaration order and the new handler is appended, so it would never be reached; choose a path the existing routes do not capture (the existing code is not reordered)")
+                continue
+            if (ep.get("parameters") or ep.get("dependencies") or ep.get("delegate") or ep.get("response_model")) and "add_endpoint" not in operations and operations:
+                block("adoption_operation_allowed", f"{label}: adoption.operations does not allow add_endpoint")
+                continue
+            steps: List = []
+            dependency_names: List[str] = []
+            for symbol in ep.get("dependencies") or []:
+                if symbol not in allowed_dependencies:
+                    block("dependency_allowed", f"{label}: dependency {symbol!r} is not in adoption.dependencies.allowed")
+                    continue
+                info, error = resolve_symbol(project, pkg, model.source_root, symbol)
+                if error:
+                    block("dependency_resolves", f"{label}: {error}")
+                    continue
+                steps.append(lambda p, s, info=info: ensure_import(p, s, info["module"], [info["name"]]))
+                dependency_names.append(info["name"])
+            delegate_info = None
+            if ep.get("delegate"):
+                info, error = resolve_symbol(project, pkg, model.source_root, ep["delegate"]["callable"])
+                if error or info is None or info["kind"] not in ("function", "async_function"):
+                    block("delegate_resolves", f"{label}: {error or ep['delegate']['callable'] + ' is not a top-level function of the project'}")
+                    continue
+                if info["file"] == router_file:
+                    delegate_info = {"name": info["name"], "arguments": list(ep["delegate"].get("arguments", [])), "is_async": info["is_async"]}
+                else:
+                    steps.append(lambda p, s, info=info: ensure_import(p, s, info["module"], [info["name"]]))
+                    delegate_info = {"name": info["name"], "arguments": list(ep["delegate"].get("arguments", [])), "is_async": info["is_async"]}
+            response_model = ep.get("response_model")
+            if response_model:
+                candidates = [m for m in model.pydantic_models if m["class"] == response_model and m["file"] in module_files]
+                if len(candidates) != 1:
+                    block("response_model_found", f"{label}: pydantic class {response_model!r} must be defined exactly once in the adopted files of module {change.name!r} ({len(candidates)} found)")
+                    continue
+                if candidates[0]["file"] != router_file:
+                    module_of = candidates[0]["file"][:-3].replace("/", ".")
+                    if model.source_root and module_of.startswith(model.source_root + "."):
+                        module_of = module_of[len(model.source_root) + 1 :]
+                    steps.append(lambda p, s, module_of=module_of, cls=response_model: ensure_import(p, s, module_of, [cls]))
+            fastapi_names = []
+            if any(p.get("in") == "query" for p in ep.get("parameters") or []):
+                fastapi_names.append("Query")
+            if dependency_names:
+                fastapi_names.append("Depends")
+            if fastapi_names:
+                steps.append(lambda p, s: ensure_import(p, s, "typing", ["Annotated"]))
+                steps.append(lambda p, s, names=fastapi_names: ensure_import(p, s, "fastapi", names))
+            if plan.blockers:
+                continue
+            code = extended_endpoint_code(router_name, ep, delegate=delegate_info, dependency_names=dependency_names, response_model=response_model)
+            read(router_file)
+            steps.append(lambda p, s, code=code, ep=ep, router_name=router_name: insert_function(p, s, code, name=ep["name"], router=router_name, method=ep["method"], route_path=ep["path"]))
+            edits.setdefault(router_file, []).extend((label, step) for step in steps)
+            detail = "a new handler appended to the adopted router file; existing handlers untouched" + ("; delegates to " + ep["delegate"]["callable"] if ep.get("delegate") else "") + ("; depends on " + ", ".join(ep["dependencies"]) if ep.get("dependencies") else "")
+            plan.changes.append({"kind": "add_endpoint", "target": label, "classification": COMPATIBLE, "detail": detail})
         for f in change.add_fields:
             label = f"{change.name}: {f['class']}.{f['name']}"
             candidates = [m for m in model.pydantic_models if m["class"] == f["class"] and m["file"] in module_files]
@@ -1258,8 +1526,7 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
                 block("field_target_unambiguous", f"{label}: class {f['class']!r} is defined in several adopted files ({', '.join(c['file'] for c in candidates)}); ambiguous target")
                 continue
             rel = candidates[0]["file"]
-            if rel not in sources:
-                sources[rel] = (project / rel).read_text(encoding="utf-8")
+            read(rel)
             annotation = {"str": "str", "int": "int", "float": "float", "bool": "bool"}[f["type"]]
             if f.get("required") is True:
                 line = f"{f['name']}: {annotation} = {json.dumps(f['default']) if f['type'] != 'bool' else repr(bool(f['default']))}"
@@ -1286,28 +1553,215 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
     if plan.blockers:
         plan.state = STATE_BLOCKED
         return plan
-    if not plan.modify:
+    if not plan.modify and not plan.create:
         plan.state = STATE_NOOP
-        pre.append(Precondition("already_applied", True, "nothing to transform"))
+        pre.append(Precondition("already_applied", True, "nothing to transform or generate"))
         return plan
-    new_adoption = json.loads(json.dumps(adoption))
     for change in contract.modify_modules:
+        if change.name not in new_adoption.get("modules", {}):
+            continue
         for rel in new_adoption["modules"][change.name]["files"]:
             if rel in plan.files:
                 new_adoption["modules"][change.name]["files"][rel] = hashlib.sha256(plan.files[rel].encode("utf-8")).hexdigest()
         for ep in change.add_endpoints:
             new_adoption["modules"][change.name].setdefault("routes", []).append({"method": ep["method"], "path": ep["path"], "effective_paths": [], "function": ep["name"]})
-    new_adoption.setdefault("history", []).append({"operation": "evolve", "contract_digest": contract.digest, "modules": plan.modified_modules, "changes": [c["target"] for c in plan.changes]})
+    new_adoption.setdefault("history", []).append({"operation": "evolve", "contract_digest": contract.digest, "modules": plan.modified_modules, "added_modules": list(plan.added_modules), "changes": [c["target"] for c in plan.changes]})
     content = json.dumps(new_adoption, indent=2, sort_keys=True) + "\n"
     plan.modify.append(ADOPTION)
     plan.files[ADOPTION] = content
     plan.expected[ADOPTION] = model.digests.get(ADOPTION)
-    plan.public_contracts = {"routes_added": [{"method": ep["method"], "path": ep["path"], "module": c.name} for c in contract.modify_modules for ep in c.add_endpoints], "routes_removed": [], "routes_changed": [], "declared_contracts_changed": False}
-    plan.migration = {"required": False, "kind": "not applicable (adopted project; no schema managed)"}
+    routes_added = [{"method": ep["method"], "path": ep["path"], "module": c.name} for c in contract.modify_modules for ep in c.add_endpoints]
+    routes_added += [{"method": r["method"], "path": r["effective_path"], "module": name} for name, data in plan.generated_modules.items() for r in data["routes"]]
+    plan.public_contracts = {"routes_added": routes_added, "routes_removed": [], "routes_changed": [], "declared_contracts_changed": False}
+    created_revisions = [rel for rel in plan.create if "/versions/" in rel]
+    if created_revisions:
+        tables = sorted(t for data in plan.generated_modules.values() if data.get("revision") and not data.get("regenerated") for t in data.get("tables", []))
+        columns = sorted(c for data in plan.generated_modules.values() if data.get("regenerated") and data.get("revision") for c in data.get("columns", []))
+        what = ", ".join(x for x in ([f"new tables {tables}"] if tables else []) + ([f"new columns {columns}"] if columns else []))
+        plan.migration = {"required": True, "kind": f"additive, in the project's own Alembic environment ({what} after the current head; no existing revision touched)", "head_before": (chain or {}).get("head_before") or next((data.get("head_before") for data in plan.generated_modules.values() if data.get("head_before")), None), "head_after": created_revisions and (chain or {}).get("revisions", [None])[-1] or next((data.get("revision") for data in plan.generated_modules.values() if data.get("regenerated") and data.get("revision")), None), "files": created_revisions, "tables": tables, "columns": columns, "reversible": True, "downgrade": ("drop_table: the data of the new tables goes with the downgrade" if tables else "") + ("; " if tables and columns else "") + ("drop_column: the data of the new columns goes with the downgrade" if columns else "")}
+        verified = new_adoption.setdefault("alembic", {}).setdefault("verified", {}) if isinstance(new_adoption.get("alembic"), dict) else {}
+        if plan.migration["head_after"]:
+            verified["head"] = plan.migration["head_after"]
+            verified["heads"] = [plan.migration["head_after"]]
+            verified["revisions"] = sorted(set(verified.get("revisions") or []) | {rev for rev in ((chain or {}).get("revisions") or []) + [plan.migration["head_after"]] if rev})
+        content = json.dumps(new_adoption, indent=2, sort_keys=True) + "\n"
+        plan.files[ADOPTION] = content
+    else:
+        plan.migration = {"required": False, "kind": "not applicable (adopted project; no schema managed)" if not plan.generated_modules else "not required (in-memory modules)"}
     unadopted = sorted(rel for rel, status in model.ownership.items() if status == "unadopted")
     plan.risks.append(f"{len(unadopted)} unadopted file(s) are protected and will not be written")
-    plan.tests_required = ["the project's own suite, through the trust model (authorised by the operator)"]
+    if plan.mount:
+        plan.risks.append(f"{plan.mount['file']}: receives {len(plan.mount['steps'])} import(s) and {len(plan.mount['steps'])} include_router statement(s) after the last existing registration ({plan.mount['function'] or 'module level'}); every other byte unchanged; the routes of the new module(s) are checked in the copy at their effective paths")
+    if plan.migration.get("required"):
+        plan.risks.append("the new revision creates tables after the project's current head; run `alembic upgrade head` with the project's own environment; the downgrade drops the new tables and their data")
+    for name, data in plan.generated_modules.items():
+        if data["persistence"] != "postgresql":
+            plan.risks.append(f"module {name}: in-memory repository (one store per process, empty after a restart); declare persistence postgresql with a verified Alembic environment for durable storage")
+    plan.tests_required = ["the project's own suite, through the trust model (authorised by the operator)"] + [f"tests/test_{name}.py" for name in plan.generated_modules]
     return plan
+
+
+def _module_definition_key(doc: Dict[str, Any]) -> str:
+    """The canonical form of a module definition: defaults made explicit (persistence, operations, required), so a
+    definition the tool regenerated (operations spelled out) compares equal to the one the operator wrote."""
+    out = json.loads(json.dumps(doc))
+    out["persistence"] = out.get("persistence") or "in_memory"
+    for entity in out.get("entities", []) or []:
+        if isinstance(entity, dict):
+            ops = entity.get("operations") or list(OPERATIONS)
+            entity["operations"] = sorted(set(ops), key=OPERATIONS.index)
+            for f in entity.get("fields", []) or []:
+                if isinstance(f, dict):
+                    f["required"] = bool(f.get("required", True))
+    return json.dumps(out, sort_keys=True)
+
+
+_CONVERTER_PATTERNS = {"int": r"[0-9]+", "float": r"[0-9]+(\.[0-9]+)?", "uuid": r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "str": r"[^/]+"}
+
+
+def _shadows(existing: str, new: str) -> bool:
+    """Whether a request for ``new`` (literal segments, or ``{param}`` ones) is captured by the earlier route
+    ``existing``, as Starlette matches: segment by segment, an earlier ``{param}`` captures any literal (a converter
+    such as ``{id:int}`` only what its pattern accepts), ``{param:path}`` captures the rest."""
+    old_parts, new_parts = [x for x in existing.strip("/").split("/") if x], [x for x in new.strip("/").split("/") if x]
+    for index, old_seg in enumerate(old_parts):
+        old_param = old_seg.startswith("{") and old_seg.endswith("}")
+        converter = old_seg[1:-1].split(":", 1)[1] if old_param and ":" in old_seg else None
+        if old_param and converter == "path":
+            return index < len(new_parts)
+        if index >= len(new_parts):
+            return False
+        new_seg = new_parts[index]
+        new_param = new_seg.startswith("{") and new_seg.endswith("}")
+        if old_param:
+            if new_param or converter is None or converter not in _CONVERTER_PATTERNS:
+                continue
+            if re.fullmatch(_CONVERTER_PATTERNS[converter], new_seg):
+                continue
+            return False
+        if new_param or old_seg != new_seg:
+            return False
+    return len(old_parts) == len(new_parts)
+
+
+def _plan_generated_module_change(plan: EvolutionPlan, model: ProjectModel, block, change: ModuleChange, record: Dict[str, Any], new_adoption: Dict[str, Any], conventions: Dict[str, Any], allowed_dependencies: List[str], unmanaged: List[str], alembic_record: Dict[str, Any]) -> None:
+    """A module the tool generated inside an adopted project evolves like a generated module: optional or defaulted
+    fields and new operations, the files regenerated from the recorded definition; its files must be as recorded."""
+    project = Path(plan.project)
+    pkg = model.package or ""
+    name = change.name
+    label = f"modify_modules.{name}"
+    if change.add_endpoints or change.add_fields or change.add_depends_on:
+        block("change_supported_for_generated", f"{label}: a generated module changes through entities[].add_fields and add_operations (add_endpoints, add_fields with a class and add_depends_on are for adopted modules)")
+        return
+    files_recorded = {str(k): str(v) for k, v in (record.get("files") or {}).items()}
+    drift = sorted(rel for rel, sha in files_recorded.items() if model.digests.get(rel) != sha)
+    if drift:
+        block("generated_module_files_unchanged", f"{label}: {drift[:3]} changed since the tool generated them; the generated module is regenerated from its definition, so a manual change there would be lost (restore the files or keep them as they are)")
+        return
+    spec_doc = json.loads(json.dumps(record.get("spec") or {}))
+    entities = {e["name"]: e for e in spec_doc.get("entities", []) if isinstance(e, dict)}
+    for ech in change.entities:
+        entity = entities.get(ech["name"])
+        if entity is None:
+            block("entity_exists", f"{label}: entity {ech['name']!r} is not part of the generated module")
+            return
+        for key in ech:
+            if key not in ("name", "add_fields", "add_operations"):
+                block("change_supported_for_adopted", f"{label}: {key} is not supported on a generated module of an adopted project (fields and operations only)")
+                return
+        names_now = {f.get("name") for f in entity.get("fields", [])}
+        for f in ech.get("add_fields", []) or []:
+            if f.get("name") in names_now:
+                plan.changes.append({"kind": "add_field", "target": f"{label}.{ech['name']}.{f.get('name')}", "classification": COMPATIBLE, "detail": "already present; no-op"})
+                continue
+            required = bool(f.get("required", True))
+            has_default = "default" in f and f.get("default") is not None
+            if required and not has_default:
+                block("field_compatible", f"{label}.{ech['name']}.{f.get('name')}: a required field without a default would break existing callers and rows; declare it optional or give it a default")
+                return
+            entity.setdefault("fields", []).append(json.loads(json.dumps(f)))
+            plan.changes.append({"kind": "add_field", "target": f"{label}.{ech['name']}.{f.get('name')}", "classification": COMPATIBLE, "detail": "optional or defaulted field added to the generated module" + ("; the table gets a nullable or defaulted column through a new additive revision" if record.get("persistence") == "postgresql" else "")})
+        current_ops = entity.get("operations") or list(OPERATIONS)
+        for op in ech.get("add_operations", []) or []:
+            if op in current_ops:
+                plan.changes.append({"kind": "add_operation", "target": f"{label}.{ech['name']}:{op}", "classification": COMPATIBLE, "detail": "already present; no-op"})
+                continue
+            current_ops.append(op)
+            plan.changes.append({"kind": "add_operation", "target": f"{label}.{ech['name']}:{op}", "classification": COMPATIBLE, "detail": "new handler of the generated module"})
+        entity["operations"] = sorted(current_ops, key=OPERATIONS.index)
+    persistence = str(record.get("persistence") or "in_memory")
+    spec_fragment, module_spec, errors = module_fragment(pkg, spec_doc, persistence)
+    if spec_fragment is None or module_spec is None:
+        for error in errors:
+            block("module_definition_valid", f"{label}: {error}")
+        return
+    added_columns: List[Tuple[str, Any]] = []
+    for ech in change.entities:
+        for f in ech.get("add_fields", []) or []:
+            entity = next((e for e in module_spec.entities if e.name == ech["name"]), None)
+            field_spec = next((x for x in entity.fields if x.name == f.get("name")), None) if entity else None
+            if entity is not None and field_spec is not None and f.get("name") not in {x.get("name") for x in (record.get("spec") or {}).get("entities", [{}])[0].get("fields", [])}:
+                added_columns.append((entity.plural, field_spec))
+    revision = None
+    head = None
+    if persistence == "postgresql" and added_columns:
+        facts, alembic_errors = alembic_facts(project, model, {k: v for k, v in alembic_record.items() if k != "verified"})
+        for error in alembic_errors:
+            block("adopted_alembic_resolvable", f"{label}: {error}")
+        if alembic_errors:
+            return
+        head = facts.get("head")
+        revision = revision_id(pkg, f"{name}+{','.join(f'{t}.{c.name}' for t, c in added_columns)}", head or "")
+    files = render_module(pkg, module_spec, spec_fragment, conventions=conventions, persistence=persistence, prefix=str(record.get("prefix") or f"/{name}"), dependencies=list(record.get("dependencies") or []), alembic=alembic_record if persistence == "postgresql" else None, revision=None, head=None, source_root=model.source_root)
+    if revision and head and alembic_record.get("script_location"):
+        from .adopted import _column_sql
+
+        lines = [f'"""Add columns to the {name} module (generated by FastAPI Architect inside an adopted project).', "", "Additive: nullable or defaulted columns only, after the current head. Downgrade drops them, with their data.", "", f"Revision ID: {revision}", f"Revises: {head}", '"""', "", "import sqlalchemy as sa", "from alembic import op", "", f'revision = "{revision}"', f'down_revision = "{head}"', "branch_labels = None", "depends_on = None", "", "", "def upgrade() -> None:"]
+        for table, column in added_columns:
+            lines.append(f'    op.add_column("{table}", {_column_sql(column)})')
+        lines += ["", "", "def downgrade() -> None:"]
+        for table, column in reversed(added_columns):
+            lines.append(f'    op.drop_column("{table}", "{column.name}")')
+        rel = f"{alembic_record['script_location']}/versions/{revision}_{name}_columns.py"
+        files[rel] = "\n".join(lines) + "\n"
+    for rel, content in files.items():
+        if rel in files_recorded:
+            if hashlib.sha256(content.encode("utf-8")).hexdigest() == files_recorded[rel]:
+                plan.unchanged.append(rel)
+                continue
+            plan.modify.append(rel)
+            plan.files[rel] = content
+            plan.expected[rel] = files_recorded[rel]
+            plan.diffs[rel] = "\n".join(difflib.unified_diff((project / rel).read_text(encoding="utf-8").splitlines(), content.splitlines(), fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm="", n=2))[:20000]
+        else:
+            if rel in model.digests or (project / rel).exists():
+                block("file_in_the_way", f"{label}: {rel} already exists")
+                return
+            if unmanaged_hit(rel, unmanaged):
+                block("unmanaged_path", f"{label}: {rel} falls under adoption.unmanaged")
+                return
+            plan.create.append(rel)
+            plan.files[rel] = content
+            plan.expected[rel] = None
+    entry = new_adoption.setdefault("generated_modules", {})[name]
+    entry["files"] = {rel: hashlib.sha256(content.encode("utf-8")).hexdigest() for rel, content in files.items()}
+    entry["spec"] = spec_doc
+    entry["routes"] = [{"method": m, "path": p, "effective_path": f"{record.get('prefix')}{p}", "function": fn} for e in module_spec.entities for m, p, fn in _generated_routes(e, len(module_spec.entities) == 1)]
+    if revision:
+        new_adoption.setdefault("migrations", []).append({"file": rel, "revision": revision, "down_revision": head, "module": name, "columns": [f"{t}.{c.name}" for t, c in added_columns]})
+    plan.generated_modules[name] = {"files": sorted(files), "persistence": persistence, "prefix": record.get("prefix"), "routes": entry["routes"], "regenerated": True, "revision": revision, "head_before": head, "columns": [f"{t}.{c.name}" for t, c in added_columns] if revision else []}
+
+
+def _generated_routes(entity, single: bool) -> List[Tuple[str, str, str]]:
+    ops = set(entity.operations or OPERATIONS)
+    collection = "" if single else f"/{entity.plural}"
+    item = f"{collection}/{{{entity.snake}_id}}"
+    out = []
+    for op_name, method, route_path, function in (("create", "POST", collection, f"create_{entity.snake}"), ("get", "GET", item, f"get_{entity.snake}"), ("list", "GET", collection, f"list_{entity.plural}"), ("update", "PATCH", item, f"update_{entity.snake}"), ("delete", "DELETE", item, f"delete_{entity.snake}")):
+        if op_name in ops:
+            out.append((method, route_path, function))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1338,7 +1792,18 @@ def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjecto
     manifest_paths = [p for p in plan.files if p in (MANIFEST, ADOPTION)]
     steps: List[Dict[str, Any]] = []
     if plan.kind == "adopted":
-        steps.append({"kind": "transform", "paths": [t["path"] for t in plan.transforms], "evidence": {t["path"]: {"inserted": t["inserted"], "sha256_before": t["sha256_before"], "sha256_after": t["sha256_after"]} for t in plan.transforms}})
+        generated = sorted(rel for data in plan.generated_modules.values() for rel in data.get("files", []) if rel in plan.files)
+        if generated:
+            steps.append({"kind": "generate", "paths": generated, "evidence": {"modules": {name: {"files": [rel for rel in data.get("files", []) if rel in plan.files], "persistence": data.get("persistence"), "prefix": data.get("prefix"), "revision": data.get("revision"), "regenerated": bool(data.get("regenerated"))} for name, data in plan.generated_modules.items()}}})
+        if plan.mount:
+            rel = plan.mount["file"]
+            actual = hashlib.sha256(plan.files[rel].encode("utf-8")).hexdigest() if rel in plan.files else None
+            if actual != plan.mount.get("sha256_after"):
+                raise WriteError(f"mount edit of {rel} changed after the plan was computed (planned {str(plan.mount.get('sha256_after'))[:12]}, found {str(actual)[:12]}): plan again")
+            steps.append({"kind": "mount", "paths": [rel], "evidence": {rel: {"function": plan.mount.get("function"), "app": plan.mount.get("app"), "steps": plan.mount.get("steps"), "sha256_before": plan.mount.get("sha256_before"), "sha256_after": plan.mount.get("sha256_after")}}})
+        transformed = [t for t in plan.transforms if not plan.mount or t["path"] != plan.mount["file"]]
+        if transformed or not steps:
+            steps.append({"kind": "transform", "paths": [t["path"] for t in transformed], "evidence": {t["path"]: {"inserted": t["inserted"], "sha256_before": t["sha256_before"], "sha256_after": t["sha256_after"]} for t in transformed}})
     else:
         regenerated = [p for p in sorted(plan.files) if p not in manifest_paths and p not in plan.merged]
         steps.append({"kind": "regenerate", "paths": regenerated, "evidence": {"create": list(plan.create), "modify": [p for p in plan.modify if p not in manifest_paths and p not in plan.merged]}})
@@ -1388,6 +1853,15 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
         result["routes"] = {"before": len(before_routes), "after": len(after_routes), "missing": [f"{k[1]} {k[2]} ({k[0]})" for k in missing], "changed": changed, "added": sorted(f"{k[1]} {k[2]} ({k[0]})" for k in after_routes if k not in before_routes)}
         if (missing or changed) and "existing_routes_unchanged" in plan.contract.invariants:
             result["reasons"].append("existing routes changed or disappeared: " + ", ".join(result["routes"]["missing"] + changed))
+        if plan.mount:
+            unresolved = []
+            for expected in plan.mount.get("expected_routes", []):
+                found = [v for (fn, method, _p), v in after_routes.items() if fn == expected["function"] and method == expected["method"] and expected["effective_path"] in (v.get("effective_paths") or [])]
+                if not found:
+                    unresolved.append(f"{expected['method']} {expected['effective_path']} ({expected['function']})")
+            result["mount"] = {"file": plan.mount["file"], "expected_routes": len(plan.mount.get("expected_routes", [])), "unresolved": unresolved}
+            if unresolved:
+                result["reasons"].append("routes of the mounted module(s) did not resolve at their effective paths in the copy: " + ", ".join(unresolved[:5]))
         before_digest = dict(plan.discovery.digests) if plan.discovery else {}
         after_digest: Dict[str, str] = {}
         for rel in before_digest:
