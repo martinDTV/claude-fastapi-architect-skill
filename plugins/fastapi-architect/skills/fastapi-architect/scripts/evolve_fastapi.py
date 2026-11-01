@@ -112,6 +112,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         p.add_argument("--authorize-contract", action="store_true", help="authorise a contract phase (NOT NULL after a complete backfill): a human decision, never the continuation of a backfill; needs authorization.contract in the contract and fresh evidence")
         p.add_argument("--evidence", metavar="FILE", help="migration evidence written by `python -m <pkg>.ops.backfill verify` (overrides authorization.contract.evidence)")
         p.add_argument("--confirm-irreversible", metavar="PHRASE", default=None, help="the irreversible confirmation of a destructive contract (dropping the old column of a retired rename): the exact phrase the plan prints, `drop <table>.<column>`; distinct from --authorize-contract, never implied by it")
+        p.add_argument("--allow-merge", action="store_true", help="allow the three-way merge of the hand-modified files the contract names under files.merge (both halves of the opt-in are required; without the flag such a file is a conflict, as always)")
         add_container_arguments(p)
     for p in (d, pr, ad, rc, ops, sub.choices["plan"], sub.choices["apply"]):
         p.add_argument("--output", metavar="FILE", help="write the JSON report to FILE")
@@ -239,6 +240,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         authorize_contract=bool(getattr(args, "authorize_contract", False)),
         evidence=getattr(args, "evidence", None),
         confirm_irreversible=getattr(args, "confirm_irreversible", None),
+        allow_merge=bool(getattr(args, "allow_merge", False)),
     )
     try:
         report = run_evolution(args.contract, options)

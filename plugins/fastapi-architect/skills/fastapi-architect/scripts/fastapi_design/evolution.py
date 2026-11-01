@@ -68,6 +68,7 @@ from .generator import MANIFEST, GenerationError, WriteError, build_manifest, sa
 from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
 from .locking import LockHeld
 from .locking import inspect as inspect_lock
+from .merging import plan_merge, validate_merge_authorizations, verify_merged_file
 from .migrations import (
     PROTECTED_COLUMNS,
     backfill_params,
@@ -85,14 +86,17 @@ from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
 from .verify import run_generated_tests
 
-EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.4"  # 1.4 (v2.2 inc. 2): retire_fields, contract_fields on a retired rename (destructive), authorization.destructive  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
-EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3", "fastapi-architect/evolution/1.4")
+EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.5"  # 1.5 (v2.2 inc. 3): files.merge (opt-in three-way merge of hand-modified generated files)  # 1.4 (v2.2 inc. 2): retire_fields, contract_fields on a retired rename (destructive), authorization.destructive  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
+EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3", "fastapi-architect/evolution/1.4", "fastapi-architect/evolution/1.5")
 EVOLUTION_SCHEMA_12 = "fastapi-architect/evolution/1.2"
 EVOLUTION_SCHEMA_13 = "fastapi-architect/evolution/1.3"
 EVOLUTION_SCHEMA_14 = "fastapi-architect/evolution/1.4"
-PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14)
-RENAME_SCHEMAS = (EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14)
-REPORT_SCHEMA = "evolution_report/1.5"  # 1.5 (v2.2 inc. 2): plan.migration.retires, destructive contract entries, the retire phase, contract_authorization.confirm_irreversible (additive)  # 1.4 (v2.2): plan.migration.renames and the transition phase  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
+EVOLUTION_SCHEMA_15 = "fastapi-architect/evolution/1.5"
+PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
+RENAME_SCHEMAS = (EVOLUTION_SCHEMA_13, EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
+RETIRE_SCHEMAS = (EVOLUTION_SCHEMA_14, EVOLUTION_SCHEMA_15)
+MERGE_SCHEMAS = (EVOLUTION_SCHEMA_15,)
+REPORT_SCHEMA = "evolution_report/1.6"  # 1.6 (v2.2 inc. 3): plan.merges, plan.files.merged, verification.merges, contract_authorization.allow_merge (additive)  # 1.5 (v2.2 inc. 2): plan.migration.retires, destructive contract entries, the retire phase, contract_authorization.confirm_irreversible (additive)  # 1.4 (v2.2): plan.migration.renames and the transition phase  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
 DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "src/{pkg}/core/db.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
@@ -145,6 +149,7 @@ class EvolutionContract:
     invariants: List[str]
     allow_modify: Optional[List[str]]
     preserve: List[str]
+    merge: List[Dict[str, Any]] = field(default_factory=list)  # 1.5: files.merge authorisations, validated
     source: Optional[str] = None
     document: Dict[str, Any] = field(default_factory=dict)
     authorization: Dict[str, Any] = field(default_factory=dict)  # 1.2: {contract: {declared_by, evidence, max_evidence_age_hours}}
@@ -154,7 +159,7 @@ class EvolutionContract:
         return canonical_digest(self.document)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"schema": self.schema, "project_path": self.project_path, "package": self.package, "expected_spec_digest": self.expected_spec_digest, "baseline_contract": self.baseline_contract, "add_modules": [m.get("name") for m in self.add_modules], "modify_modules": [m.to_dict() for m in self.modify_modules], "invariants": list(self.invariants), "allow_modify": self.allow_modify, "preserve": list(self.preserve), "authorization": dict(self.authorization), "digest": self.digest}
+        return {"schema": self.schema, "project_path": self.project_path, "package": self.package, "expected_spec_digest": self.expected_spec_digest, "baseline_contract": self.baseline_contract, "add_modules": [m.get("name") for m in self.add_modules], "modify_modules": [m.to_dict() for m in self.modify_modules], "invariants": list(self.invariants), "merge": list(self.merge), "allow_modify": self.allow_modify, "preserve": list(self.preserve), "authorization": dict(self.authorization), "digest": self.digest}
 
 
 def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] = None) -> List[ModuleChange]:
@@ -205,7 +210,7 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
                     if schema not in RENAME_SCHEMAS:
                         errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_13} (renames as expand_contract, in transition)")
                 elif key == "retire_fields":
-                    if schema != EVOLUTION_SCHEMA_14:
+                    if schema not in RETIRE_SCHEMAS:
                         errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_14} (the truth of a rename moves to the new column)")
                 elif key not in ("name", "add_fields", "add_operations") and not str(key).startswith("x-"):
                     errors.append(f"{q}.{key}: unknown property")
@@ -227,7 +232,7 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
             if "rename_fields" in e and schema in RENAME_SCHEMAS:
                 e["rename_fields"], rename_errors = validate_rename_fields(e["rename_fields"], f"{q}.rename_fields")
                 errors.extend(rename_errors)
-            if "retire_fields" in e and schema == EVOLUTION_SCHEMA_14:
+            if "retire_fields" in e and schema in RETIRE_SCHEMAS:
                 e["retire_fields"], retire_errors = validate_contract_fields(e["retire_fields"], f"{q}.retire_fields")
                 errors.extend(retire_errors)
             if "add_operations" in e:
@@ -310,7 +315,7 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
         errors.append(f"evolution.authorization: needs schema {EVOLUTION_SCHEMA_12}")
     authorization, auth_errors = validate_authorization(document.get("authorization")) if schema in PHASED_SCHEMAS else ({}, [])
     errors.extend(auth_errors)
-    if isinstance(document.get("authorization"), dict) and "destructive" in document["authorization"] and schema != EVOLUTION_SCHEMA_14:
+    if isinstance(document.get("authorization"), dict) and "destructive" in document["authorization"] and schema not in RETIRE_SCHEMAS:
         errors.append(f"evolution.authorization.destructive: needs schema {EVOLUTION_SCHEMA_14}")
     project = document.get("project")
     if not isinstance(project, dict):
@@ -351,10 +356,10 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
     allow_modify: Optional[List[str]] = None
     preserve: List[str] = []
     if not isinstance(files, dict):
-        errors.append("evolution.files: expected an object with allow_modify / preserve")
+        errors.append("evolution.files: expected an object with allow_modify / preserve / merge")
     else:
         for key in files:
-            if key not in ("allow_modify", "preserve") and not str(key).startswith("x-"):
+            if key not in ("allow_modify", "preserve", "merge") and not str(key).startswith("x-"):
                 errors.append(f"evolution.files.{key}: unknown property")
         for key in ("allow_modify", "preserve"):
             value = files.get(key)
@@ -370,9 +375,16 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
                 allow_modify = list(value)
             else:
                 preserve = list(value)
+    merge: List[Dict[str, Any]] = []
+    if isinstance(files, dict) and "merge" in files:
+        if schema not in MERGE_SCHEMAS:
+            errors.append(f"evolution.files.merge: needs schema {EVOLUTION_SCHEMA_15} (opt-in three-way merge of hand-modified generated files)")
+        else:
+            merge, merge_errors = validate_merge_authorizations(files.get("merge"), preserve=preserve)
+            errors.extend(merge_errors)
     if errors:
         return None, sorted(set(errors))
-    return EvolutionContract(schema=str(schema), project_path=str(path), package=package, expected_spec_digest=expected, baseline_contract=baseline, add_modules=modules, modify_modules=changes, invariants=list(invariants), allow_modify=allow_modify, preserve=preserve, source=source, document=json.loads(json.dumps(document)), authorization=authorization), []
+    return EvolutionContract(schema=str(schema), project_path=str(path), package=package, expected_spec_digest=expected, baseline_contract=baseline, add_modules=modules, modify_modules=changes, invariants=list(invariants), allow_modify=allow_modify, preserve=preserve, merge=merge, source=source, document=json.loads(json.dumps(document)), authorization=authorization), []
 
 
 def load_evolution(path: str) -> EvolutionContract:
@@ -424,6 +436,9 @@ class EvolutionPlan:
     unchanged: List[str] = field(default_factory=list)
     kept: List[str] = field(default_factory=list)
     preserved_manual: List[str] = field(default_factory=list)
+    merged: List[str] = field(default_factory=list)  # v2.2: hand-modified files merged three ways (opt-in)
+    merges: List[Dict[str, Any]] = field(default_factory=list)  # v2.2: per merged (or refused) file: digests, hunks, conflicts, checks
+    merge_bases: Dict[str, str] = field(default_factory=dict)  # v2.2: the authenticated BASE text of each merged file (not serialised)
     conflicts: List[Dict[str, str]] = field(default_factory=list)
     public_contracts: Dict[str, Any] = field(default_factory=dict)
     migration: Dict[str, Any] = field(default_factory=dict)
@@ -476,7 +491,8 @@ class EvolutionPlan:
             "changes": list(self.changes),
             "preconditions": [p.to_dict() for p in self.preconditions],
             "blockers": list(self.blockers),
-            "files": {"create": list(self.create), "modify": list(self.modify), "unchanged": len(self.unchanged), "kept": list(self.kept), "preserved_manual_changes": list(self.preserved_manual)},
+            "files": {"create": list(self.create), "modify": list(self.modify), "unchanged": len(self.unchanged), "kept": list(self.kept), "preserved_manual_changes": list(self.preserved_manual), "merged": list(self.merged)},
+            "merges": list(self.merges),
             "conflicts": list(self.conflicts),
             "public_contracts": dict(self.public_contracts),
             "migration": dict(self.migration),
@@ -487,6 +503,12 @@ class EvolutionPlan:
             "transforms": list(self.transforms),
             "phased": {"new": list(self.phased_new), "indexes": list(self.indexes_new), "contracting": list(self.contracting), "retiring": list(self.retiring), "dropping": list(self.dropping)},
         }
+
+
+def _read_exact(path: Path) -> str:
+    """The file's text with its line endings as they are (no universal-newline translation)."""
+    with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+        return handle.read()
 
 
 def _glob_any(rel: str, globs: List[str]) -> bool:
@@ -725,7 +747,7 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
     return doc
 
 
-def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION, authorize_contract: bool = False, evidence_path: Optional[str] = None, confirm_irreversible: Optional[str] = None) -> EvolutionPlan:
+def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[str] = None, tool_version: str = TOOL_VERSION, authorize_contract: bool = False, evidence_path: Optional[str] = None, confirm_irreversible: Optional[str] = None, allow_merge: bool = False) -> EvolutionPlan:
     """Compute the plan without writing anything."""
     raw = _resolve_project(contract)
     plan = EvolutionPlan(state=STATE_PLANNED, project=str(raw), contract=contract)
@@ -1008,7 +1030,7 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     new_bp = build(evolved, rec, lineage, phases)
     new_files = dict(new_bp.files)
     history = list(model.manifest.get("history") or [{"operation": "generate", "spec_digest": baseline.digest, "modules": existing}])
-    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new if x.get("kind") != KIND_RENAME], "renamed": [x["op_id"] for x in plan.phased_new if x.get("kind") == KIND_RENAME], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting], "retired": [x["op_id"] for x in plan.retiring], "dropped": [x["op_id"] for x in plan.dropping]}})
+    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new if x.get("kind") != KIND_RENAME], "renamed": [x["op_id"] for x in plan.phased_new if x.get("kind") == KIND_RENAME], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting], "retired": [x["op_id"] for x in plan.retiring], "dropped": [x["op_id"] for x in plan.dropping]}, "merged": []})
     manifest = build_manifest(evolved, new_bp, tool_version, history=history)
     if lineage:
         for rel in lineage.files:
@@ -1054,6 +1076,32 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         if not _glob_any(rel, allow):
             plan.conflicts.append({"path": rel, "kind": "not_allowed_to_modify", "detail": "the evolution needs to regenerate it but it is not an allowed integration point (files.allow_modify)"})
             continue
+        authorization = next((m for m in contract.merge if m["path"] == rel), None)
+        if authorization is not None and status in ("unmanaged", "unknown"):
+            plan.conflicts.append({"path": rel, "kind": "merge_base_unknown", "detail": "the contract authorises a merge of this file but the manifest records no generated base for it: there is nothing authentic to merge against"})
+            continue
+        if authorization is not None and (project / rel).is_symlink():
+            plan.conflicts.append({"path": rel, "kind": "unsafe_path", "detail": "the file authorised for merge is a symlink; the tool never follows links inside a project"})
+            continue
+        if status == "managed_modified" and authorization is not None:
+            if not allow_merge:
+                plan.conflicts.append({"path": rel, "kind": "merge_not_authorized_on_command_line", "detail": "the contract authorises a three-way merge of this file (files.merge) but --allow-merge was not given: the merge is planned only when both halves of the opt-in are present"})
+                continue
+            local_text = _read_exact(project / rel)
+            outcome = plan_merge(rel, base=old_files[rel], recorded_base_digest=(model.manifest.get("files") or {}).get(rel), local=local_text, new=content, authorization=authorization, tool_version=tool_version)
+            plan.merges.append(outcome.record())
+            if not outcome.clean:
+                for conflict in outcome.conflicts:
+                    plan.conflicts.append({"path": rel, "kind": conflict["kind"], "detail": conflict["detail"]})
+                continue
+            assert outcome.text is not None
+            plan.merge_bases[rel] = old_files[rel]
+            plan.modify.append(rel)
+            plan.merged.append(rel)
+            plan.files[rel] = outcome.text
+            plan.expected[rel] = on_disk
+            plan.diffs[rel] = str(outcome.evidence.get("diff_local_to_result") or "")
+            continue
         if status == "managed_modified":
             plan.conflicts.append({"path": rel, "kind": "manual_change_on_integration_point", "detail": "generated file edited by hand; regenerating it would destroy the manual change (merge it into the contract or restore the file first)"})
             continue
@@ -1073,6 +1121,10 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     for rel, status in sorted(model.ownership.items()):
         if status == "managed_modified" and rel not in plan.preserved_manual and rel not in plan.modify and rel not in [c["path"] for c in plan.conflicts]:
             plan.preserved_manual.append(rel)
+    if plan.merged:  # the manifest's history names the files merged by this evolution (known only after the file loop)
+        history[-1]["merged"] = sorted(plan.merged)
+        manifest["history"] = history
+        new_files[MANIFEST] = plan.files[MANIFEST] = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     for c in plan.conflicts:
         plan.blockers.append(f"{c['kind']}: {c['path']}")
 
@@ -1277,6 +1329,7 @@ class EvolveOptions:
     authorize_contract: bool = False  # v2.1: the explicit human authorization a contract phase needs (--authorize-contract)
     evidence: Optional[str] = None  # v2.1: migration evidence file (overrides authorization.contract.evidence)
     confirm_irreversible: Optional[str] = None  # v2.2: the exact phrase a destructive contract prints (`drop <table>.<column>`); distinct from authorize_contract
+    allow_merge: bool = False  # v2.2 inc. 3: the command-line half of the opt-in merge (the contract's files.merge is the other half)
 
 
 def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjector] = None, *, durable: bool = True) -> Operation:
@@ -1287,8 +1340,19 @@ def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjecto
     if plan.kind == "adopted":
         steps.append({"kind": "transform", "paths": [t["path"] for t in plan.transforms], "evidence": {t["path"]: {"inserted": t["inserted"], "sha256_before": t["sha256_before"], "sha256_after": t["sha256_after"]} for t in plan.transforms}})
     else:
-        regenerated = [p for p in sorted(plan.files) if p not in manifest_paths]
-        steps.append({"kind": "regenerate", "paths": regenerated, "evidence": {"create": list(plan.create), "modify": [p for p in plan.modify if p not in manifest_paths]}})
+        regenerated = [p for p in sorted(plan.files) if p not in manifest_paths and p not in plan.merged]
+        steps.append({"kind": "regenerate", "paths": regenerated, "evidence": {"create": list(plan.create), "modify": [p for p in plan.modify if p not in manifest_paths and p not in plan.merged]}})
+        if plan.merged:
+            evidence: Dict[str, Any] = {}
+            for record in plan.merges:
+                rel = record["path"]
+                if rel not in plan.merged:
+                    continue
+                actual = hashlib.sha256(plan.files[rel].encode("utf-8")).hexdigest()
+                if actual != record.get("result_sha256"):
+                    raise WriteError(f"merge result of {rel} changed after the plan was computed (planned {str(record.get('result_sha256'))[:12]}, found {actual[:12]}): plan again")
+                evidence[rel] = {"base_sha256": (record.get("base") or {}).get("sha256_recorded"), "local_sha256": record.get("local_sha256"), "new_sha256": record.get("new_sha256"), "result_sha256": record.get("result_sha256")}
+            steps.append({"kind": "merge", "paths": list(plan.merged), "evidence": evidence})
     steps.append({"kind": "manifest", "paths": manifest_paths})
     return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable, steps=steps)
 
@@ -1300,6 +1364,9 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
     workspace = Workspace.create(str(project))
     result: Dict[str, Any] = {"copy": str(workspace.project), "state": STATE_INCONCLUSIVE, "reasons": []}
     try:
+        copied_lock = workspace.project / ".fastapi-architect" / "ops" / "LOCK"
+        if copied_lock.is_file():
+            copied_lock.unlink()  # the copy is private to this verification; the project's lock does not travel with it
         op = _write_plan(workspace.project, plan, durable=False)  # a throwaway copy: no fsync
         result["written_in_copy"] = [f.path for f in op.files]
         before_report = audit_project(str(project))
@@ -1331,6 +1398,20 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
         result["protected_files"] = {"checked": len(before_digest), "unexpectedly_changed": touched, "preserved_globs": list(plan.contract.preserve)}
         if touched:
             result["reasons"].append("files outside the plan changed in the copy: " + ", ".join(touched[:5]))
+        if plan.merged:
+            merged_checks = []
+            for record in plan.merges:
+                rel = record["path"]
+                if rel not in plan.merged:
+                    continue
+                base_text = plan.merge_bases.get(rel, "")
+                local_text = _read_exact(project / rel)
+                on_disk_text = _read_exact(workspace.project / rel)
+                check = verify_merged_file(rel, base=base_text, local=local_text, planned_result_sha256=record.get("result_sha256"), on_disk=on_disk_text, transform=str(record.get("transform")))
+                merged_checks.append(check)
+                if not check["ok"]:
+                    result["reasons"].append(f"merged file {rel} failed verification: " + "; ".join(check["problems"][:3]))
+            result["merges"] = merged_checks
         tests: Optional[Dict[str, Any]] = None
         if options.authorization.execution or options.test_command:
             authorization = options.authorization
@@ -1356,7 +1437,7 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
             else:
                 result["state"] = STATE_INCONCLUSIVE
                 result["reasons"].append(f"test outcome {outcome!r} is not evidence of a passing suite")
-    except (WriteError, GenerationError) as exc:
+    except (WriteError, GenerationError, LockHeld) as exc:
         result["state"] = STATE_REJECTED
         result["reasons"].append(f"could not apply the plan to the copy: {exc}")
     finally:
@@ -1368,7 +1449,7 @@ def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any
 def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None) -> Dict[str, Any]:
     options = options or EvolveOptions()
     contract = contract_or_path if isinstance(contract_or_path, EvolutionContract) else load_evolution(contract_or_path)
-    plan = plan_evolution(contract, baseline_contract=options.baseline_contract, authorize_contract=options.authorize_contract, evidence_path=options.evidence, confirm_irreversible=options.confirm_irreversible)
+    plan = plan_evolution(contract, baseline_contract=options.baseline_contract, authorize_contract=options.authorize_contract, evidence_path=options.evidence, confirm_irreversible=options.confirm_irreversible, allow_merge=options.allow_merge)
     report: Dict[str, Any] = {
         "schema": REPORT_SCHEMA,
         "tool": {"name": "fastapi-architect evolve", "version": TOOL_VERSION},
@@ -1377,7 +1458,7 @@ def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None
         "verification": None,
         "applied": {"written": [], "state": "not_applied"},
         "authorization": options.authorization.to_dict(),
-        "contract_authorization": {"authorize_contract": bool(options.authorize_contract), "confirm_irreversible": options.confirm_irreversible, "approved_by": (contract.authorization.get("destructive") or {}).get("approved_by"), "evidence": options.evidence or (contract.authorization.get("contract") or {}).get("evidence"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by")},
+        "contract_authorization": {"authorize_contract": bool(options.authorize_contract), "confirm_irreversible": options.confirm_irreversible, "allow_merge": bool(options.allow_merge), "approved_by": (contract.authorization.get("destructive") or {}).get("approved_by"), "evidence": options.evidence or (contract.authorization.get("contract") or {}).get("evidence"), "declared_by": (contract.authorization.get("contract") or {}).get("declared_by")},
         "state": plan.state,
         "note": "preview only unless --apply; with --apply the plan is first applied to a copy and verified, and the project is written only when that verification did not reject it, through the recoverable writer (journal under .fastapi-architect/ops); verified requires executed tests, audit_clean means no test was executed",
     }
