@@ -112,7 +112,7 @@ class PlanningTests(ProjectCase):
         self.assertEqual(phases, ["expand", "transition"])
         transition = plan.migration["phases"][1]
         self.assertIn("old column", transition["source_of_truth"])
-        self.assertIn("not available in this version", transition["coexistence"])
+        self.assertIn("arrives with the retire evolution", transition["coexistence"])
         self.assertEqual(plan.migration["renames"][0]["to"], "label")
         self.assertIn("tests/test_backfill.py", plan.tests_required)
         self.assertTrue(any("nothing is retired or dropped" in r for r in plan.risks))
@@ -148,9 +148,9 @@ class PlanningTests(ProjectCase):
         project = self.copy(PARCELS)
         report = run_evolution(str(self.write("rename.json", rename_doc(project))), EvolveOptions(apply=True, verify=False))
         self.assertEqual(report["applied"]["state"], "applied", report["plan"]["blockers"])
-        self.assertEqual(report["schema"], "evolution_report/1.4")
+        self.assertEqual(report["schema"], "evolution_report/1.5")
         manifest = read_manifest(str(project))
-        self.assertEqual(manifest["schema"], "fastapi-architect/generation/1.4")
+        self.assertEqual(manifest["schema"], "fastapi-architect/generation/1.5")
         entry = manifest["phased_changes"][0]
         self.assertEqual((entry["kind"], entry["from_column"], entry["column"], entry["state_declared"]), ("rename", "reference", "label", "expand"))
         self.assertEqual([m["phase"] for m in manifest["migrations"]], ["initial", "expand"])
@@ -162,17 +162,16 @@ class PlanningTests(ProjectCase):
         back = self.plan(rename_doc(project, {"from": "reference", "to": "tag"}), name="back.json")
         self.assertTrue(any(b.startswith("rename_column_in_transition") for b in back.blockers), back.blockers)
 
-    def test_retire_and_contract_of_a_rename_are_refused_in_this_version(self) -> None:
+    def test_contract_before_retire_is_refused_and_removals_stay_unsupported(self) -> None:
         project = self.copy(PARCELS)
         run_evolution(str(self.write("rename.json", rename_doc(project))), EvolveOptions(apply=True, verify=False))
         op_id = read_manifest(str(project))["phased_changes"][0]["op_id"]
-        doc = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "contract_fields": [{"name": "label", "operation": op_id}]}]}], "authorization": {"contract": {"declared_by": "someone", "evidence": "none.json"}}}
+        doc = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "contract_fields": [{"name": "label", "operation": op_id}]}]}], "authorization": {"contract": {"declared_by": "tests"}}}
         plan = plan_evolution(load_evolution(str(self.write("contract.json", doc))), authorize_contract=True)
         self.assertEqual(plan.state, "blocked")
-        self.assertTrue(any(b.startswith("contract_rename_available") for b in plan.blockers), plan.blockers)
+        self.assertTrue(any(b.startswith("contract_rename_retire_first") for b in plan.blockers), plan.blockers)
         removal = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "remove_fields": ["reference"]}]}]}
         self.assertTrue(any("remove_fields" in e and "unsupported" in e for e in self.errors(removal)))
-
 
 class GeneratedCodeTests(ProjectCase):
     @classmethod
@@ -237,7 +236,7 @@ class GeneratedCodeTests(ProjectCase):
         self.assertIn("'source_of_truth': 'from_column'", definitions)
         runner = self.read("src/parcels/ops/backfill.py")
         self.assertIn("IS DISTINCT FROM", runner)
-        self.assertIn('EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.1"', runner)
+        self.assertIn('EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.2"', runner)
         self.assertIn("columns_agree", runner)
         tests = self.read("tests/test_backfill.py")
         self.assertIn('PENDING_PREDICATE = "\\"label\\" IS DISTINCT FROM \\"reference\\""', tests)

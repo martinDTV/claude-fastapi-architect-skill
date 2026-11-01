@@ -662,7 +662,7 @@ class SecurityEvolutionTests(TempDirCase):
         orders = manifest(SNAPSHOT_ORDERS)["security"]
         self.assertEqual((orders["tenant_strategy_declared"], orders["tenant_strategy_implemented"], orders["row_level_security"], orders["authorization_declared"], orders["authorization_model"]), ("shared_schema_rls", "shared_schema_application_scoping", False, "resource", "none"))
         for snapshot in (SNAPSHOT_TENANT_PROJECTS, SNAPSHOT_TEAM_NOTES, SNAPSHOT_ORDERS):
-            self.assertEqual(manifest(snapshot)["schema"], "fastapi-architect/generation/1.4")
+            self.assertEqual(manifest(snapshot)["schema"], "fastapi-architect/generation/1.5")
             model = design.discover(str(snapshot))
             self.assertIsNotNone(model.baseline_spec)
 

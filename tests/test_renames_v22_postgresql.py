@@ -108,9 +108,11 @@ class AppDriver:
                 self.process.kill()
 
 
-@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the rename transition against a throwaway cluster")
-@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
-class RenameTransitionPostgresTests(unittest.TestCase):
+class PostgresRenameCase(unittest.TestCase):
+    """A throwaway cluster per class plus the helpers the rename stages share (increment 2 builds on them)."""
+
+    TIMINGS = "rename-timings.json"
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.cluster = ThrowawayCluster().__enter__()
@@ -123,7 +125,7 @@ class RenameTransitionPostgresTests(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
         if EVIDENCE_DIR:
             Path(EVIDENCE_DIR).mkdir(parents=True, exist_ok=True)
-            (Path(EVIDENCE_DIR) / "rename-timings.json").write_text(json.dumps(cls.timings, indent=2, sort_keys=True), encoding="utf-8")
+            (Path(EVIDENCE_DIR) / cls.TIMINGS).write_text(json.dumps(cls.timings, indent=2, sort_keys=True), encoding="utf-8")
 
     # -- helpers ------------------------------------------------------------- #
 
@@ -201,6 +203,11 @@ class RenameTransitionPostgresTests(unittest.TestCase):
         session.stdin.close()
         session.wait(timeout=30)
 
+
+
+@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the rename transition against a throwaway cluster")
+@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
+class RenameTransitionPostgresTests(PostgresRenameCase):
     # -- the coexistence of A and B ------------------------------------------- #
 
     def test_01_old_and_transitional_versions_coexist_on_the_expanded_schema(self) -> None:
@@ -340,7 +347,7 @@ class RenameTransitionPostgresTests(unittest.TestCase):
         # evidence: both operations agree, triggers enabled, the declared application version of B
         code, evidence_doc, _ = self.backfill(b_project, url, "verify", "--application-version", ops["label"]["application_version"], "--output", str(self.root / "rename-evidence.json"))
         self.assertTrue(evidence_doc["ok"], evidence_doc["problems"])
-        self.assertEqual(evidence_doc["schema"], "fastapi-architect/migration-evidence/1.1")
+        self.assertEqual(evidence_doc["schema"], "fastapi-architect/migration-evidence/1.2")
         for op_id in (label_op, weight_op):
             entry = evidence_doc["operations"][op_id]
             self.assertEqual((entry["kind"], entry["columns_agree"], entry["mismatch_rows"], entry["sync"]["enabled"], entry["source_of_truth"]), ("rename", True, 0, True, "from_column"))
@@ -451,7 +458,7 @@ class RenameTransitionPostgresTests(unittest.TestCase):
         self.assertTrue(any(b.startswith("alembic_chain_is_linear") or b.startswith("alembic_head_matches_manifest") for b in plan.blockers), plan.blockers)
         premature = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "contract_fields": [{"name": "label", "operation": manifest["phased_changes"][0]["op_id"]}]}]}], "authorization": {"contract": {"declared_by": "someone", "evidence": "none.json"}}}
         plan = plan_evolution(load_evolution(str(self._write("premature.json", premature))), authorize_contract=True)
-        self.assertTrue(any(b.startswith("contract_rename_available") for b in plan.blockers), plan.blockers)
+        self.assertTrue(any(b.startswith("contract_rename_retire_first") for b in plan.blockers), plan.blockers)
 
     def _write(self, name: str, doc: dict) -> Path:
         path = self.root / name
