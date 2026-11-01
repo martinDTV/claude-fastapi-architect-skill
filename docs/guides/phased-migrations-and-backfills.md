@@ -140,6 +140,59 @@ None of this is lock-free. The table receives brief exclusive locks at the metad
 (backfill, index build, validation) run with locks that allow writes. The plan prints the lock profile of every
 phase.
 
+## Renames in transition (v2.2, increment 1)
+
+A field rename is the same discipline with a second column and three application versions in play: **A** knows only
+the old name, **B** knows both, **C** will know only the new one. v2.2 increment 1 delivers the expand evolution and
+the transition between A and B; retire (C) and the contract that drops the old column are later increments.
+
+```json
+{"rename_fields": [{"from": "reference", "to": "label", "strategy": "expand_contract"}]}
+```
+
+What `evolve_fastapi.py apply` produces from the fifth example (`parcels-rename-label.json` renames `reference` to
+`label` and `weight_kg` to `weight`):
+
+- an expand revision that adds `label` and `weight` nullable next to the old columns and creates one **sync trigger**
+  per rename: `BEFORE INSERT OR UPDATE FOR EACH ROW`; whichever column a writer touched, the other follows inside the
+  same statement and transaction; when one statement sets both to different values the old column wins. The trigger
+  only assigns to `NEW` (it cannot recurse), runs as the writer and leaves row-level security to the policies. The
+  downgrade drops trigger, function and new columns without losing data: the old columns hold everything;
+- the transitional code (B): the model maps both columns (`label` nullable, `reference` as before and marked as the
+  source of truth), the request schemas accept both names (`AliasChoices`), the read schema fills `label` from
+  `reference` and still exposes `reference` as deprecated, the service writes both on create and update, and the
+  module tests cover both names;
+- a phased operation of strategy `mirror_column` per rename (`python -m parcels.ops.backfill run <op>`): the v2.1
+  runner with the predicate `label IS DISTINCT FROM reference`, so it reconciles the rows written **before** the
+  trigger existed (and any drift injected behind a disabled trigger) and nothing else; its evidence adds
+  `mismatch_rows`, `columns_agree` and the trigger state (missing or disabled is a problem).
+
+Policies, stated once: the **source of truth** is the old column until the rename is retired; **B reads** the old
+column; **B writes** both; **A writes** the old one; the trigger mirrors either write; **A and B coexist** on the
+expanded schema; **C is not available yet**. `complete` keeps its meaning (zero rows where the columns differ at the
+time of the count) and a later run reopens the operation only for rows that differ.
+
+Operations, in order: `apply` the rename evolution, `alembic upgrade head` on every database, keep A running if you
+need to, run the backfill of each rename as the owner, `verify`. Deploy B whenever you like: before the backfill it
+reads the old column and is correct; after it, the new column is equal to the old one on every row written through
+the table.
+
+Refused: `in_place`, a sync other than the trigger, renames of `id`, `owner_id`, `created_at`, the tenant column and
+foreign keys, a target that exists, a column already in transition, renames on in-memory projects, and the retire or
+contract of a rename. Hand-written SQL that names the old column keeps working; hand-written SQL that expects the new
+column to be filled must wait for the backfill.
+
+Verified on this project's machine with `FA_DESIGN_PG=1 tests/test_renames_v22_postgresql.py`: the committed
+`parcels` snapshot (A) and the evolved project (B) run as two processes from their own environments against one
+expanded database with live rows; A's inserts and updates are mirrored, B reads A's rows before the backfill, B writes
+both columns, A reads B's rows, interleaved updates of one row from both processes leave the pair equal, a rolled-back
+write touches nothing, the backfill is killed and resumed while A keeps inserting, locked rows are skipped and
+revisited, drift behind a disabled trigger is named by `verify` and fixed by a run, a disabled trigger is a problem,
+a hand-made column of the new name makes the expand revision fail with the database unchanged, and a rename on a
+row-level-security table mirrors the application role's writes. The numbers are in
+`docs/releases/RELEASE-NOTES-v2.2.md`. Not demonstrated: a real distributed deployment; the two drivers are two
+processes on one machine sharing one database.
+
 ## What is deliberately not in v2.1
 
 Renames (add-copy-drop with dual-write), drops of columns or tables, type changes, data migrations with business

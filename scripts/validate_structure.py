@@ -126,7 +126,7 @@ assert (root/'docs/guides/evolving-generated-projects.md').is_file(), 'Missing d
 assert 'guides/evolving-generated-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the evolution guide'
 for snapshot in ('inventory-service','orders-platform','team-notes','tenant-projects','parcels'):
     manifest_doc=json.loads((base.parent.parent/f'examples/generated/{snapshot}/.fastapi-architect/generation.json').read_text(encoding='utf-8'))
-    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.3' and 'spec_document' in manifest_doc and 'security' in manifest_doc and 'phased_changes' in manifest_doc, f'{snapshot}: manifest must be 1.3 with the embedded contract, the security record and the phased changes'
+    assert manifest_doc.get('schema')=='fastapi-architect/generation/1.4' and 'spec_document' in manifest_doc and 'security' in manifest_doc and 'phased_changes' in manifest_doc, f'{snapshot}: manifest must be 1.4 with the embedded contract, the security record and the phased changes'
 assert 'guides/generated-postgresql-projects.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the PostgreSQL guide'
 assert (root/'tests/fixtures/design20/specs/valid/minimal.json').is_file() and (root/'tests/fixtures/design20/specs/invalid/dependency_cycle.json').is_file(), 'Missing design20 spec fixtures'
 assert (root/'tests/fixtures/regressions_v20/nested_routers/src/shop/api/router.py').is_file(), 'Missing v2.0 nested-routers regression fixture'
@@ -199,6 +199,13 @@ for rel in ('tests/test_spans_v22.py','tests/test_merge_v22.py','tests/test_jour
 for rel in ('architecture/discovery-v2.2.md','releases/RELEASE-NOTES-v2.2.md'):
     assert rel in (root/'docs/README.md').read_text(encoding='utf-8'), f'docs/README.md does not index {rel}'
 assert 'operation/1.1' in (base/'scripts/fastapi_design/journal.py').read_text(encoding='utf-8') and 'ops list' in skill, 'the journal 1.1 and the ops subcommands are not documented'
+# v2.2 increment 1: renames in transition (contract 1.3, manifest 1.4, evidence 1.1), the example, the tests and the documents
+assert json.loads((base.parent.parent/'examples/evolutions/parcels-rename-label.json').read_text(encoding='utf-8')).get('schema')=='fastapi-architect/evolution/1.3', 'examples/evolutions/parcels-rename-label.json: must be an evolution 1.3 contract'
+for rel in ('tests/test_renames_v22.py','tests/test_renames_v22_postgresql.py','docs/architecture/adr-2.2-01-safe-renames.md'):
+    assert (root/rel).is_file(), f'Missing {rel}'
+assert 'architecture/adr-2.2-01-safe-renames.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index the renames decision record'
+assert 'fastapi-architect/evolution/1.3' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and 'rename_fields' in skill, 'contract 1.3 (rename_fields) is not documented'
+assert 'RENAME COLUMN' not in (base/'scripts/fastapi_design/blueprint/phased.py').read_text(encoding='utf-8').split('def rename_sync_ddl')[1].split('def ')[0], 'the sync DDL must not rename columns in place'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
 assert (root/'docs/README.md').is_file(), 'Missing docs/README.md (documentation index)'

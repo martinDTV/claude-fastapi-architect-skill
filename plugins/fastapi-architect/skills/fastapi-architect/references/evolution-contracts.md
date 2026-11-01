@@ -71,7 +71,7 @@ evolution of the adopted modules only.
 
 Adoption does not convert the project: no file is rewritten, no layout is imposed, no manifest claims the rest.
 
-## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read; 1.2 adds the phased keys of section 9)
+## 3. Evolution contract (`fastapi-architect/evolution/1.1`; 1.0 is still read; 1.2 adds the phased keys of section 9; 1.3 adds the renames of section 10)
 
 ```json
 {
@@ -108,7 +108,7 @@ Classification of every requested change (reported under `plan.changes`):
 |---|---|---|
 | `compatible` | nullable field; required field with a default; new operation; new dependency without a cycle; new endpoint; optional field on an adopted class | planned |
 | `potentially_incompatible` | required field without default on an existing entity (existing callers would get 422; on PostgreSQL a NOT NULL column without backfill); required foreign key on an existing table | **blocked** until a safe form is declared (a `default`, or on PostgreSQL a `backfill`, section 9) |
-| `unsupported` | `remove_fields`, `rename_fields`, `change_fields`, `remove_operations`, `remove_entities`, `rename_entities`, `remove_endpoints`, `remove_depends_on`, new entities inside an existing module, changes of public contracts | contract error |
+| `unsupported` | `remove_fields`, `change_fields`, `remove_operations`, `remove_entities`, `rename_entities`, `remove_endpoints`, `remove_depends_on`, new entities inside an existing module, changes of public contracts | contract error (`rename_fields` is a phased change since 1.3, section 10) |
 
 Applying the same contract twice is a `noop` for generated projects (the merged contract equals the baseline);
 for adopted projects the same endpoint again is a duplicate and blocks (nothing is silently skipped).
@@ -294,3 +294,44 @@ The manifest records the phased changes (`fastapi-architect/generation/1.3`, `re
 `docs/guides/phased-migrations-and-backfills.md` walks the fifth example through the four phases, and
 `docs/architecture/adr-2.1-01-phased-migrations.md` records the decisions and what stays deferred (renames with
 dual-write, drops, type changes, multi-column indexes, per-tenant backfills under RLS).
+
+## 10. Renames in transition (contract `fastapi-architect/evolution/1.3`, v2.2 increment 1; PostgreSQL projects)
+
+```json
+{
+  "schema": "fastapi-architect/evolution/1.3",
+  "project": {"path": "../generated/parcels"},
+  "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment",
+     "rename_fields": [{"from": "reference", "to": "label", "strategy": "expand_contract"}]}]}]
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `rename_fields[].from` / `to` | the current and the new field name (lowercase identifiers, different) |
+| `rename_fields[].strategy` | `expand_contract` (the only one): the new column is added next to the old one and the rename moves through expand, transition, retire and contract; `in_place` is refused by name (`ALTER TABLE … RENAME COLUMN` is not online across application versions) |
+| `rename_fields[].sync` | `trigger` (the only one): the mechanism that mirrors the writes of an application version that knows only the old name |
+
+Refused with the path or the precondition: an unknown key, a strategy or a sync other than the ones above, the same
+name twice, two renames sharing a source or a target, a source that is not a field (`rename_source_exists`), a target
+that exists (`rename_target_free`), the identity, ownership, tenant and timestamp columns and foreign keys
+(`rename_protected_column`), a column already in a phased change (`rename_column_in_transition`), an in-memory
+project or a new table (`rename_needs_existing_postgresql_table`). A repeated rename is a no-op. `contract_fields`
+naming a rename, `remove_fields` and `change_fields` stay refused: **retire and contract of renames are not available
+in this version**; nothing is renamed in place, retired or dropped.
+
+What the plan produces (one `expand` revision plus a `transition` entry under `plan.migration.phases`, and
+`plan.migration.renames[]`):
+
+| Piece | Content |
+|---|---|
+| the expand revision (transactional, reversible) | `ADD COLUMN <to>` nullable next to `<from>`, the progress table once, and one **sync trigger** per rename: `BEFORE INSERT OR UPDATE FOR EACH ROW`, whichever column the writer touched the other follows inside the same statement, the old column winning when one statement sets both; it only assigns to `NEW` (no recursion), runs as the writer (`SECURITY INVOKER`) and leaves row-level security to the policies; the downgrade drops trigger, function and column (the old column holds every value) |
+| the phased operation | kind `rename`, strategy `mirror_column` (new := old wherever `new IS DISTINCT FROM old`), `source_of_truth: from_column`, `read_policy: from_column`, `write_policy: both`, the sync names; recorded in the manifest 1.4 and in `ops/backfills.py` |
+| the transitional code (version B) | model with both columns (`<to>` nullable, `<from>` as before, the source of truth); request schemas accepting both names (`validation_alias=AliasChoices(to, from)`); read schema filling `<to>` from the old column and exposing `<from>` deprecated; services writing both on create and update; module tests for both names |
+| the runner | `python -m <pkg>.ops.backfill run <op>` reconciles the rows written before the trigger (pre-existing rows, or drift injected behind a disabled trigger) with the v2.1 semantics: resumable, one worker, locked rows skipped and revisited, `complete` after a zero count, reopened for rows that differ later; `verify` (evidence 1.1) adds `mismatch_rows`, `columns_agree`, `source_of_truth` and the trigger state, and reports a missing or disabled trigger as a problem |
+| the policies, stated | **source of truth**: the old column until retire. **Read**: B reads the old column. **Write**: B writes both; A writes the old one; the trigger mirrors either. **Coexistence**: A (old name only) and B (both) run together on the expanded schema; C (new name only) needs the retire phase. **Verified equivalence**: `mismatch_rows == 0` with the trigger enabled |
+
+The auditor's migration rules report nothing for the sync trigger (0 findings before and after on the fifth example);
+its visibility comes from the plan, the manifest, the runner's definitions, the evidence and the generated tests.
+`docs/guides/phased-migrations-and-backfills.md` walks the fifth example through it and
+`docs/architecture/adr-2.2-01-safe-renames.md` records the decision.
