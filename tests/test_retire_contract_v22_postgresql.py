@@ -101,9 +101,9 @@ class Driver:
                 self.process.kill()
 
 
-@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the retire and contract stages against a throwaway cluster")
-@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
-class RetireContractPostgresTests(PostgresRenameCase):
+class RetireContractCase(PostgresRenameCase):
+    """The helpers of the retire and contract stages (the acceptance module of increment 2 builds on them)."""
+
     TIMINGS = "retire-timings.json"
 
     # -- helpers ------------------------------------------------------------- #
@@ -176,6 +176,11 @@ class RetireContractPostgresTests(PostgresRenameCase):
         self.timed(f"{label}_retire_upgrade_s", started)
         return c_project, report
 
+
+
+@unittest.skipUnless(ENABLED, "set FA_DESIGN_PG=1 to run the retire and contract stages against a throwaway cluster")
+@unittest.skipUnless(pg_available() and shutil.which("uv"), "PostgreSQL binaries and uv are required")
+class RetireContractPostgresTests(RetireContractCase):
     # -- B and C on the retire schema -------------------------------------------- #
 
     def test_01_transitional_and_retired_versions_coexist_on_the_retire_schema(self) -> None:
@@ -349,7 +354,7 @@ class RetireContractPostgresTests(PostgresRenameCase):
         # the destructive evolution: D is generated and verified on its own database (its migrations run through the drop)
         d_project = self.project_copy(c_project, "drop-d")
         started = time.time()
-        report = self.evolve_with(d_project, self.drop_contract(d_project, evidence_path, "drop-contract-d.json"), self.cluster.create_database("drop_verify_d"), verify=True, authorize_contract=True, confirm_irreversible=phrase)
+        report = self.evolve_with(d_project, self.drop_contract(d_project, evidence_path, "drop-contract-d.json", ignore_sessions=["psql"]), self.cluster.create_database("drop_verify_d"), verify=True, authorize_contract=True, confirm_irreversible=phrase)  # the lock holder below is a psql console, named on purpose
         self.timed("drop_evolution_verified_s", started)
         self.assertEqual(report["state"], "verified", report.get("verification", {}).get("reasons") or report["plan"]["blockers"])
         self.assertEqual(report["applied"]["state"], "applied")

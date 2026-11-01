@@ -205,6 +205,19 @@ class RetireAndContractTests(unittest.TestCase):
 
     # -- retire ------------------------------------------------------------------ #
 
+    def test_a_rename_of_a_field_with_a_default_is_refused_and_the_trigger_never_resolves_a_contradiction(self) -> None:
+        s = self.scenario
+        project = Path(tempfile.mkdtemp(prefix="fa-retire-lane-", dir=str(s.root))) / "parcels"
+        shutil.copytree(s.b_project, project, ignore=shutil.ignore_patterns(*DEFAULT_WALK_SKIP))
+        doc = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "add_fields": [{"name": "lane", "type": "str", "max_length": 10, "default": "ground"}]}]}], "invariants": INVARIANTS}
+        report = run_evolution(str(s.write("add-lane.json", doc)), EvolveOptions(apply=True, verify=False))
+        self.assertEqual(report["applied"]["state"], "applied", report["plan"]["blockers"])
+        rename = {"schema": EVOLUTION_SCHEMA, "project": {"path": str(project)}, "modify_modules": [{"name": "shipments", "entities": [{"name": "Shipment", "rename_fields": [{"from": "lane", "to": "route"}]}]}], "invariants": INVARIANTS}
+        self.assertIn("rename_defaulted_column_unsupported", s.blockers(rename, "rename-lane.json"))
+        expand = next(s.b_project.glob("migrations/versions/*_expand_*.py")).read_text(encoding="utf-8")
+        self.assertNotIn("the truth wins", expand, "no statement is ever resolved by precedence")
+        self.assertEqual(expand.count("RAISE EXCEPTION USING ERRCODE = 'check_violation'"), 4, "insert and update branches of both renames raise")
+
     def test_retire_needs_evidence_and_an_identity_and_refuses_what_is_not_a_pending_rename(self) -> None:
         s = self.scenario
         bare = copy.deepcopy(s.retire_doc)
@@ -383,6 +396,13 @@ class RetireAndContractTests(unittest.TestCase):
         self.assertIn("DROP TRIGGER IF EXISTS trg_shipments_", upgrade)
         self.assertIn("DROP FUNCTION IF EXISTS fn_shipments_", upgrade)
         self.assertIn("pg_depend", upgrade)
+        self.assertIn("_require_time_and_sessions()", upgrade.split("def upgrade()")[1])
+        self.assertIn(f'COMPATIBLE_TAGS = {json.dumps(sorted({s.c_tag, read_manifest(str(project))["application_tag"]}))}', upgrade)
+        self.assertIn("EVIDENCE_GENERATED_AT = '", upgrade)
+        self.assertIn("MAX_EVIDENCE_AGE_HOURS = 24.0", upgrade)
+        self.assertIn("MIN_RETIRE_AGE_HOURS = 24.0", upgrade)
+        self.assertIn("pg_stat_activity", upgrade)
+        self.assertIn("SET LOCAL lock_timeout", downgrade, "the downgrade fails fast instead of queuing behind traffic")
         self.assertIn("Approved by: tests (approver)", upgrade)
         self.assertIn(f"Confirmation phrase: {s.phrase}", upgrade)
         self.assertIn('op.add_column("shipments", sa.Column("reference", sa.String(length=40), nullable=True))', downgrade)
@@ -401,6 +421,10 @@ class RetireAndContractTests(unittest.TestCase):
         contract_phase = [p for p in plan["migration"]["phases"] if p["phase"] == "contract"][-1]
         self.assertEqual((contract_phase["destructive"], contract_phase["reversible"], contract_phase["transactional"]), (True, "conditional", True))
         self.assertIn("no online rollback", contract_phase["compatibility_restoration"])
+        assurance = contract_phase["assurance"]
+        self.assertEqual(set(assurance), {"human_declaration", "observed_sessions", "schema_state", "automated_verification", "residual_uncertainty"})
+        self.assertTrue(any("intermittently" in u for u in assurance["residual_uncertainty"]))
+        self.assertTrue(any("plan.migration.phases[contract].assurance" in r for r in plan["risks"]))
         self.assertTrue(all(e["destructive"] and e["reversible"] == "conditional" for e in plan["migration"]["contract"]))
         self.assertTrue(any(c["classification"] == "destructive" and c["kind"] == "drop_column" for c in plan["changes"]))
         self.assertEqual(report["contract_authorization"]["confirm_irreversible"], s.phrase)
