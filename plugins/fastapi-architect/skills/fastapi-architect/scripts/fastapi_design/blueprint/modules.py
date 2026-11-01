@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from ..advisor import STYLE_HEXAGONAL, Recommendation
-from ..spec import EntitySpec, IntegrationSpec, ModuleSpec, Spec
+from ..spec import EntitySpec, FieldSpec, IntegrationSpec, ModuleSpec, Spec
 from ._base import LINE, SA_TYPES, Layout
-from ._helpers import _annotation, _authz, _call, _camel, _claim_binding, _constraints, _entity_index, _fk_fields, _header, _py_default, _registry, _rls, _sql_default, _tenant, _type_imports
+from ._helpers import (
+    _annotation,
+    _authz,
+    _call,
+    _camel,
+    _claim_binding,
+    _constraints,
+    _entity_index,
+    _fk_fields,
+    _header,
+    _py_default,
+    _registry,
+    _rls,
+    _sql_default,
+    _tenant,
+    _type_imports,
+    field_from_doc,
+)
 from .persistence import _fk_constraint
 
 
@@ -30,14 +47,25 @@ def _ops(e: EntitySpec) -> Dict[str, bool]:
     return {"create": "create" in ops, "get": bool(ops & {"get", "update", "delete"}), "get_route": "get" in ops, "list": "list" in ops, "update": "update" in ops, "delete": "delete" in ops}
 
 
-def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset()) -> str:
+def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset(), renames: Optional[Dict[Tuple[str, str], Dict[str, object]]] = None) -> str:
+    """``renames`` (v2.2): ``(table, new name) -> rename entry`` for the renames in transition. Request schemas accept
+    the old name as a validation alias of the new field; the read schema fills the new field from the old column
+    (the source of truth until the rename is retired) and still exposes the old name, marked deprecated."""
     tenant = _tenant(spec)
+    renames = renames or {}
     all_fields = [f for e in module.entities for f in e.fields]
+    old_fields = {(t, n): field_from_doc(entry["from_field"]) for (t, n), entry in renames.items() if any(e.plural == t for e in module.entities)}  # type: ignore[arg-type]
+    pydantic = ["AliasChoices", "BaseModel", "ConfigDict", "Field"] if old_fields else ["BaseModel", "ConfigDict", "Field"]
     lines = _header(
-        "Request and response schemas (pydantic v2); unknown properties are rejected.",
-        stdlib=_type_imports(all_fields),
-        third_party=["from pydantic import BaseModel, ConfigDict, Field"],
+        "Request and response schemas (pydantic v2); unknown properties are rejected." + (" Fields renamed in transition accept both names and expose both, the old one deprecated." if old_fields else ""),
+        stdlib=_type_imports(all_fields + list(old_fields.values())),
+        third_party=[f"from pydantic import {', '.join(pydantic)}"],
     )
+
+    def alias(e: EntitySpec, f: FieldSpec) -> List[str]:
+        entry = renames.get((e.plural, f.name))
+        return [f'validation_alias=AliasChoices("{f.name}", "{entry["from_column"]}")'] if entry else []
+
     for e in module.entities:
         ops = _ops(e)
         if ops["create"]:
@@ -45,28 +73,39 @@ def _schemas(spec: Spec, module: ModuleSpec, pending: frozenset = frozenset()) -
             for f in e.fields:
                 constraints = _constraints(f)
                 if f.has_default:
-                    args = [f"default={_py_default(f)}"] + ([constraints] if constraints else [])
+                    args = [f"default={_py_default(f)}"] + ([constraints] if constraints else []) + alias(e, f)
                     create_lines += _call(f"{f.name}: {_annotation(f)} = Field(", args, ")", "    ")
-                elif f.required and not constraints:
+                elif f.required and not constraints and not alias(e, f):
                     create_lines.append(f"    {f.name}: {_annotation(f)}")
                 else:
-                    args = ([] if f.required else ["default=None"]) + ([constraints] if constraints else [])
+                    args = ([] if f.required else ["default=None"]) + ([constraints] if constraints else []) + alias(e, f)
                     create_lines += _call(f"{f.name}: {_annotation(f)} = Field(", args, ")", "    ")
             lines += ["", f"class {e.name}Create(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *create_lines, ""]
         if ops["update"]:
             update_lines = []
             for f in e.fields:
-                update_lines += _call(f"{f.name}: {_annotation(f, optional=True)} = Field(", ["default=None"] + ([_constraints(f)] if _constraints(f) else []), ")", "    ")
+                update_lines += _call(f"{f.name}: {_annotation(f, optional=True)} = Field(", ["default=None"] + ([_constraints(f)] if _constraints(f) else []) + alias(e, f), ")", "    ")
             lines += ["", f"class {e.name}Update(BaseModel):", '    model_config = ConfigDict(extra="forbid")', *update_lines, ""]
-        read_lines = ["    id: UUID"] + ([f"    {tenant}: UUID"] if tenant else []) + (["    owner_id: str"] if e.owned else []) + [f"    {f.name}: {_annotation(f, optional=(e.plural, f.name) in pending)}" for f in e.fields] + ["    created_at: datetime"]
+        read_lines = ["    id: UUID"] + ([f"    {tenant}: UUID"] if tenant else []) + (["    owner_id: str"] if e.owned else [])
+        for f in e.fields:
+            entry = renames.get((e.plural, f.name))
+            if entry is None:
+                read_lines.append(f"    {f.name}: {_annotation(f, optional=(e.plural, f.name) in pending)}")
+                continue
+            old = old_fields[(e.plural, f.name)]
+            read_lines += _call(f"{f.name}: {_annotation(f)} = Field(", [f'validation_alias=AliasChoices("{old.name}", "{f.name}")'], ")  # read from the old column: the source of truth in transition", "    ")
+            read_lines += _call(f"{old.name}: {_annotation(old)} = Field(", ['json_schema_extra={"deprecated": True}'], f')  # the former name of {f.name}, kept for older clients', "    ")
+        read_lines.append("    created_at: datetime")
         lines += ["", f"class {e.name}Read(BaseModel):", "    model_config = ConfigDict(from_attributes=True)", *read_lines, ""]
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _models(spec: Spec, module: ModuleSpec, layout: Layout, pending: frozenset = frozenset(), indexed: frozenset = frozenset()) -> str:
+def _models(spec: Spec, module: ModuleSpec, layout: Layout, pending: frozenset = frozenset(), indexed: frozenset = frozenset(), renames: Optional[Dict[Tuple[str, str], Dict[str, object]]] = None) -> str:
     pg = spec.persistence["kind"] == "postgresql"
     tenant = _tenant(spec)
-    all_fields = [f for e in module.entities for f in e.fields]
+    renames = renames or {}
+    old_fields = {(t, n): field_from_doc(entry["from_field"]) for (t, n), entry in renames.items() if any(e.plural == t for e in module.entities)}  # type: ignore[arg-type]
+    all_fields = [f for e in module.entities for f in e.fields] + list(old_fields.values())
     if not pg:
         stdlib = ["from dataclasses import dataclass, field"]
         for line in _type_imports(all_fields, uuid=("UUID", "uuid4")):
@@ -121,6 +160,11 @@ def _models(spec: Spec, module: ModuleSpec, layout: Layout, pending: frozenset =
             if f.has_default:
                 extras += f", default={_py_default(f)}, server_default=text(\"{_sql_default(f)}\")"
             body.append(f"    {f.name}: Mapped[{_annotation(f, optional=phased)}] = mapped_column({arg}{extras})")
+            old = old_fields.get((table, f.name))
+            if old is not None:  # the old column of a rename in transition: still written, still the source of truth
+                old_arg = f"String({old.max_length or 255})" if old.type == "str" else ("Numeric(18, 2)" if old.type == "decimal" else ("DateTime(timezone=True)" if old.type == "datetime" else SA_TYPES[old.type]))
+                old_extras = ("" if old.required else ", nullable=True") + (f", default={_py_default(old)}, server_default=text(\"{_sql_default(old)}\")" if old.has_default else "")
+                body.append(f"    {old.name}: Mapped[{_annotation(old)}] = mapped_column({old_arg}{old_extras})  # transition: source of truth")
         body.append("    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())")
         lines += ["", f"class {e.name}(Base):", *body, ""]
     return "\n".join(lines).rstrip("\n") + "\n"
@@ -196,10 +240,11 @@ def _repository(spec: Spec, module: ModuleSpec, layout: Layout) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _service(spec: Spec, module: ModuleSpec, layout: Layout, ports: List[IntegrationSpec]) -> str:
+def _service(spec: Spec, module: ModuleSpec, layout: Layout, ports: List[IntegrationSpec], renames: Optional[Dict[Tuple[str, str], Dict[str, object]]] = None) -> str:
     pg = spec.persistence["kind"] == "postgresql"
     tenant = _tenant(spec)
     authz = _authz(spec)
+    renames = renames or {}
     owned_here = any(e.owned for e in module.entities)
     # without a policy the use cases take the tenant id; with one they take the principal and derive tenant, owner and scope
     t_sig = "principal: Principal, " if authz else (f"{tenant}: UUID, " if tenant else "")
@@ -237,7 +282,12 @@ def _service(spec: Spec, module: ModuleSpec, layout: Layout, ports: List[Integra
         ctor = [f"repository: {E}Repository"] + (["session: AsyncSession"] if pg else []) + [f"{p.name}: {_camel(p.name)}Port" for p in ports]
         assigns = ["        self._repository = repository"] + (["        self._session = session"] if pg else []) + [f"        self._{p.name} = {p.name}" for p in ports]
         commit = ["        await self._commit()"] if pg else []
+        transitions = {f.name: str(renames[(e.plural, f.name)]["from_column"]) for f in e.fields if (e.plural, f.name) in renames}
         body = [f"class {E}Service:", *_call("def __init__(self, ", ctor, ") -> None:", "    "), *assigns]
+        if transitions:
+            while lines and lines[-1] == "":
+                lines.pop()
+            lines += ["", f"_TRANSITIONS_{x.upper()} = {transitions!r}  # renames in transition: new -> old, both written", ""]
         if pg:
             body += [
                 "",
@@ -251,7 +301,7 @@ def _service(spec: Spec, module: ModuleSpec, layout: Layout, ports: List[Integra
                 "            raise ConflictError(detail) from exc",
             ]
         if ops["create"]:
-            kwargs = ([f"{tenant}=principal.tenant_id" if authz else f"{tenant}={tenant}"] if tenant else []) + (["owner_id=principal.subject"] if e.owned else []) + [f"{f.name}=data.{f.name}" for f in e.fields]
+            kwargs = ([f"{tenant}=principal.tenant_id" if authz else f"{tenant}={tenant}"] if tenant else []) + (["owner_id=principal.subject"] if e.owned else []) + [f"{f.name}=data.{f.name}" for f in e.fields] + [f"{old}=data.{new}" for new, old in transitions.items()]
             notify = [f'        await self._{p.name}.send({{"event": "{x}.created", "id": str({x}.id)}})' for p in ports]
             body += ["", f"    async def create(self, {t_sig}data: {E}Create) -> {E}:", *_call(f"{x} = {E}(", kwargs, ")", "        "), f"        await self._repository.add({x})", *commit, *notify, f"        return {x}"]
         if ops["get"]:
@@ -260,7 +310,7 @@ def _service(spec: Spec, module: ModuleSpec, layout: Layout, ports: List[Integra
             body += ["", f"    async def list(self, {t_sig}limit: int = 50, offset: int = 0) -> list[{E}]:", f"        return await self._repository.list({t_arg}limit, offset{o_arg})"]
         if ops["update"]:
             guard = [f'        ensure_owner(principal, {x}.owner_id, "update", "{E}")'] if e.owned else []
-            body += ["", f"    async def update(self, {t_sig}{x}_id: UUID, data: {E}Update) -> {E}:", f"        {x} = await self.get({'principal, ' if authz else t_arg}{x}_id)", *guard, "        for name, value in data.model_dump(exclude_unset=True).items():", f"            setattr({x}, name, value)", f"        await self._repository.save({x})", *commit, f"        return {x}"]
+            body += ["", f"    async def update(self, {t_sig}{x}_id: UUID, data: {E}Update) -> {E}:", f"        {x} = await self.get({'principal, ' if authz else t_arg}{x}_id)", *guard, "        for name, value in data.model_dump(exclude_unset=True).items():", f"            setattr({x}, name, value)", *([f"        for new_name, old_name in _TRANSITIONS_{x.upper()}.items():  # the old column is the source of truth: write both", "            if new_name in data.model_fields_set:", f"                setattr({x}, old_name, getattr({x}, new_name))"] if transitions else []), f"        await self._repository.save({x})", *commit, f"        return {x}"]
         if ops["delete"]:
             if e.owned:
                 body += ["", f"    async def delete(self, {t_sig}{x}_id: UUID) -> None:", f"        {x} = await self.get(principal, {x}_id)", f'        ensure_owner(principal, {x}.owner_id, "delete", "{E}")', f"        await self._repository.delete({t_arg}{x}.id)", *commit]

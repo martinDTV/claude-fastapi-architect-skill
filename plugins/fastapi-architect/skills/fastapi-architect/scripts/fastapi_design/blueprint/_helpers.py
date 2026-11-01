@@ -82,6 +82,26 @@ def _camel(name: str) -> str:
     return "".join(part.capitalize() for part in name.split("_"))
 
 
+def field_from_doc(doc: Dict[str, object]) -> FieldSpec:
+    """The ``FieldSpec`` of a field document the manifest keeps (the old column of a rename in transition); the same
+    reading as the contract parser for the keys a column needs."""
+    has_default = "default" in doc and doc.get("default") is not None
+    min_value, max_value = doc.get("min_value"), doc.get("max_value")
+    return FieldSpec(
+        str(doc["name"]),
+        str(doc["type"]),
+        bool(doc.get("required", True)),
+        int(doc["max_length"]) if doc.get("max_length") is not None else None,
+        min_value if isinstance(min_value, (int, float)) else None,
+        max_value if isinstance(max_value, (int, float)) else None,
+        str(doc["description"]) if doc.get("description") else None,
+        str(doc["references"]) if doc.get("references") else None,
+        str(doc.get("on_delete") or "restrict"),
+        doc.get("default") if has_default else None,
+        has_default,
+    )
+
+
 def _constraints(f: FieldSpec) -> str:
     parts: List[str] = []
     if f.type == "str":

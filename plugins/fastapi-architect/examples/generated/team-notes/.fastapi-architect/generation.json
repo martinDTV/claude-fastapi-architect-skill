@@ -44,7 +44,7 @@
   "migrations": [],
   "package": "team_notes",
   "phased_changes": [],
-  "schema": "fastapi-architect/generation/1.3",
+  "schema": "fastapi-architect/generation/1.4",
   "security": {
     "authentication": "oauth2_jwt",
     "authorization_declared": null,

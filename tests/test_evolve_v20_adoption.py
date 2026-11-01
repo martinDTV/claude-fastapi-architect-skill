@@ -117,7 +117,7 @@ class Contract11Tests(unittest.TestCase):
         contract, errors = evolution.validate_evolution(doc)
         self.assertIsNone(contract)
         joined = "\n".join(errors)
-        for fragment in ("modify_modules[0].remove_fields: unsupported", "entities[0].rename_fields: unsupported", "entities[1]: nothing to add", "add_endpoints[0].method", "add_endpoints[0].path", "add_endpoints[0].name", "add_endpoints[0].response: required", "add_fields[0].class", "add_fields[0].type", "needs a default", "modify_modules[2]: nothing to change"):
+        for fragment in ("modify_modules[0].remove_fields: unsupported", "entities[0].rename_fields: expected a non-empty list", "entities[1]: nothing to add", "add_endpoints[0].method", "add_endpoints[0].path", "add_endpoints[0].name", "add_endpoints[0].response: required", "add_fields[0].class", "add_fields[0].type", "needs a default", "modify_modules[2]: nothing to change"):
             self.assertIn(fragment, joined, joined)
         _, errors = evolution.validate_evolution({"schema": SCHEMA, "project": {"path": "p"}})
         self.assertTrue(any("nothing to do" in e for e in errors))

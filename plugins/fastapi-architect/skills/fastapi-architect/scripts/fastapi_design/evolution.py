@@ -48,20 +48,32 @@ from fastapi_common.fs import resolve_against
 from .adoption import ADOPTION
 from .advisor import recommend
 from .blueprint import Layout, Lineage, PhaseState, added_columns, build, delta_revision
-from .blueprint.phased import contract_revision, index_name, index_revision, operation_id, phase_descriptions
+from .blueprint.phased import KIND_RENAME, MIRROR_STRATEGY, contract_revision, index_name, index_revision, operation_id, phase_descriptions, sync_names
 from .discovery import ProjectModel, discover
 from .generator import MANIFEST, GenerationError, WriteError, build_manifest, safe_join
 from .journal import FaultInjector, Operation, pending_operations, sha256_bytes, unreadable_operations, write_recoverable
 from .locking import LockHeld
-from .migrations import backfill_params, contract_preconditions, load_evidence, validate_authorization, validate_backfill, validate_contract_fields, validate_indexes
+from .migrations import (
+    PROTECTED_COLUMNS,
+    backfill_params,
+    contract_preconditions,
+    load_evidence,
+    validate_authorization,
+    validate_backfill,
+    validate_contract_fields,
+    validate_indexes,
+    validate_rename_fields,
+)
 from .spec import IDENT_RE, OPERATIONS, Spec, canonical_digest, validate_spec
 from .transforms import StructuralEdit, TransformError, compose, insert_class_field, insert_function
 from .verify import run_generated_tests
 
-EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.2"  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization
-EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2")
+EVOLUTION_SCHEMA = "fastapi-architect/evolution/1.3"  # 1.2 (v2.1): phased changes (backfill), concurrent indexes, contract phases, authorization; 1.3 (v2.2): rename_fields (expand_contract, in transition)
+EVOLUTION_SCHEMAS = ("fastapi-architect/evolution/1.0", "fastapi-architect/evolution/1.1", "fastapi-architect/evolution/1.2", "fastapi-architect/evolution/1.3")
 EVOLUTION_SCHEMA_12 = "fastapi-architect/evolution/1.2"
-REPORT_SCHEMA = "evolution_report/1.3"  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
+EVOLUTION_SCHEMA_13 = "fastapi-architect/evolution/1.3"
+PHASED_SCHEMAS = (EVOLUTION_SCHEMA_12, EVOLUTION_SCHEMA_13)
+REPORT_SCHEMA = "evolution_report/1.4"  # 1.4 (v2.2): plan.migration.renames and the transition phase (additive)  # 1.2 (v2.1): verification.tests.run carries an `environment` record; 1.3 (v2.1 increment 2): `contract_authorization` and the phased keys of plan.migration (additive)
 INVARIANTS = ("existing_routes_unchanged", "historical_migrations_unchanged", "declared_contracts_unchanged", "no_destructive_schema_change", "protected_files_unchanged")
 DEFAULT_INTEGRATION_POINTS = ("pyproject.toml", "README.md", ".env.example", ".audit-fastapi.json", "src/{pkg}/main.py", "src/{pkg}/api/router.py", "src/{pkg}/core/config.py", "migrations/env.py", "tests/conftest.py", "tests/test_migrations.py", "tests/test_rls.py", "tests/test_auth.py", "tests/test_jwks.py", "src/{pkg}/ops/backfill.py", "src/{pkg}/ops/backfills.py", "tests/test_backfill.py")
 UNSUPPORTED_MODULE_KEYS = ("remove_fields", "rename_fields", "change_fields", "remove_operations", "remove_entities", "rename_entities", "remove_endpoints", "rename", "remove_depends_on")
@@ -164,11 +176,14 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
                 errors.append(f"{q}: expected an object with 'name'")
                 continue
             for key in e:
-                if key in ("remove_fields", "rename_fields", "change_fields", "remove_operations"):
+                if key in ("remove_fields", "change_fields", "remove_operations"):
                     errors.append(f"{q}.{key}: unsupported in evolution 1.1")
                 elif key in ("add_indexes", "contract_fields"):
-                    if schema != EVOLUTION_SCHEMA_12:
+                    if schema not in PHASED_SCHEMAS:
                         errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_12}")
+                elif key == "rename_fields":
+                    if schema != EVOLUTION_SCHEMA_13:
+                        errors.append(f"{q}.{key}: needs schema {EVOLUTION_SCHEMA_13} (renames as expand_contract, in transition)")
                 elif key not in ("name", "add_fields", "add_operations") and not str(key).startswith("x-"):
                     errors.append(f"{q}.{key}: unknown property")
             if "add_fields" in e and (not isinstance(e["add_fields"], list) or not e["add_fields"]):
@@ -176,22 +191,25 @@ def _validate_module_changes(raw: Any, errors: List[str], schema: Optional[str] 
             elif "add_fields" in e:
                 for k, fld in enumerate(e["add_fields"]):
                     if isinstance(fld, dict) and "backfill" in fld:
-                        if schema != EVOLUTION_SCHEMA_12:
+                        if schema not in PHASED_SCHEMAS:
                             errors.append(f"{q}.add_fields[{k}].backfill: needs schema {EVOLUTION_SCHEMA_12}")
                         else:
                             errors.extend(validate_backfill(fld, f"{q}.add_fields[{k}]"))
-            if "add_indexes" in e and schema == EVOLUTION_SCHEMA_12:
+            if "add_indexes" in e and schema in PHASED_SCHEMAS:
                 e["add_indexes"], index_errors = validate_indexes(e["add_indexes"], f"{q}.add_indexes")
                 errors.extend(index_errors)
-            if "contract_fields" in e and schema == EVOLUTION_SCHEMA_12:
+            if "contract_fields" in e and schema in PHASED_SCHEMAS:
                 e["contract_fields"], contract_errors = validate_contract_fields(e["contract_fields"], f"{q}.contract_fields")
                 errors.extend(contract_errors)
+            if "rename_fields" in e and schema == EVOLUTION_SCHEMA_13:
+                e["rename_fields"], rename_errors = validate_rename_fields(e["rename_fields"], f"{q}.rename_fields")
+                errors.extend(rename_errors)
             if "add_operations" in e:
                 ops = e["add_operations"]
                 if not isinstance(ops, list) or any(o not in OPERATIONS for o in ops):
                     errors.append(f"{q}.add_operations: expected a list of {', '.join(OPERATIONS)}")
-            if not any(key in e for key in ("add_fields", "add_operations", "add_indexes", "contract_fields")):
-                errors.append(f"{q}: nothing to add (add_fields, add_operations, add_indexes or contract_fields)")
+            if not any(key in e for key in ("add_fields", "add_operations", "add_indexes", "contract_fields", "rename_fields")):
+                errors.append(f"{q}: nothing to add (add_fields, add_operations, add_indexes, contract_fields or rename_fields)")
         endpoints = m.get("add_endpoints", [])
         if not isinstance(endpoints, list):
             errors.append(f"{p}.add_endpoints: expected a list")
@@ -262,9 +280,9 @@ def validate_evolution(document: Any, source: Optional[str] = None) -> Tuple[Opt
         errors.append(f"evolution.schema: expected one of {', '.join(repr(x) for x in EVOLUTION_SCHEMAS)}, got {schema!r}")
     if schema == "fastapi-architect/evolution/1.0" and "modify_modules" in document:
         errors.append("evolution.modify_modules: needs schema fastapi-architect/evolution/1.1")
-    if "authorization" in document and schema != EVOLUTION_SCHEMA_12:
+    if "authorization" in document and schema not in PHASED_SCHEMAS:
         errors.append(f"evolution.authorization: needs schema {EVOLUTION_SCHEMA_12}")
-    authorization, auth_errors = validate_authorization(document.get("authorization")) if schema == EVOLUTION_SCHEMA_12 else ({}, [])
+    authorization, auth_errors = validate_authorization(document.get("authorization")) if schema in PHASED_SCHEMAS else ({}, [])
     errors.extend(auth_errors)
     project = document.get("project")
     if not isinstance(project, dict):
@@ -404,6 +422,9 @@ class EvolutionPlan:
             what.append("modify " + ", ".join(self.modified_modules))
         if self.contracting:
             what.append("contract " + ", ".join(f"{c['table']}.{c['column']}" for c in self.contracting))
+        renames = [c for c in self.phased_new if c.get("kind") == "rename"]
+        if renames:
+            what.append("rename " + ", ".join(f"{c['table']}.{c['from_column']}->{c['column']}" for c in renames))
         return f"evolve ({self.kind}) {'; '.join(what)} [contract {self.contract.digest[:12]}]"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -551,6 +572,45 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 if f.get("references"):
                     detail += "; nullable foreign key to an existing table"
                 plan.changes.append({"kind": "add_field", "target": label, "classification": COMPATIBLE, "detail": detail})
+            tenant_column = baseline.security["multi_tenant"].get("tenant_column") if isinstance(baseline.security.get("multi_tenant"), dict) else None
+            for item in ech.get("rename_fields", []) if isinstance(ech.get("rename_fields"), list) else []:
+                source, target = str(item["from"]), str(item["to"])
+                label = f"{change.name}.{ech['name']}.{source}->{target}"
+                if not pg or table not in existing_tables:
+                    block("rename_needs_existing_postgresql_table", f"{label}: a rename in transition applies to an existing table of a PostgreSQL project (in memory, or on a new table, declare the field under its final name)")
+                    continue
+                fields_now = [ff for ff in ent.get("fields", []) if isinstance(ff, dict)]
+                if source in PROTECTED_COLUMNS or source == tenant_column or target == tenant_column or target in PROTECTED_COLUMNS:
+                    block("rename_protected_column", f"{label}: {source if source in PROTECTED_COLUMNS or source == tenant_column else target!r} is a column the tool manages (identity, ownership, tenancy, timestamps); it is never renamed")
+                    continue
+                declared = next((p for p in phased_ctx["manifest_phased"] if p.get("kind") == KIND_RENAME and p.get("table") == table and p.get("from_column") == source and p.get("column") == target), None)
+                if declared is not None:
+                    plan.changes.append({"kind": "rename_field", "target": label, "classification": COMPATIBLE, "detail": f"rename {declared.get('op_id')} already declared ({declared.get('state_declared')}); no-op"})
+                    continue
+                in_transition = [p for p in phased_ctx["manifest_phased"] + phased_ctx["new"] if p.get("table") == table and p.get("state_declared") == "expand" and (p.get("column") in (source, target) or p.get("from_column") in (source, target))]
+                if in_transition:
+                    block("rename_column_in_transition", f"{label}: {source!r} or {target!r} already takes part in a phased change in transition ({', '.join(str(p.get('op_id')) for p in in_transition)}); finish it first")
+                    continue
+                old_doc = next((ff for ff in fields_now if ff.get("name") == source), None)
+                if old_doc is None:
+                    block("rename_source_exists", f"{label}: {source!r} is not a field of {ech['name']}")
+                    continue
+                if any(ff.get("name") == target for ff in fields_now):
+                    block("rename_target_free", f"{label}: {target!r} already exists on {ech['name']}; a rename needs a free target name")
+                    continue
+                if old_doc.get("references"):
+                    block("rename_protected_column", f"{label}: {source!r} is a foreign key; renaming a relation is not supported in this version")
+                    continue
+                params = {"source": source}
+                op_id = operation_id(table, target, MIRROR_STRATEGY, params, phased_ctx.get("head_before") or "")
+                if any(p.get("op_id") == op_id for p in phased_ctx["manifest_phased"]):
+                    plan.changes.append({"kind": "rename_field", "target": label, "classification": COMPATIBLE, "detail": f"rename {op_id} already declared; no-op"})
+                    continue
+                new_doc = dict(old_doc, name=target)
+                ent["fields"] = [new_doc if ff.get("name") == source else ff for ff in fields_now]
+                trigger, function = sync_names(table, op_id)
+                phased_ctx["new"].append({"op_id": op_id, "kind": KIND_RENAME, "module": change.name, "entity": ech["name"], "table": table, "column": target, "from_column": source, "from_field": json.loads(json.dumps(old_doc)), "field_type": old_doc.get("type"), "required": bool(old_doc.get("required", True)), "strategy": MIRROR_STRATEGY, "params": params, "state_declared": "expand", "declared_on_head": phased_ctx.get("head_before"), "expand_revision": None, "index_revision": None, "contract_revision": None, "application_version": None, "sync": {"mechanism": "trigger", "trigger": trigger, "function": function}, "source_of_truth": "from_column", "read_policy": "from_column", "write_policy": "both", "transition": "A (old name only) and B (both names) coexist on the expanded schema; retire and contract are not available in this version"})
+                plan.changes.append({"kind": "rename_field", "target": label, "classification": COMPATIBLE, "detail": f"rename in transition (operation {op_id}): {target!r} is added nullable next to {source!r}; a sync trigger keeps both equal for every write of either application version; the backfill reconciles the rows written before it; the old column stays the source of truth and nothing is dropped in this version"})
             names_now = {ff.get("name") for ff in ent.get("fields", []) if isinstance(ff, dict)}
             for spec_index in ech.get("add_indexes", []) if isinstance(ech.get("add_indexes"), list) else []:
                 columns = list(spec_index.get("columns", []))
@@ -573,6 +633,9 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 pending = next((p for p in phased_ctx["manifest_phased"] if p.get("op_id") == item["operation"]), None)
                 if pending is None or pending.get("table") != table or pending.get("column") != item["name"]:
                     block("contract_operation_known", f"{label}: operation {item['operation']} is not a phased change of {table}.{item['name']} recorded in the manifest")
+                    continue
+                if pending.get("kind") == KIND_RENAME:
+                    block("contract_rename_available", f"{label}: operation {item['operation']} is a rename in transition; its retire and contract phases are not available in this version (nothing is retired or dropped)")
                     continue
                 if pending.get("state_declared") != "expand":
                     block("contract_operation_pending", f"{label}: operation {item['operation']} is already declared {pending.get('state_declared')!r}")
@@ -828,7 +891,7 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     new_bp = build(evolved, rec, lineage, phases)
     new_files = dict(new_bp.files)
     history = list(model.manifest.get("history") or [{"operation": "generate", "spec_digest": baseline.digest, "modules": existing}])
-    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting]}})
+    history.append({"operation": "evolve", "contract_digest": contract.digest, "previous_spec_digest": baseline.digest, "spec_digest": evolved.digest, "added_modules": plan.added_modules, "modified_modules": plan.modified_modules, "phased": {"expanded": [x["op_id"] for x in plan.phased_new if x.get("kind") != KIND_RENAME], "renamed": [x["op_id"] for x in plan.phased_new if x.get("kind") == KIND_RENAME], "indexes": [x["name"] for x in plan.indexes_new], "contracted": [x["op_id"] for x in plan.contracting]}})
     manifest = build_manifest(evolved, new_bp, tool_version, history=history)
     if lineage:
         for rel in lineage.files:
@@ -912,6 +975,7 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
             "revisions": [{"revision": x["revision"], "file": x["file"], "phase": x.get("phase", "additive"), "transactional": x.get("transactional", True), "reversible": x.get("reversible", True)} for x in delta],
             "phases": phase_descriptions(evolved, plan.phased_new, plan.indexes_new, plan.contracting, lineage.head, expand_rev, index_rev, contract_rev),
             "backfills": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "strategy": op["strategy"], "params": op["params"], "application_version": op["application_version"], "run": f"python -m {evolved.package}.ops.backfill run {op['op_id']}", "verify": f"python -m {evolved.package}.ops.backfill verify --application-version {op['application_version']} --output evidence.json", "state": "declared: expand; applied and verified states are read from the database, never from the repository"} for op in plan.phased_new],
+            "renames": [{"operation": op["op_id"], "table": op["table"], "from": op["from_column"], "to": op["column"], "strategy": "expand_contract", "sync": op["sync"], "source_of_truth": "the old column until the rename is retired", "read_policy": "the transitional application reads the old column and exposes both names (old one deprecated)", "write_policy": "the transitional application writes both; the old application writes the old one; the sync trigger mirrors either write, the old column winning when one statement sets both", "coexistence": "A (old name only) and B (both names) may run together; C (new name only) needs the retire phase, not available in this version", "next": "retire (remove the old name from the code) and contract (drop the old column): later increments, each an authorised evolution", "verify": f"python -m {evolved.package}.ops.backfill verify: mismatch_rows must be 0 and the sync trigger enabled"} for op in plan.phased_new if op.get("kind") == KIND_RENAME],
             "contract": [{"operation": op["op_id"], "table": op["table"], "column": op["column"], "revision": contract_rev, "reversible": True} for op in plan.contracting],
         })
         if plan.phased_new or plan.indexes_new or plan.contracting:
@@ -937,6 +1001,9 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         elif c["kind"] == "add_field" and "nullable" in c["detail"]:
             plan.risks.append(f"{c['target']}: existing rows read NULL; downgrade drops the column and its data")
     for op in plan.phased_new:
+        if op.get("kind") == KIND_RENAME:
+            plan.risks.append(f"{op['table']}.{op['from_column']} -> {op['column']} (operation {op['op_id']}): rename in transition: `alembic upgrade head` adds the new column and the sync trigger {op['sync']['trigger']}; run `python -m {evolved.package}.ops.backfill run {op['op_id']}` as the owner to reconcile the rows written before the trigger; the old column stays the source of truth; hand-written SQL that names {op['from_column']!r} keeps working, hand-written SQL that expects {op['column']!r} to be filled must wait for the backfill; nothing is retired or dropped in this version")
+            continue
         plan.risks.append(f"{op['table']}.{op['column']} (operation {op['op_id']}): state is declared, not applied: run `alembic upgrade head`, then `python -m {evolved.package}.ops.backfill run {op['op_id']}` as the owner, then `verify --application-version {op['application_version']}`; until the contract phase the column is nullable and the read schema optional; the backfill never overwrites a value and reports `complete` only after counting zero pending rows")
         if evolved.rls:
             plan.risks.append(f"{op['table']}.{op['column']}: the table has row-level security; the runner refuses to run as a role that does not bypass RLS (it would silently see no rows): use the owner URL")

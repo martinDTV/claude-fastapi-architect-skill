@@ -60,7 +60,7 @@
   ],
   "package": "parcels",
   "phased_changes": [],
-  "schema": "fastapi-architect/generation/1.3",
+  "schema": "fastapi-architect/generation/1.4",
   "security": {
     "authentication": "api_key",
     "authorization_declared": null,

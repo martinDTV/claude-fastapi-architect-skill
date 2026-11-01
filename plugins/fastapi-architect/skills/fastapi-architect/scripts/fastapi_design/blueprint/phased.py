@@ -30,13 +30,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..spec import Spec
 from ._helpers import _ordered_entities
 
-BACKFILL_STRATEGIES = ("constant", "copy_column", "uuid", "now")
-EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.0"
+BACKFILL_STRATEGIES = ("constant", "copy_column", "uuid", "now")  # declared by hand in a contract
+MIRROR_STRATEGY = "mirror_column"  # the backfill of a rename: never declared by hand, derived from rename_fields
+RENAME_STRATEGIES = ("expand_contract",)
+KIND_ADD, KIND_RENAME = "add", "rename"
+EVIDENCE_SCHEMA = "fastapi-architect/migration-evidence/1.1"  # 1.1 (v2.2): rename operations carry mismatch_rows, columns_agree and the sync trigger state
+EVIDENCE_SCHEMAS = ("fastapi-architect/migration-evidence/1.0", EVIDENCE_SCHEMA)
 PHASE_EXPAND = "expand"
 PHASE_INDEX = "index"
 PHASE_CONTRACT = "contract"
@@ -73,6 +77,51 @@ def contract_revision(head: str, operations: Sequence[str]) -> str:
 
 def pending_columns(pending: Sequence[Dict[str, object]]) -> frozenset:
     return frozenset((str(c["table"]), str(c["column"])) for c in pending)
+
+
+def renames_of(pending: Sequence[Dict[str, object]]) -> Dict[Tuple[str, str], Dict[str, object]]:
+    """``(table, new column) -> rename entry`` for the pending renames (expand declared, retire not yet)."""
+    return {(str(c["table"]), str(c["column"])): c for c in pending if c.get("kind") == KIND_RENAME}
+
+
+def sync_names(table: str, op_id: str) -> Tuple[str, str]:
+    """The trigger and the function that keep both columns of a rename equal, named after the operation (63 bytes at most)."""
+    stem = f"{table[:30]}_{op_id}"
+    return f"trg_{stem}_sync", f"fn_{stem}_sync"
+
+
+def rename_sync_ddl(table: str, old: str, new: str, op_id: str) -> Tuple[List[str], List[str]]:
+    """``op.execute`` lines that create (up) and drop (down) the sync trigger of a rename in transition.
+
+    A BEFORE INSERT OR UPDATE row trigger: whichever column a writer touched, the other follows inside the same
+    statement and transaction; the old column wins when a single statement sets both to different values (it is the
+    source of truth until the rename is retired). It only assigns to NEW, so it never issues another statement and
+    cannot recurse; it runs with the privileges of the writer (SECURITY INVOKER) and leaves row-level security to
+    the table's policies, which still check the final row."""
+    trigger, function = sync_names(table, op_id)
+    body = [
+        f"CREATE OR REPLACE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$",
+        "BEGIN",
+        "    IF TG_OP = 'INSERT' THEN",
+        f'        IF NEW."{old}" IS NOT NULL THEN',
+        f'            NEW."{new}" := NEW."{old}";',
+        f'        ELSIF NEW."{new}" IS NOT NULL THEN',
+        f'            NEW."{old}" := NEW."{new}";',
+        "        END IF;",
+        f'    ELSIF NEW."{old}" IS DISTINCT FROM OLD."{old}" THEN',
+        f'        NEW."{new}" := NEW."{old}";',
+        f'    ELSIF NEW."{new}" IS DISTINCT FROM OLD."{new}" THEN',
+        f'        NEW."{old}" := NEW."{new}";',
+        "    END IF;",
+        "    RETURN NEW;",
+        "END",
+        "$$",
+    ]
+    create = [f'CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON "{table}"', f"FOR EACH ROW EXECUTE FUNCTION {function}()"]
+    up = ["    op.execute(", '        """', *[f"        {line}" for line in body], '        """', "    )"]
+    up += ["    op.execute(", '        """', *[f"        {line}" for line in create], '        """', "    )"]
+    down = [f"    op.execute('DROP TRIGGER IF EXISTS {trigger} ON \"{table}\"')", f'    op.execute("DROP FUNCTION IF EXISTS {function}()")']
+    return up, down
 
 
 def _literal(value: object) -> str:
@@ -304,11 +353,17 @@ def backfill_specs(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         "",
         "BACKFILLS: dict[str, dict] = {",
     ]
-    keys = ("table", "column", "field_type", "strategy", "params", "state_declared", "expand_revision", "index_revision", "contract_revision")
+    keys = ("table", "column", "field_type", "strategy", "params", "state_declared", "expand_revision", "index_revision", "contract_revision", "kind", "from_column", "sync", "source_of_truth")
     for c in sorted(changes, key=lambda x: str(x["op_id"])):
         lines.append(f"    {json.dumps(str(c['op_id']))}: {{")
         for key in keys:
-            lines.append(f"        {_literal(key)}: {_literal(c.get(key))},")
+            value = c.get(key)
+            if isinstance(value, dict) and value:
+                lines.append(f"        {_literal(key)}: {{")
+                lines.extend(f"            {_literal(k)}: {_literal(value[k])}," for k in sorted(value, key=str))
+                lines.append("        },")
+            else:
+                lines.append(f"        {_literal(key)}: {_literal(value)},")
         lines.append(f"        'checksum': {_literal(definition_checksum(c))},")
         lines.append("    },")
     lines += ["}", "", "INDEXES: list[dict] = ["]
@@ -326,9 +381,12 @@ def backfill_runner(spec: Spec) -> str:
     return f'''"""Backfill runner and migration evidence for phased changes (generated by FastAPI Architect v2.1).
 
 ``python -m {pkg}.ops.backfill run OP_ID [--batch-size N] [--max-batches N] [--max-seconds S]
-[--batch-pause-ms M]`` fills the NULL values of a column added by an expand revision, in keyset batches ordered by
-the primary key, one transaction per batch that writes the rows and the checkpoint together. ``status OP_ID``
-prints the checkpoint.
+[--batch-pause-ms M]`` fills the NULL values of a column added by an expand revision, or makes the new column of a
+rename equal to the old one wherever they differ (strategy ``mirror_column``), in keyset batches ordered by the
+primary key, one transaction per batch that writes the rows and the checkpoint together. ``status OP_ID`` prints
+the checkpoint. For a rename in transition the old column is the source of truth: the sync trigger created by the
+expand revision keeps both columns equal for every write made after it, and the backfill reconciles the rows written
+before it; ``complete`` means zero rows where the columns differ.
 ``verify [--application-version DIGEST] [--output FILE]`` writes the migration evidence the planner reads before it
 accepts a contract phase.
 
@@ -396,9 +454,10 @@ EXIT_CHECKPOINT, EXIT_RLS, EXIT_INCOMPLETE, EXIT_UNKNOWN = 4, 5, 6, 7
 MAX_PASSES = 3
 IDENTIFIER = set("abcdefghijklmnopqrstuvwxyz0123456789_")
 PENDING_IDS = (
-    "SELECT id FROM {{table}} WHERE {{column}} IS NULL AND (CAST(:last AS uuid) IS NULL OR id > CAST(:last AS uuid)) "
+    "SELECT id FROM {{table}} WHERE {{predicate}} AND (CAST(:last AS uuid) IS NULL OR id > CAST(:last AS uuid)) "
     "ORDER BY id LIMIT :n FOR UPDATE SKIP LOCKED"
 )
+TRIGGER_STATE = "SELECT tgenabled::text FROM pg_trigger WHERE tgname = :n AND NOT tgisinternal"
 RLS_STATE = (
     "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "
     "WHERE relname = :t AND relnamespace = current_schema()::regnamespace"
@@ -468,11 +527,19 @@ def typed_value(field_type: str, value: Any) -> Any:
     return value
 
 
+def pending_predicate(definition: dict, column: str) -> str:
+    """Rows the operation still has to touch: NULL values for an added column; for a rename, every row whose new
+    column differs from the old one (NULL included), which is also what ``verify`` reports as mismatch_rows."""
+    if definition["strategy"] == "mirror_column":
+        return f"{{column}} IS DISTINCT FROM {{q(str((definition.get('params') or {{}})['source']))}}"
+    return f"{{column}} IS NULL"
+
+
 def value_expression(definition: dict) -> tuple[str, dict]:
     strategy, params = definition["strategy"], definition.get("params") or {{}}
     if strategy == "constant":
         return ":value", {{"value": typed_value(definition["field_type"], params["value"])}}
-    if strategy == "copy_column":
+    if strategy in ("copy_column", "mirror_column"):
         return q(str(params["source"])), {{}}
     if strategy == "uuid":
         return "gen_random_uuid()", {{}}
@@ -564,14 +631,15 @@ async def _batch(
     last_key: str | None,
     n: int,
     op_id: str,
+    predicate: str,
 ) -> tuple[int, str | None]:
-    """One transaction: select the next NULL keys after the checkpoint, fill them, advance the checkpoint."""
+    """One transaction: select the next pending keys after the checkpoint, fill them, advance the checkpoint."""
     async with conn.begin():
-        select = text(PENDING_IDS.format(table=table_name, column=column))
+        select = text(PENDING_IDS.format(table=table_name, predicate=predicate))
         ids = [row[0] for row in (await conn.execute(select, {{"last": last_key, "n": n}})).all()]
         if not ids:
             return 0, last_key
-        update = text(f"UPDATE {{table_name}} SET {{column}} = {{expression}} WHERE id = ANY(:ids) AND {{column}} IS NULL")
+        update = text(f"UPDATE {{table_name}} SET {{column}} = {{expression}} WHERE id = ANY(:ids) AND {{predicate}}")
         result = await conn.execute(update, {{**params, "ids": ids}})
         new_key = str(max(ids))
         await conn.execute(
@@ -608,6 +676,7 @@ async def run_backfill(
         raise BackfillError(EXIT_USAGE, "batch size must be between 1 and 50000")
     table_name, column = q(str(definition["table"])), q(str(definition["column"]))
     expression, params = value_expression(definition)
+    predicate = pending_predicate(definition, column)
     worker = f"{{socket.gethostname()}}:{{os.getpid()}}"
     started = time.monotonic()
     report: dict[str, Any] = {{
@@ -631,7 +700,7 @@ async def run_backfill(
             async with conn.begin():
                 progress = await _ensure_progress(conn, op_id, definition, worker)
                 if progress["state"] == "complete":
-                    recount_sql = f"SELECT count(*) FROM {{table_name}} WHERE {{column}} IS NULL"
+                    recount_sql = f"SELECT count(*) FROM {{table_name}} WHERE {{predicate}}"
                     pending = int((await conn.execute(text(recount_sql))).scalar() or 0)
                     if pending == 0:
                         note = "already complete: zero pending rows re-counted"
@@ -663,7 +732,7 @@ async def run_backfill(
                         stopped = True
                         break
                     count, last_key = await _batch(
-                        conn, table_name, column, expression, params, last_key, batch_size, op_id
+                        conn, table_name, column, expression, params, last_key, batch_size, op_id, predicate
                     )
                     if count == 0:
                         break
@@ -675,7 +744,7 @@ async def run_backfill(
                     report.update(state="running", note="stopped by the batch or time limit; resume to continue")
                     break
                 report["passes_this_run"] += 1
-                count_sql = f"SELECT count(*) FROM {{table_name}} WHERE {{column}} IS NULL"
+                count_sql = f"SELECT count(*) FROM {{table_name}} WHERE {{predicate}}"
                 async with conn.begin():  # the count and the pass counter together: no autobegun transaction left open
                     pending = (await conn.execute(text(count_sql))).scalar() or 0
                     passes_sql = f"UPDATE {{PROGRESS_TABLE}} SET passes = passes + 1 WHERE op_id = :op"
@@ -731,8 +800,28 @@ async def _operation_evidence(
         "progress": None,
     }}
     if column is not None:
-        pending_sql = f"SELECT count(*) FROM {{q(str(definition['table']))}} WHERE {{q(str(definition['column']))}} IS NULL"
+        predicate = pending_predicate(definition, q(str(definition["column"])))
+        pending_sql = f"SELECT count(*) FROM {{q(str(definition['table']))}} WHERE {{predicate}}"
         entry["pending_rows"] = int((await conn.execute(text(pending_sql))).scalar() or 0)
+    if definition.get("kind") == "rename":
+        sync = dict(definition.get("sync") or {{}})
+        state = (await conn.execute(text(TRIGGER_STATE), {{"n": sync.get("trigger")}})).scalar()
+        entry.update(
+            kind="rename",
+            source_column=definition.get("from_column"),
+            source_of_truth=definition.get("source_of_truth"),
+            mismatch_rows=entry["pending_rows"],
+            columns_agree=entry["pending_rows"] == 0 if entry["pending_rows"] is not None else None,
+            sync={{
+                "mechanism": sync.get("mechanism"),
+                "trigger": sync.get("trigger"),
+                "present": state is not None,
+                "enabled": state in ("O", "A"),
+            }},
+        )
+        if definition.get("state_declared") == "expand" and (state is None or state not in ("O", "A")):
+            what = "missing" if state is None else "disabled"
+            problems.append(f"{{op_id}}: sync trigger {{sync.get('trigger')}} is {{what}}: writes are not mirrored")
     if progress_exists:
         row = (
             await conn.execute(
@@ -887,24 +976,58 @@ def _sql_literal(field_type: str, name: str) -> str:
     return samples.get(field_type, "'x'")
 
 
+def _sql_literal_changed(field_type: str, name: str) -> str:
+    """A second value of the type, different from ``_sql_literal`` (the trigger test writes it to either column)."""
+    samples = {"str": f"'{name}-changed'", "int": "2", "float": "2.5", "bool": "false", "uuid": "'11111111-1111-4111-8111-111111111111'", "datetime": "now() - interval '1 day'", "date": "current_date - 1", "decimal": "19.99"}
+    return samples.get(field_type, "'y'")
+
+
 def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Sequence[Dict[str, object]]) -> str:
     """``tests/test_backfill.py`` of the generated project: the runner on an empty database, on rows inserted with
     NULL values in small batches, resumed from a partial run, idempotent, refusing a foreign checkpoint; the evidence."""
     pkg = spec.package
     pending = [c for c in changes if c.get("state_declared") == PHASE_EXPAND]
     target = pending[0] if pending else None  # once every change is contracted the insert-based tests skip: the columns are NOT NULL
+    renames = [c for c in pending if c.get("kind") == KIND_RENAME]
     insert_sql = "SELECT 1"
     if target is not None:
         entity = next((e for _m, e in _ordered_entities(spec) if e.plural == target["table"]), None)
         if entity is not None:
+            renamed_here = {str(r["column"]) for r in renames if r["table"] == target["table"]}
             cols, vals = ["id"], ["gen_random_uuid()"]
             for f in entity.fields:
-                if f.name == target["column"] or not f.required or f.has_default or f.references:
+                if f.name == target["column"] or f.name in renamed_here or not f.required or f.has_default or f.references:
                     continue
                 cols.append(f'"{f.name}"')
                 vals.append(_sql_literal(f.type, f.name))
+            for r in renames:  # the old columns still exist and keep their constraints: an old-version writer fills them
+                if r["table"] == target["table"]:
+                    cols.append(f'"{r["from_column"]}"')
+                    vals.append(_sql_literal(str(r.get("field_type")), str(r["from_column"])))
             insert_sql = f'INSERT INTO "{target["table"]}" ({", ".join(cols)}) VALUES ({", ".join(vals)})'
     op_literal = json.dumps(str(target["op_id"])) if target else "None"
+    if target is not None and target.get("kind") == KIND_RENAME:
+        predicate = f'"{target["column"]}" IS DISTINCT FROM "{target["from_column"]}"'
+        sync_trigger = json.dumps(sync_names(str(target["table"]), str(target["op_id"]))[0])
+    else:
+        predicate = f'"{target["column"]}" IS NULL' if target else "false"
+        sync_trigger = "None"
+    def _insert_for(table: str) -> str:
+        entity_of = next((e for _m, e in _ordered_entities(spec) if e.plural == table), None)
+        renamed = {str(r["column"]) for r in renames if r["table"] == table}
+        cols, vals = ["id"], ["gen_random_uuid()"]
+        for f in (entity_of.fields if entity_of is not None else []):
+            if f.name in renamed or not f.required or f.has_default or f.references:
+                continue
+            cols.append(f'"{f.name}"')
+            vals.append(_sql_literal(f.type, f.name))
+        for r in renames:
+            if r["table"] == table:
+                cols.append(f'"{r["from_column"]}"')
+                vals.append(_sql_literal(str(r.get("field_type")), str(r["from_column"])))
+        return f'INSERT INTO "{table}" ({", ".join(cols)}) VALUES ({", ".join(vals)})'
+
+    renames_literal_items = [{"op": str(r["op_id"]), "table": str(r["table"]), "old": str(r["from_column"]), "new": str(r["column"]), "sample": _sql_literal(str(r.get("field_type")), str(r["from_column"])), "changed": _sql_literal_changed(str(r.get("field_type")), str(r["from_column"])), "insert": _insert_for(str(r["table"]))} for r in renames]
     pending_literal = json.dumps([str(c["op_id"]) for c in pending])
     table_literal = json.dumps(str(target["table"])) if target else "None"
     column_literal = json.dumps(str(target["column"])) if target else "None"
@@ -922,6 +1045,11 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         f"PENDING_OPERATIONS = {pending_literal}",
         f"PENDING_TABLE = {table_literal}",
         f"PENDING_COLUMN = {column_literal}",
+        f"PENDING_PREDICATE = {json.dumps(predicate)}",
+        f"SYNC_TRIGGER = {sync_trigger}",
+        "RENAMES = [",
+        *[line for item in renames_literal_items for line in ["    {", *[part for k in sorted(item) for part in ([f"        {_literal(k)}: (", *[f"            {json.dumps(piece)}" for piece in _wrap(str(item[k]), 90)], "        ),"] if k == "insert" else [f"        {_literal(k)}: {_literal(item[k])},"])], "    },"]],
+        "]",
         f"INDEXES = {json.dumps([index_name(str(i['table']), list(i['columns'])) for i in indexes])}",
         "INSERT_ROW = (",
         *[f"    {json.dumps(part)}" for part in _wrap(insert_sql, 100)],
@@ -941,12 +1069,20 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         "",
         "",
         "def _pending(url: str) -> int:",
-        "    return int(run(_execute(url, f'SELECT count(*) FROM \"{PENDING_TABLE}\" WHERE \"{PENDING_COLUMN}\" IS NULL')))",
+        "    return int(run(_execute(url, f'SELECT count(*) FROM \"{PENDING_TABLE}\" WHERE {PENDING_PREDICATE}')))",
         "",
         "",
         "def _insert(url: str, rows: int) -> None:",
-        "    for _ in range(rows):",
-        "        run(_execute(url, INSERT_ROW))",
+        "    # rows a rename's sync trigger would mirror at once are inserted with it disabled: they stand for the rows written",
+        "    # before the expand revision existed, the ones the backfill is for",
+        "    if SYNC_TRIGGER:",
+        "        run(_execute(url, f'ALTER TABLE \"{PENDING_TABLE}\" DISABLE TRIGGER {SYNC_TRIGGER}'))",
+        "    try:",
+        "        for _ in range(rows):",
+        "            run(_execute(url, INSERT_ROW))",
+        "    finally:",
+        "        if SYNC_TRIGGER:",
+        "            run(_execute(url, f'ALTER TABLE \"{PENDING_TABLE}\" ENABLE TRIGGER {SYNC_TRIGGER}'))",
         "",
         "",
         "@pending_only",
@@ -998,6 +1134,24 @@ def backfill_tests(spec: Spec, changes: Sequence[Dict[str, object]], indexes: Se
         "    for name in INDEXES:",
         '        assert any(i["name"] == name and i["valid"] for i in evidence["indexes"]), evidence["indexes"]',
         '    assert evidence["ok"], evidence["problems"]',
+        "    for item in RENAMES:",
+        '        entry = evidence["operations"][item["op"]]',
+        '        assert entry["columns_agree"] and entry["mismatch_rows"] == 0 and entry["sync"]["enabled"], entry',
+        "",
+        "",
+        '@pytest.mark.skipif(not RENAMES, reason="no rename in transition")',
+        'def test_the_sync_trigger_mirrors_writes_of_either_column(migrated: str):',
+        '    for item in RENAMES:',
+        '        table, old, new = item["table"], item["old"], item["new"]',
+        '        agree = f\'SELECT "{old}" IS NOT DISTINCT FROM "{new}" FROM "{table}" WHERE id = :id\'',
+        '        insert = item["insert"] + " RETURNING id"  # every required column of the table, the old names among them',
+        '        row = run(_execute(migrated, insert))  # an old-version insert: the new column is mirrored at once',
+        '        assert run(_execute(migrated, agree, {"id": row}))',
+        '        run(_execute(migrated, f\'UPDATE "{table}" SET "{new}" = {item["changed"]} WHERE id = :id\', {"id": row}))',
+        '        assert run(_execute(migrated, agree, {"id": row}))  # a new-name write: the old column follows',
+        '        run(_execute(migrated, f\'UPDATE "{table}" SET "{old}" = {item["sample"]} WHERE id = :id\', {"id": row}))',
+        '        assert run(_execute(migrated, agree, {"id": row}))  # an old-name write: the new column follows',
+        '        run(_execute(migrated, f\'DELETE FROM "{table}" WHERE id = :id\', {"id": row}))',
         "",
     ]
     return "\n".join(lines)
@@ -1024,7 +1178,24 @@ def phase_descriptions(spec: Spec, new_changes: Sequence[Dict[str, object]], ind
             "evidence_required": [],
             "state_after": f"declared: expand; applied: when `alembic upgrade head` ran on a database; verified: `python -m {spec.package}.ops.backfill verify`",
             "columns": [f"{c['table']}.{c['column']}" for c in new_changes],
+            "renames": [{"operation": c["op_id"], "table": c["table"], "from": c["from_column"], "to": c["column"], "sync_trigger": sync_names(str(c["table"]), str(c["op_id"]))[0]} for c in new_changes if c.get("kind") == KIND_RENAME],
         })
+        if any(c.get("kind") == KIND_RENAME for c in new_changes):
+            phases.append({
+                "phase": "transition",
+                "revision": None,
+                "transactional": None,
+                "reversible": True,
+                "lock_profile": "no DDL: the sync trigger runs inside every INSERT and UPDATE of the table (one row lock per write, the one the statement takes anyway)",
+                "preconditions": ["expand revision applied (new column and sync trigger present)", "backfill of the rename complete (zero rows where the columns differ)"],
+                "evidence_required": [EVIDENCE_SCHEMA],
+                "source_of_truth": "the old column, until the rename is retired",
+                "read_policy": "the transitional application reads the old column (validation alias on the read schema) and exposes both names, the old one marked deprecated",
+                "write_policy": "the transitional application writes both columns in the same statement; the old application writes the old column only; the sync trigger mirrors either write to the other column, the old column winning when one statement sets both",
+                "coexistence": "A (old name only) and B (both names) may run together on the expanded schema; C (new name only) is not available in this version: retire and contract are later increments",
+                "state_after": "declared: expand (rename in transition); nothing is retired or dropped by this version",
+                "renames": [f"{c['table']}.{c['from_column']} -> {c['column']}" for c in new_changes if c.get("kind") == KIND_RENAME],
+            })
     if index_rev:
         phases.append({
             "phase": PHASE_INDEX,

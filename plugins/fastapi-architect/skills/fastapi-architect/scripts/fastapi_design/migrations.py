@@ -22,12 +22,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .blueprint.phased import BACKFILL_STRATEGIES, EVIDENCE_SCHEMA
+from .blueprint.phased import BACKFILL_STRATEGIES, EVIDENCE_SCHEMAS, RENAME_STRATEGIES
 from .spec import IDENT_RE
 
 DEFAULT_EVIDENCE_MAX_AGE_HOURS = 24.0
 OP_ID_RE = re.compile(r"^[0-9a-f]{16}$")
 PHASE_STATES = ("expand", "contract")
+PROTECTED_COLUMNS = ("id", "owner_id", "created_at")  # plus the tenant column, refused by the planner
+RENAME_KEYS = ("from", "to", "strategy", "sync")
 
 _TYPE_CHECKS = {
     "str": lambda v: isinstance(v, str),
@@ -186,6 +188,53 @@ def validate_authorization(raw: Any) -> Tuple[Dict[str, Any], List[str]]:
 # --------------------------------------------------------------------------- #
 
 
+def validate_rename_fields(items: Any, path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Errors of a ``rename_fields`` list (evolution 1.3): identifiers, one strategy (``expand_contract``), one sync
+    mechanism (``trigger``), no duplicate source or target; ``in_place`` is refused by name with the reason."""
+    errors: List[str] = []
+    out: List[Dict[str, Any]] = []
+    if not isinstance(items, list) or not items:
+        return out, [f"{path}: expected a non-empty list of {{from, to, strategy}} objects"]
+    seen_from: set = set()
+    seen_to: set = set()
+    for i, item in enumerate(items):
+        p = f"{path}[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{p}: expected an object")
+            continue
+        for key in item:
+            if key not in RENAME_KEYS and not str(key).startswith("x-"):
+                errors.append(f"{p}.{key}: unknown property (known: {', '.join(RENAME_KEYS)})")
+        source, target = item.get("from"), item.get("to")
+        if not isinstance(source, str) or not IDENT_RE.match(source):
+            errors.append(f"{p}.from: expected the current field name (lowercase identifier)")
+        if not isinstance(target, str) or not IDENT_RE.match(target):
+            errors.append(f"{p}.to: expected the new field name (lowercase identifier)")
+        if isinstance(source, str) and isinstance(target, str) and source == target:
+            errors.append(f"{p}: from and to are the same name")
+        strategy = item.get("strategy", "expand_contract")
+        if strategy == "in_place":
+            errors.append(f"{p}.strategy: 'in_place' (ALTER TABLE ... RENAME COLUMN) is not available: it is not online across application versions; this version supports 'expand_contract' only")
+        elif strategy not in RENAME_STRATEGIES:
+            errors.append(f"{p}.strategy: expected one of {', '.join(RENAME_STRATEGIES)}, got {strategy!r}")
+        sync = item.get("sync", "trigger")
+        if sync != "trigger":
+            errors.append(f"{p}.sync: expected 'trigger' (the only mechanism that reflects the writes of an application version that knows only the old name), got {sync!r}")
+        if isinstance(target, str) and target in PROTECTED_COLUMNS:
+            errors.append(f"{p}.to: {target!r} is a column every table has; refused")
+        if isinstance(source, str):
+            if source in seen_from or source in seen_to:
+                errors.append(f"{p}.from: {source!r} already takes part in another rename of this entity")
+            seen_from.add(source)
+        if isinstance(target, str):
+            if target in seen_to or target in seen_from:
+                errors.append(f"{p}.to: {target!r} already takes part in another rename of this entity")
+            seen_to.add(target)
+        if not errors or all(not e.startswith(p) for e in errors):
+            out.append({"from": source, "to": target, "strategy": strategy, "sync": sync})
+    return out, errors
+
+
 def load_evidence(path: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """Read and structurally validate a migration evidence file; nothing in it is trusted beyond its shape here."""
     try:
@@ -197,8 +246,8 @@ def load_evidence(path: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     if not isinstance(data, dict):
         return None, ["evidence: expected a JSON object"]
     errors: List[str] = []
-    if data.get("schema") != EVIDENCE_SCHEMA:
-        errors.append(f"evidence.schema: expected {EVIDENCE_SCHEMA!r}, got {data.get('schema')!r}")
+    if data.get("schema") not in EVIDENCE_SCHEMAS:
+        errors.append(f"evidence.schema: expected one of {', '.join(EVIDENCE_SCHEMAS)}, got {data.get('schema')!r}")
     if not isinstance(data.get("generated_at"), str) or not _iso(data["generated_at"]):
         errors.append("evidence.generated_at: expected an ISO-8601 timestamp")
     if not isinstance(data.get("alembic"), dict) or not isinstance(data["alembic"].get("current"), list):
@@ -222,6 +271,9 @@ def contract_preconditions(change: Dict[str, Any], evidence: Optional[Dict[str, 
     any unsatisfied one; the contract revision checks the database again when it runs."""
     out: List[Tuple[str, bool, str]] = []
     op_id = str(change.get("op_id"))
+    if change.get("kind") == "rename":
+        out.append(("contract_rename_available", False, f"operation {op_id} is a rename in transition: its retire and contract phases (removing the old name from the code, then dropping the old column) are not available in this version; the old column stays the source of truth"))
+        return out
     out.append(("contract_authorized", bool(authorized and declared_by), f"declared by {declared_by!r} and --authorize-contract given" if authorized and declared_by else "needs --authorize-contract on the command line and authorization.contract.declared_by in the contract: a contract phase is a human decision, never the continuation of a backfill"))
     out.append(("contract_operation_pending", change.get("state_declared") == "expand", f"operation {op_id} is declared {change.get('state_declared')!r} in the manifest" if change.get("state_declared") != "expand" else f"operation {op_id}: expand declared, contract pending"))
     out.append(("contract_reversible", True, "SET NOT NULL is reversed by DROP NOT NULL; no data is dropped by this phase"))

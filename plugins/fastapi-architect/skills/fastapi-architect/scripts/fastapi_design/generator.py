@@ -32,8 +32,8 @@ from .blueprint import Blueprint
 from .spec import Spec
 
 MANIFEST = ".fastapi-architect/generation.json"
-MANIFEST_SCHEMA = "fastapi-architect/generation/1.3"  # 1.2 records the implemented security model (increment 5); 1.3 (v2.1) records phased changes and concurrent indexes
-MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2", "fastapi-architect/generation/1.3")
+MANIFEST_SCHEMA = "fastapi-architect/generation/1.4"  # 1.2 records the implemented security model (increment 5); 1.3 (v2.1) records phased changes and concurrent indexes; 1.4 (v2.2) records renames in transition (kind, from_column, sync, policies)
+MANIFEST_SCHEMAS = ("fastapi-architect/generation/1.0", "fastapi-architect/generation/1.1", "fastapi-architect/generation/1.2", "fastapi-architect/generation/1.3", "fastapi-architect/generation/1.4")
 
 
 class GenerationError(RuntimeError):

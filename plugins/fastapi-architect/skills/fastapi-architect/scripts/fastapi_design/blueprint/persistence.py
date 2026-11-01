@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 from ..spec import FieldSpec, Spec
 from ._base import SA_TYPES, Layout, Lineage, PhaseState
 from ._helpers import _call, _entity_index, _fk_fields, _fk_name, _ordered_entities, _rls, _sql_default, _tenant
-from .phased import pending_columns, progress_table, progress_table_ddl
+from .phased import KIND_RENAME, pending_columns, progress_table, progress_table_ddl, rename_sync_ddl
 
 
 def _db(spec: Spec) -> str:
@@ -371,6 +371,12 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[P
     if phased_now and lineage is not None and progress not in set(lineage.tables):
         up += progress_table_ddl(spec)
         down.insert(0, f'    op.drop_table("{progress}")')
+    for r in (phases.new_phased if phases is not None else []):
+        if r.get("kind") != KIND_RENAME:
+            continue
+        sync_up, sync_down = rename_sync_ddl(str(r["table"]), str(r["from_column"]), str(r["column"]), str(r["op_id"]))
+        up += [f"    # rename {r['table']}.{r['from_column']} -> {r['column']} in transition: the trigger keeps both columns equal for every write"] + sync_up
+        down = sync_down + down
     changes = new_tables + [f"{t}.{f.name}" for t, f, _r in columns]
     expand_title = f"Expand {', '.join(changes)} in phases"
     if len(expand_title) > 60:

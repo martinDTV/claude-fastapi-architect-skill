@@ -67,6 +67,7 @@ from .phased import (
     index_revision,
     pending_columns,
     progress_table,
+    renames_of,
 )
 from .scaffold import _api_router, _audit_config, _config, _env_example, _errors, _gitignore, _main, _pyproject, _readme
 from .security import _authz_module, _security
@@ -83,6 +84,7 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
     pkg = spec.package
     pg = spec.persistence["kind"] == "postgresql"
     pending = pending_columns(phases.pending) if phases is not None else frozenset()
+    renames = renames_of(phases.pending) if phases is not None else {}
     indexed = frozenset((str(i["table"]), str(c)) for i in (phases.all_indexes if phases is not None else []) for c in i["columns"])
     has_phased = phases is not None and bool(phases.all_phased or phases.new_phased or phases.contracting)
     files: Dict[str, str] = {}
@@ -155,10 +157,10 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
         ports = ports_by_module[m.name]
         if not layout.by_layer:
             files[f"src/{pkg}/modules/{m.name}/__init__.py"] = f'"""{m.description}"""\n'
-        files[layout.path("schemas", m.name)] = _schemas(spec, m, pending)
-        files[layout.path("models", m.name)] = _models(spec, m, layout, pending, indexed)
+        files[layout.path("schemas", m.name)] = _schemas(spec, m, pending, renames)
+        files[layout.path("models", m.name)] = _models(spec, m, layout, pending, indexed, renames)
         files[layout.path("repository", m.name)] = _repository(spec, m, layout)
-        files[layout.path("service", m.name)] = _service(spec, m, layout, ports)
+        files[layout.path("service", m.name)] = _service(spec, m, layout, ports, renames)
         files[layout.path("dependencies", m.name)] = _dependencies(spec, m, layout, ports)
         files[layout.path("router", m.name)] = _router(spec, m, layout)
         if ports:
@@ -167,7 +169,7 @@ def build(spec: Spec, rec: Recommendation, lineage: Optional[Lineage] = None, ph
                 files[layout.path("adapters", m.name)] = ""
             for p in ports:
                 files[layout.adapter_path(m.name, p.name)] = _adapter(p)
-        files[f"tests/test_{m.name}.py"] = _tests(spec, m, ports)
+        files[f"tests/test_{m.name}.py"] = _tests(spec, m, ports, renames)
     if layout.by_layer:
         for folder in ("api", "schemas", "services", "repositories", "models", "dependencies") + (("ports", "adapters") if all_ports else ()):
             files.setdefault(f"src/{pkg}/{folder}/__init__.py", "")

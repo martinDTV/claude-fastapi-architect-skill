@@ -137,7 +137,7 @@ class ContractValidationTests(unittest.TestCase):
     def test_the_examples_validate(self) -> None:
         for path in (EXPAND_EXAMPLE, CONTRACT_EXAMPLE):
             contract = load_evolution(str(path))
-            self.assertEqual(contract.schema, EVOLUTION_SCHEMA)
+            self.assertEqual(contract.schema, "fastapi-architect/evolution/1.2")  # the phased examples stay 1.2; 1.3 (v2.2) adds renames
         contract = load_evolution(str(CONTRACT_EXAMPLE))
         self.assertEqual(contract.authorization["contract"]["max_evidence_age_hours"], 24.0)
         self.assertEqual(self.errors(self.base()), [])

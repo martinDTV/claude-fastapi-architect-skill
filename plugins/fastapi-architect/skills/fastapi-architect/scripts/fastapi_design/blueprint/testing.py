@@ -27,6 +27,7 @@ from ._helpers import (
     _rls,
     _roles_admin,
     _roles_member,
+    _sample,
     _tenant,
     _visibility,
 )
@@ -296,7 +297,8 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
     return "\n".join(lines) + "\n"
 
 
-def _tests(spec: Spec, module: ModuleSpec, ports: List[IntegrationSpec]) -> str:
+def _tests(spec: Spec, module: ModuleSpec, ports: List[IntegrationSpec], renames: Optional[Dict[Tuple[str, str], Dict[str, object]]] = None) -> str:
+    renames = renames or {}
     api_key = spec.security["authentication"] == "api_key"
     oidc = _oidc(spec)
     authz = _authz(spec)
@@ -367,6 +369,15 @@ def _tests(spec: Spec, module: ModuleSpec, ports: List[IntegrationSpec]) -> str:
                 if bound:
                     _pm, pe = index[f.references]  # type: ignore[index]
                     test(f"test_create_{x}_cannot_reference_a_{f.name}_of_another_tenant", [f"    foreign = create_{pe.snake}(client, {as_other('carol')}, TENANT_B)", f'    payload["{f.name}"] = foreign["id"]', "    response = client.post(url, json=payload, headers=headers)", "    assert response.status_code == 409, response.text  # composite foreign key (tenant_id, id)"])
+        for f in e.fields:
+            entry = renames.get((e.plural, f.name))
+            if entry is None or not ops["create"] or f.type not in ECHOED_TYPES:
+                continue
+            old = str(entry["from_column"])
+            if True:
+                test(f"test_create_{x}_accepts_the_former_name_{old}_and_returns_both_names", [f'    payload["{old}"] = payload.pop("{f.name}")', "    response = client.post(url, json=payload, headers=headers)", "    assert response.status_code == 201, response.text", "    body = response.json()", f'    assert body["{f.name}"] == body["{old}"] == PAYLOAD_{up}["{f.name}"]'])
+            if ops["update"]:
+                test(f"test_update_{x}_through_the_former_name_{old}_writes_both_columns", ["    created = client.post(url, json=payload, headers=headers).json()", f'    updated = client.patch({item}, json={{"{old}": {_changed_sample(f)}}}, headers=headers)', "    assert updated.status_code == 200, updated.text", f'    assert updated.json()["{f.name}"] == updated.json()["{old}"] == {_changed_sample(f)}', f'    again = client.patch({item}, json={{"{f.name}": {_sample(f)}}}, headers=headers)', f'    assert again.json()["{old}"] == {_sample(f)}'])
         if ops["get_route"] and ops["create"]:
             test(f"test_get_{x}_returns_the_created_one_and_404_for_unknown", ["    created = client.post(url, json=payload, headers=headers).json()", f"    found = client.get({item}, headers=headers)", "    assert found.status_code == 200", '    assert found.json()["id"] == created["id"]', '    missing = client.get(f"{url}/{uuid.uuid4()}", headers=headers)', "    assert missing.status_code == 404", '    assert missing.headers["content-type"].startswith("application/problem+json")', '    assert missing.json()["status"] == 404'])
             test(f"test_get_{x}_with_a_malformed_id_is_422", ['    assert client.get(f"{url}/not-an-id", headers=headers).status_code == 422'], with_payload=False)
