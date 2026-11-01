@@ -635,6 +635,9 @@ def _apply_module_changes(baseline: Spec, doc: Dict[str, Any], changes: List[Mod
                 if old_doc.get("references"):
                     block("rename_protected_column", f"{label}: {source!r} is a foreign key; renaming a relation is not supported in this version")
                     continue
+                if old_doc.get("default") is not None:
+                    block("rename_defaulted_column_unsupported", f"{label}: {source!r} declares a default ({old_doc.get('default')!r}); a column default makes an INSERT through one name indistinguishable from an INSERT through both, so the sync trigger could take the default for a value and lose a write. Drop the default in a reviewed design change first, or keep the name")
+                    continue
                 indexed_by = [str(i.get("name")) for i in phased_ctx["manifest_indexes"] + phased_ctx["indexes"] if i.get("table") == table and source in (i.get("columns") or [])]
                 if indexed_by:
                     block("rename_indexed_column_unsupported", f"{label}: {source!r} is a column of the concurrent index(es) {indexed_by}; an index on the old column would be dropped with it at the contract. Drop the index and declare it on the new name after the rename, or keep the name")
@@ -986,7 +989,16 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
         plan.retiring = [x for x in all_phased if x.get("op_id") in retiring_ids]
         plan.dropping = [x for x in all_phased if x.get("op_id") in dropping_ids]
         all_indexes = list(phased_ctx["manifest_indexes"]) + [dict(i, revision=index_rev) for i in plan.indexes_new]
-        drop_authorization = {"approved_by": destructive_auth.get("approved_by"), "phrase": confirmation_phrase(plan.dropping), "reviewed_functions": list(destructive_auth.get("reviewed_functions") or [])} if plan.dropping else {}
+        drop_authorization = {
+            "approved_by": destructive_auth.get("approved_by"),
+            "phrase": confirmation_phrase(plan.dropping),
+            "reviewed_functions": list(destructive_auth.get("reviewed_functions") or []),
+            "compatible_tags": sorted({str(t) for d in plan.dropping for t in (d.get("compatible_tags") or [])} | {tag}),  # the retired generations and this one
+            "ignored_sessions": list(destructive_auth.get("ignore_sessions") or []),
+            "evidence_generated_at": (evidence.get("generated_at") if isinstance(evidence, dict) else None),
+            "max_evidence_age_hours": float((contract.authorization.get("contract") or {}).get("max_evidence_age_hours") or 24.0),
+            "min_retire_age_hours": float(destructive_auth.get("min_retire_age_hours", 24.0)),
+        } if plan.dropping else {}
         phases = PhaseState(pending=[x for x in all_phased if x.get("state_declared") == "expand"], all_phased=all_phased, all_indexes=all_indexes, new_phased=list(plan.phased_new), new_indexes=list(plan.indexes_new), contracting=list(plan.contracting), retiring=list(plan.retiring), dropping=list(plan.dropping), drop_authorization=drop_authorization, head=head_before)
     elif plan.phased_new or plan.indexes_new or plan.contracting or plan.retiring or plan.dropping:
         block("phased_needs_migration_lineage", "phased changes, concurrent indexes and contract phases need a PostgreSQL project with a known migration chain")
@@ -1118,7 +1130,8 @@ def plan_evolution(contract: EvolutionContract, *, baseline_contract: Optional[s
     for op in plan.retiring:
         plan.risks.append(f"{op['table']}.{op['from_column']} -> {op['column']} (operation {op['op_id']}): retire: this generation (C) answers with {op['column']!r} only; clients still sending or reading {op['from_column']!r} must move to B's responses or to the new name; `alembic upgrade head` re-checks the trigger and the equality of the columns, swaps the sync function (truth = {op['column']}), carries NOT NULL and default over and stamps retired_at; the old column stays for B; downgrade: DROP NOT NULL/DEFAULT and the comment back (no data moves)")
     for op in plan.dropping:
-        plan.risks.append(f"{op['table']}.{op['from_column']} (operation {op['op_id']}): DESTRUCTIVE: `alembic upgrade head` drops the old column, its sync trigger and function in one transaction after re-checking every condition under ACCESS EXCLUSIVE (lock_timeout 5s); B (and A) fail from that moment; the downgrade recreates the column from the new column's current values offline and cannot restore the dropped content; take a backup before upgrading if the historical content matters; no online rollback")
+        plan.risks.append(f"{op['table']}.{op['from_column']} (operation {op['op_id']}): DESTRUCTIVE: `alembic upgrade head` drops the old column, its sync trigger and function in one transaction after re-checking every condition under ACCESS EXCLUSIVE (lock_timeout 5s), the connected sessions, the age of the evidence this plan read and the age of the retire included; B (and A) fail from that moment; the downgrade recreates the column from the new column's current values offline and cannot restore the dropped content; take a backup before upgrading if the historical content matters; no online rollback")
+        plan.risks.append(f"{op['table']}.{op['from_column']}: what is known about deployments: a human declaration (declared_by, approved_by, old_versions_stopped), the sessions observed at verify time and again by the revision (a snapshot), the schema state measured twice, and the freshness and age checks; what stays unknown: instances not connected at those moments, clients behind a pooler, code that names the old column without connecting under its own name (plan.migration.phases[contract].assurance)")
     for op in plan.contracting:
         plan.risks.append(f"{op['table']}.{op['column']}: contract phase: the revision re-checks pending rows and the progress state on the live database and fails rather than contract prematurely; ADD CONSTRAINT NOT VALID and SET NOT NULL take brief ACCESS EXCLUSIVE locks, VALIDATE takes SHARE UPDATE EXCLUSIVE; an application version that still inserts NULLs makes the revision fail: it must be gone (declared by the operator in the evidence)")
     if plan.preserved_manual:

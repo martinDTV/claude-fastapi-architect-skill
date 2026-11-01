@@ -377,8 +377,7 @@ def _migration(spec: Spec, lineage: Optional[Lineage] = None, phases: Optional[P
     for r in (phases.new_phased if phases is not None else []):
         if r.get("kind") != KIND_RENAME:
             continue
-        old_doc = r.get("from_field") if isinstance(r.get("from_field"), dict) else {}
-        sync_up, sync_down = rename_sync_ddl(str(r["table"]), str(r["from_column"]), str(r["column"]), str(r["op_id"]), truth=str(r["from_column"]), has_default=old_doc.get("default") is not None)
+        sync_up, sync_down = rename_sync_ddl(str(r["table"]), str(r["from_column"]), str(r["column"]), str(r["op_id"]), truth=str(r["from_column"]))
         up += [f"    # rename {r['table']}.{r['from_column']} -> {r['column']} in transition: the trigger keeps both columns equal for every write"] + sync_up
         down = sync_down + down
     changes = new_tables + [f"{t}.{f.name}" for t, f, _r in columns]
