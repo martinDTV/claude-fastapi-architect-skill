@@ -1,0 +1,28 @@
+{
+  "schema": "fastapi-architect/evolution/1.3",
+  "project": {
+    "path": "../generated/parcels"
+  },
+  "modify_modules": [
+    {
+      "name": "shipments",
+      "entities": [
+        {
+          "name": "Shipment",
+          "rename_fields": [
+            {"from": "reference", "to": "label", "strategy": "expand_contract"},
+            {"from": "weight_kg", "to": "weight", "strategy": "expand_contract"}
+          ]
+        }
+      ]
+    }
+  ],
+  "invariants": [
+    "existing_routes_unchanged",
+    "historical_migrations_unchanged",
+    "declared_contracts_unchanged",
+    "no_destructive_schema_change",
+    "protected_files_unchanged"
+  ],
+  "x-note": "v2.2 increment 1: two renames in transition on the fifth example. The expand revision adds `label` and `weight` next to `reference` and `weight_kg` and a sync trigger per rename; the old columns stay the source of truth; the backfill (mirror_column) reconciles the rows written before the trigger; nothing is retired or dropped (later increments)."
+}

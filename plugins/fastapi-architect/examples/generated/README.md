@@ -21,7 +21,9 @@ module of each (increment 4: `inventory-add-product-fields.json`, `orders-add-cu
 protected table to the row-level-security example (increment 5: `tenant-projects-add-milestones.json`) and take the
 fifth example through a phased migration (v2.1: `parcels-expand-carrier.json`, `parcels-contract-carrier.json`; the
 committed `parcels-migration-evidence.sample.json` is deliberately stale, so the contract is refused from the repository
-alone); see [`VERIFICATION.md`](VERIFICATION.md). What the
+alone) and through a rename in transition (v2.2: `parcels-rename-label.json` renames `reference` to `label` and
+`weight_kg` to `weight` as `expand_contract`: new columns next to the old ones, a sync trigger per rename, the old
+columns the source of truth; retire and contract come in later increments); see [`VERIFICATION.md`](VERIFICATION.md). What the
 generated code does and does not guarantee is stated in the architecture report's `guarantees` block
 (`python3 scripts/design_fastapi.py ../specs/<name>.json --validate-only --format markdown`) and in
 `references/design-contracts.md`.
