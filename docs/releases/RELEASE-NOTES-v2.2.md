@@ -1,6 +1,8 @@
-# FastAPI Architect v2.2.0 — Safe Evolution II (release candidate)
+# FastAPI Architect v2.2.0 — Safe Evolution II
 
-Status: **release candidate** (2026-11-01), unpublished, awaiting the push decision. Built on the published v2.1.0
+Status: **published** on 2026-11-02 as `97aeaf3054c2e92104b5aa8a3e409377bc9bcd2a` on `origin/main`, a fast-forward of 36
+commits over the published v2.1.0 (`7aff2b1`, release at `219383d`), after the acceptance recorded in
+[`ACCEPTANCE-v2.2.0.md`](ACCEPTANCE-v2.2.0.md) and the pre-publication review it describes. Built on the published v2.1.0
 (`7aff2b1`, release at `219383d`). The scope was decided on 2026-10-31 after the discovery recorded in
 [`docs/architecture/discovery-v2.2.md`](../architecture/discovery-v2.2.md) (section 11): seven increments, each
 authorised separately; this document has one section per increment and the acceptance of the whole in
