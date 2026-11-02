@@ -1,10 +1,17 @@
-# FastAPI Architect v2.2.0 — Safe Evolution II (in progress)
+# FastAPI Architect v2.2.0 — Safe Evolution II (release candidate)
 
-Status: in progress on top of the published v2.1.0 (`7aff2b1`, release at `219383d`). The scope was decided on
-2026-10-31 after the discovery recorded in [`docs/architecture/discovery-v2.2.md`](../architecture/discovery-v2.2.md)
-(section 11): seven increments, each authorised separately. This document grows one section per increment. The
-version constant, the plugin manifests and the generated manifests stay at 2.1.0 until the release increment bumps
-them.
+Status: **release candidate** (2026-11-01), unpublished, awaiting the push decision. Built on the published v2.1.0
+(`7aff2b1`, release at `219383d`). The scope was decided on 2026-10-31 after the discovery recorded in
+[`docs/architecture/discovery-v2.2.md`](../architecture/discovery-v2.2.md) (section 11): seven increments, each
+authorised separately; this document has one section per increment and the acceptance of the whole in
+[`ACCEPTANCE-v2.2.0.md`](ACCEPTANCE-v2.2.0.md). The version constant, the plugin manifests and the generated manifests
+were bumped to 2.2.0 by increment 6 (the five committed snapshots regenerated: only the tool version in their
+manifests changed).
+
+Install or update: `/plugin marketplace add martinDTV/claude-fastapi-architect-skill` then
+`/plugin install fastapi-architect@fastapi-architect` (or copy `plugins/fastapi-architect/skills/fastapi-architect`
+into `~/.claude/skills/`); nothing else to install, the scripts use the standard library; PostgreSQL and Docker
+are needed only for the opt-in verification modules.
 
 ## Increment 0: Foundations for Safe Evolution II
 
@@ -593,3 +600,42 @@ a file transaction, and the apply report now says so (`applied.scope`, `applied.
 | Legacy modules re-run after the change | `test_journal_v22.py` 12, `test_evolve_v20_recovery.py` 18, `test_foundations_v21.py` 16, `test_evolve_v20_adoption.py` 22, `test_adopted_v22.py` 16, `test_merge_integration_v22.py` 14, `test_design_v20.py` 67, `test_container_v21.py` 27 (8 skipped), `test_renames_v22.py` 14, `test_retire_contract_v22.py` 13: all OK |
 | Existing behaviour | full suite 792 OK on 3.13 (216.7 s, 138 MB, 42 skipped: the 40 of before plus the two opt-in PostgreSQL recovery scenarios) and 792 OK on 3.9 (228.8 s, 187 MB, 63 skipped; the recovery and concurrency modules run in full there); baseline before the increment 751 OK on 3.13 (172.9 s); the five committed snapshots unchanged; oracle against the published engine identical to the increment-4 oracle (generation and plans byte-identical; only the journal around them changed); the PostgreSQL regression of the earlier increments was run after increment 4 on the same evolution paths and the destructive scenarios of increment 2 cover the retry of a failed drop (no code of those paths changed here beyond the writer) |
 | `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff (engine, tests, scripts), `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; no Docker executor path was modified (no real container run); remediation writes only in isolated copies (no change) |
+
+## Increment 6: Final Acceptance & Release Candidate
+
+No new capability. The 29 commits of increments 0 to 5 were reviewed as one system: integrity, the capability and
+guarantee matrix, the rename cycle on PostgreSQL, merge and adoption, concurrency and recovery, the trust model and
+Docker, historical compatibility, a reproducible end-to-end harness, the suites on both interpreters, and the release
+readiness. The report is [`ACCEPTANCE-v2.2.0.md`](ACCEPTANCE-v2.2.0.md). The version constant, `plugin.json` and
+`marketplace.json` moved to 2.2.0; the five committed snapshots were regenerated (only the tool version in their
+manifests changed; the per-file oracle against the v2.1.0 engine shows no other difference in generated code).
+
+### Defect found and fixed
+
+- A same-host lock whose pid the system had reused by an unrelated process was `held` and could not be removed with
+  `ops unlock`. The lock record now carries the holder's process start time (`process_started_at`, from `ps -o lstart`);
+  an alive pid whose start time differs is `stale` (`pid_reused: true`) and removable on request; records without the
+  field use the lock's own start time. Verified in `tests/test_acceptance_v22.py`.
+
+### The acceptance harness
+
+`tests/test_acceptance_v22.py`: design and generation of `team-notes`, the static audit and SARIF, the generated suite
+through the trust model, an evolution and its `noop`, the opt-in merge refused without the contract and without the
+flag and merged with both, the adoption of the hand-written `workshop` with a generated module mounted and a bounded
+extension, an interrupted publication rolled back and retried, the expand files of the phased rename and the contract
+refused before the retire (`contract_rename_retire_first`), the recovery properties of increment 5 (`completed`
+publishes nothing twice, a recovery interrupted twice finishes, a reused pid is stale), and the evidence document
+(`acceptance-v2.2-evidence.json`). With `FA_DESIGN_PG=1` the same module runs A → expand → B → retire → C → contract →
+D on one throwaway database.
+
+### Validation
+
+| Check | Result |
+|---|---|
+| `tests/test_acceptance_v22.py` | 9 OK in memory (34.8 s; the generated suites through the trust model) and 10 OK with `FA_DESIGN_PG=1` (51.6 s; the cycle A → expand → B → retire → C → contract → D on one database, `label` and `weight` left, `reference` and `weight_kg` gone, no sync trigger left, 300 rows kept) |
+| Full suites after the bump | 802 OK on 3.13 (283.9 s, 126 MB, 43 skipped) and 802 OK on 3.9 (262.5 s, 177 MB, 64 skipped) |
+| PostgreSQL, second pass after the bump | `test_renames_v22_postgresql.py` 4 (46.5 s), `test_retire_contract_v22_postgresql.py` 3 (82.0 s), `test_destructive_acceptance_v22_postgresql.py` 5 (128.8 s), `test_migrations_v21_postgresql.py` 4 (72.1 s), `test_acceptance_v21.py` 4 (82.0 s), `test_acceptance_v20.py` 3 (60.9 s), `test_design_v20_postgresql.py` 9 (98.1 s), `test_adopted_v22_postgresql.py` 2 (12.7 s), `test_recovery_v22_postgresql.py` 2 (12.6 s): all OK |
+| Real Docker | `FA_CONTAINER=1 test_container_v21.py` 27 OK (52.1 s, Docker 29.5.2) |
+| Generation equivalence | the five snapshots regenerated: only the tool version in their manifests changed; the per-file oracle against the v2.1.0 engine: no other difference than that version line |
+| Baseline before the increment | 792 tests on 3.13 with one failure in a generated project's wall-clock test (`test_jwks.py`) while PostgreSQL and Docker modules were running concurrently; the module alone passes and the final suites pass; recorded in the acceptance report as load-sensitive timing of generated v2.0 test code |
+| `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff, `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass |

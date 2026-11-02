@@ -249,6 +249,12 @@ _locking=(base/'scripts/fastapi_design/locking.py').read_text(encoding='utf-8')
 assert '"unknown"' in _locking and 'other_host' in _locking and 'os.link' in _locking, 'locking.py lacks the increment 5 hardening (unknown status, other-host unlock, atomic record)'
 assert '--other-host' in (base/'scripts/evolve_fastapi.py').read_text(encoding='utf-8') and 'residual_temporaries' in (base/'scripts/evolve_fastapi.py').read_text(encoding='utf-8'), 'the CLI lacks ops unlock --other-host or the residual temporaries'
 assert 'adr-2.2-07-recovery-and-concurrency.md' in (root/'docs/README.md').read_text(encoding='utf-8') and 'Increment 5' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and '--other-host' in skill, 'increment 5 is not documented'
+
+# v2.2 increment 6: final acceptance and release candidate
+for rel in ('tests/test_acceptance_v22.py','docs/releases/ACCEPTANCE-v2.2.0.md'):
+    assert (root/rel).is_file(), f'Missing {rel} (v2.2 increment 6)'
+assert 'ACCEPTANCE-v2.2.0.md' in (root/'docs/README.md').read_text(encoding='utf-8') and 'Extension v2.2' in (root/'README.md').read_text(encoding='utf-8'), 'the v2.2.0 acceptance report or the README section is not indexed'
+assert 'pid_reused' in _locking and 'process_started_at' in _locking, 'locking.py does not recognise a reused pid (increment 6)'
 assert 'Merging a hand-modified integration point' in (root/'docs/guides/evolving-generated-projects.md').read_text(encoding='utf-8'), 'the merge walkthrough is missing from the evolution guide'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'
