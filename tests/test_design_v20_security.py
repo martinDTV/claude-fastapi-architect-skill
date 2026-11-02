@@ -303,7 +303,7 @@ class SecurityBlueprintTests(TempDirCase):
         self.assertIn('"WWW-Authenticate": "Bearer"', security)
         self.assertIn("def require_tenant_member(workspace_id: UUID, principal: AuthenticatedPrincipal) -> Principal:", security)
         self.assertIn("tenant_id = UUID(str(raw_tenant))", security)
-        self.assertIn('"pyjwt[crypto]>=2.9,<3"', bp.files["pyproject.toml"])
+        self.assertIn('"pyjwt[crypto]>=2.10.1,<3"', bp.files["pyproject.toml"])
         config = bp.files["src/team_notes/core/config.py"]
         for field in ("oidc_issuer", "oidc_audience", "oidc_jwks_url", "oidc_jwks_json", "oidc_jwks_cache_s", "oidc_leeway_s", "oidc_jwks_stale_max_s", "oidc_fetch_timeout_s", "oidc_ca_bundle"):
             self.assertIn(field, config)
