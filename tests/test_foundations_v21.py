@@ -213,7 +213,7 @@ class DurabilityTests(TempCase):
         calls = []
         with mock.patch("os.fsync", side_effect=lambda fd: (calls.append(fd), real_fsync(fd))):
             op = journal.write_recoverable(project, files, expected, kind="test", description="durable")
-        self.assertEqual(op.state, "published")
+        self.assertEqual(op.state, "completed")  # increment 5: the returned operation says completed once its cleanup ran
         # three staged files, two backups, three landed files and four journal states, each a file sync plus a
         # directory sync; the exact count is an implementation detail, the lower bound is the guarantee
         self.assertGreaterEqual(len(calls), 2 * (3 + 2 + 3 + 4))

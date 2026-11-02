@@ -84,7 +84,7 @@ class RecoverableWriterTests(JournalCase):
                 (ops / op_id / journal.JOURNAL).write_text(body, encoding="utf-8")
         found = journal.unreadable_operations(self.project)
         self.assertEqual([u["op_id"] for u in found], ["deadbeef00000001", "deadbeef00000002", "deadbeef00000003"])
-        self.assertEqual([u["reason"].split(" (")[0] for u in found], ["journal.json is unreadable", "journal.json has schema 'somebody-else/1.0' or no op_id", "journal.json is missing"])
+        self.assertEqual([u["reason"].split(" (")[0] for u in found], ["journal.json is unreadable", "journal.json has schema 'somebody-else/1.0'", "journal.json is missing"])
         self.assertEqual({u["staged_files"] for u in found}, {"1"})
         self.assertEqual(journal.pending_operations(self.project), [])  # the readable set is empty: this is exactly the gap
         contract = self.tmp / "evolve.json"
@@ -123,7 +123,7 @@ class RecoverableWriterTests(JournalCase):
         self.assert_published()
         self.assertEqual(journal.pending_operations(self.project), [])
         self.assertFalse((self.project / ".fastapi-architect" / "ops").exists())
-        self.assertEqual(op.state, "published")
+        self.assertEqual(op.state, "completed")  # increment 5: the returned operation says completed once its cleanup ran
 
     def test_precondition_failure_before_publication_changes_nothing(self) -> None:
         (self.project / "README.md").write_text("changed meanwhile\n")

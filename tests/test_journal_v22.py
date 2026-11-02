@@ -110,13 +110,21 @@ class LockTests(LockCase):
         self.assertEqual(locking.inspect(self.project)["status"], "unreadable")
         self.assertTrue(locking.unlock_stale(self.project)["removed"])
 
-    def test_a_lock_from_another_host_is_stale_only_after_the_declared_age(self) -> None:
+    def test_a_lock_from_another_host_is_unknown_whatever_its_age(self) -> None:
         path = self.project / journal.OPS_DIR / locking.LOCK_FILE
         path.parent.mkdir(parents=True)
         record = {"schema": locking.LOCK_SCHEMA, "pid": 1, "host": "another-host", "started_at": "2026-01-01T00:00:00+00:00", "kind": "evolve", "description": "elsewhere", "token": "y"}
         path.write_text(json.dumps(record), encoding="utf-8")
-        self.assertEqual(locking.inspect(self.project, stale_after_s=10**9)["status"], "held")
-        self.assertEqual(locking.inspect(self.project)["status"], "stale")  # far older than the default six hours
+        self.assertEqual(locking.inspect(self.project, stale_after_s=10**9)["status"], "unknown")
+        state = locking.inspect(self.project)  # far older than the default six hours: still unknown, the age is only reported
+        self.assertEqual((state["status"], state["older_than_stale_after"], state["same_host"]), ("unknown", True, False))
+        with self.assertRaises(locking.LockHeld) as ctx:
+            locking.acquire(self.project, kind="evolve", break_stale=True)
+        self.assertEqual(ctx.exception.reason, "unknown")
+        self.assertFalse(locking.unlock_stale(self.project)["removed"])
+        self.assertFalse(locking.unlock_stale(self.project, other_host="some-other")["removed"])
+        self.assertTrue(locking.unlock_stale(self.project, other_host="another-host")["removed"])
+        self.assertIsNone(locking.inspect(self.project))
 
 
 class WriterUnderLockTests(LockCase):
@@ -128,7 +136,7 @@ class WriterUnderLockTests(LockCase):
             self.assertEqual(sorted(p.name for p in (self.project / journal.OPS_DIR).iterdir()), [locking.LOCK_FILE], "nothing was staged")
         self.assertEqual((self.project / "a.txt").read_text(encoding="utf-8"), "a0\n")
         op = journal.write_recoverable(self.project, files, expected, kind="evolve", description="after")
-        self.assertEqual(op.state, "published")
+        self.assertEqual(op.state, "completed")  # increment 5: the returned operation says completed once its cleanup ran
         self.assertIsNone(locking.inspect(self.project))
 
     def test_two_writers_racing_from_two_processes_publish_exactly_once_each_in_turn(self) -> None:
@@ -145,7 +153,7 @@ class WriterUnderLockTests(LockCase):
             patient = subprocess.Popen(argv + ["5"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             time.sleep(0.4)
         out, err = patient.communicate(timeout=30)
-        self.assertEqual(out.strip(), "published published", err[-1000:])
+        self.assertEqual(out.strip(), "published completed", err[-1000:])
         self.assertEqual((self.project / "a.txt").read_text(encoding="utf-8"), "a1\n")
         late = subprocess.run(argv + ["0"], capture_output=True, text=True)
         self.assertEqual(late.stdout.strip(), "error WriteError", "the same plan again meets changed digests: refused by content, not by the lock")
@@ -168,7 +176,7 @@ class WriterUnderLockTests(LockCase):
             t.start()
         for t in threads:
             t.join(timeout=30)
-        self.assertEqual(results, {"one": "published", "two": "published"})
+        self.assertEqual(results, {"one": "completed", "two": "completed"})
         self.assertEqual(((self.project / "a.txt").read_text(encoding="utf-8"), (self.project / "c.txt").read_text(encoding="utf-8")), ("one\n", "two\n"))
         self.assertIsNone(locking.inspect(self.project))
 
