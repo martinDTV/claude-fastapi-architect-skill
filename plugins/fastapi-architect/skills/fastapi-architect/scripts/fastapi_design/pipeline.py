@@ -16,7 +16,8 @@ from fastapi_audit.remediate.isolation import ExecutionPolicy
 
 from .advisor import Recommendation, recommend
 from .blueprint import Blueprint, build
-from .generator import GenerationError, GenerationResult, generate
+from .generator import GenerationError, GenerationResult, WriteError, generate
+from .journal import LockHeld, write_recoverable
 from .report import REPORT_SCHEMA
 from .spec import Spec, SpecError, load_spec
 from .verify import audit_generated, run_generated_tests
@@ -241,7 +242,13 @@ def run_design(spec_or_path: Union[str, Spec], options: Optional[DesignOptions] 
     if not options.target:
         report["next_steps"] = _next_steps(spec, rec, None, None)
         return report
-    generation = generate(spec, blueprint, options.target, tool_version=TOOL_VERSION, allow_existing=options.allow_existing, overwrite=options.overwrite, dry_run=options.dry_run)
+    def recoverable_writer(target, files, expected):  # one journaled operation under the project lock (increment 5)
+        try:
+            return [f.path for f in write_recoverable(target, files, expected, kind="generate", description=f"generate {spec.name}").files]
+        except LockHeld as exc:
+            raise WriteError(str(exc)) from exc
+
+    generation = generate(spec, blueprint, options.target, tool_version=TOOL_VERSION, allow_existing=options.allow_existing, overwrite=options.overwrite, dry_run=options.dry_run, writer=recoverable_writer)
     report["generation"] = generation.to_dict()
     verification: Optional[Dict[str, Any]] = None
     if not options.dry_run:

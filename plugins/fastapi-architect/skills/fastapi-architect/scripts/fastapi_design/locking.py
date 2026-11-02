@@ -5,16 +5,23 @@ race are kept apart by content: the second one aborts with nothing published. Th
 re-check and the renames, and it says nothing about *who* is writing. The lock closes the window and names the
 holder.
 
-``.fastapi-architect/ops/LOCK`` is created with ``O_EXCL`` (the filesystem's own atomic primitive) and holds a JSON
-record: schema, pid, host, start time, the kind and description of the operation and a random token. Policy:
+``.fastapi-architect/ops/LOCK`` holds a JSON record: schema, pid, host, start time, the kind and description of the
+operation and a random token. It is created atomically with its content (the record is written to a temporary
+sibling and hard-linked into place; the link fails when the lock exists; where hard links are not available the
+file is created with ``O_EXCL`` and written at once), so a reader never sees an empty or partial record of a live
+holder. Policy:
 
-* **fail fast** by default: when the file exists, ``LockHeld`` is raised with the holder's record and the reason
-  (``held`` when the holder is alive on this host or cannot be judged, ``stale`` when its pid is gone on this host
-  or the record is older than ``stale_after_s`` on another host);
+* **fail fast** by default: when the file exists, ``LockHeld`` is raised with the holder's record and the reason:
+  ``held`` (the holder is alive on this host), ``stale`` (its pid is gone on this host), ``unknown`` (another host,
+  or a pid this host cannot judge: nobody here can tell whether the operation continues), ``unreadable`` (the
+  record is not a valid JSON object) or ``invalid`` (the lock path is a symlink or a directory);
 * **bounded wait** on request (``wait_s`` > 0): the acquirer polls every ``poll_s`` until the lock frees or the
   time runs out, then ``LockHeld``;
-* a stale lock is **never broken silently**: ``acquire(..., break_stale=True)`` (what ``ops unlock`` does after
-  showing the holder) replaces it and records who did it in the new record's ``broke``.
+* a lock is **never broken silently**: ``acquire(..., break_stale=True)`` (what ``ops unlock`` does after showing
+  the holder) replaces one judged ``stale`` or ``unreadable`` and records who did it in the new record's ``broke``;
+  a lock of **another host is never broken by age**: its age is reported, and only an operator who names that host
+  (``ops unlock --other-host NAME``, ``unlock_stale(other_host=NAME)``) removes it; an ``invalid`` lock is removed
+  by hand only.
 
 ``release`` removes the lock only when the token matches (a process never releases another's lock) and removes the
 operation directory when it is empty, as ``journal.complete`` does. A crash leaves the file behind: that is the
@@ -36,18 +43,21 @@ from typing import Any, Dict, Optional
 LOCK_SCHEMA = "fastapi-architect/lock/1.0"
 LOCK_FILE = "LOCK"
 OPS_DIR = ".fastapi-architect/ops"
-DEFAULT_STALE_AFTER_S = 6 * 3600.0
+DEFAULT_STALE_AFTER_S = 6 * 3600.0  # reported as age information for locks of other hosts; never a reason to break them
+STATUSES = ("held", "stale", "unknown", "unreadable", "invalid")
+_TEMP_SUFFIX = ".fa-tmp"
 
 
 class LockHeld(RuntimeError):
-    """The project is locked by another operation. ``holder`` is its record, ``reason`` is ``held`` or ``stale``."""
+    """The project is locked by another operation. ``holder`` is its record, ``reason`` is one of ``STATUSES``."""
 
     def __init__(self, path: Path, holder: Dict[str, Any], reason: str) -> None:
         self.path, self.holder, self.reason = path, holder, reason
-        who = f"pid {holder.get('pid')} on {holder.get('host')}" if holder else "an unreadable record"
+        who = f"pid {holder.get('pid')} on {holder.get('host')}" if holder and holder.get("pid") is not None else "an unreadable record"
         what = f"{holder.get('kind')}: {holder.get('description')}" if holder and holder.get("kind") else "unknown operation"
         since = holder.get("started_at") if holder else None
-        super().__init__(f"{path}: locked by {who} ({what}) since {since}; {reason}")
+        hint = {"held": "wait for it to finish", "stale": "its process is gone on this host: `ops unlock` removes it", "unknown": "it belongs to another host or cannot be judged here: confirm it is not running, then `ops unlock --other-host <host>`", "unreadable": "the record is not readable: inspect it, then `ops unlock`", "invalid": "the lock path is not a regular file: remove it by hand after inspecting it"}.get(reason, reason)
+        super().__init__(f"{path}: locked by {who} ({what}) since {since}; {reason}: {hint}")
 
 
 @dataclass
@@ -59,24 +69,34 @@ class Lock:
     record: Dict[str, Any] = field(default_factory=dict)
 
     def release(self) -> bool:
-        """Remove the lock when the token matches; True when removed."""
+        """Remove the lock when the token matches; True when removed (False: it was broken or replaced by someone else)."""
         try:
+            if self.path.is_symlink():
+                return False
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
-        if data.get("token") != self.token:
+        if not isinstance(data, dict) or data.get("token") != self.token:
             return False
         try:
             self.path.unlink()
         except OSError:
             return False
-        ops = self.path.parent
-        try:
-            if ops.is_dir() and not any(ops.iterdir()):
-                ops.rmdir()
-        except OSError:
-            pass
+        _remove_empty(self.path.parent)
         return True
+
+
+def _remove_empty(ops: Path) -> None:
+    """Remove the operations directory when it is empty and, after it, an empty ``.fastapi-architect`` (a fresh
+    target that was rolled back keeps nothing of ours)."""
+    for directory in (ops, ops.parent):
+        try:
+            if directory.is_dir() and not directory.is_symlink() and not any(directory.iterdir()):
+                directory.rmdir()
+            else:
+                return
+        except OSError:
+            return
 
 
 def _pid_alive(pid: int) -> Optional[bool]:
@@ -104,34 +124,78 @@ def _age_s(record: Dict[str, Any]) -> Optional[float]:
     return (datetime.now(timezone.utc) - started).total_seconds()
 
 
-def inspect(target: Path, *, stale_after_s: float = DEFAULT_STALE_AFTER_S) -> Optional[Dict[str, Any]]:
-    """The holder's record with ``status`` (``held``, ``stale``, ``unreadable``) and ``age_s``, or None when free."""
-    path = Path(target).resolve() / OPS_DIR / LOCK_FILE
-    if not path.exists():
-        return None
+def _read_record(path: Path) -> Optional[Dict[str, Any]]:
+    """The holder's record when it is a JSON object with an integer pid and a string host; None otherwise."""
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(record, dict):
-            raise ValueError("not an object")
     except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("pid"), int) or isinstance(record.get("pid"), bool) or not isinstance(record.get("host"), str) or not record.get("host"):
+        return None
+    return record
+
+
+def inspect(target: Path, *, stale_after_s: float = DEFAULT_STALE_AFTER_S) -> Optional[Dict[str, Any]]:
+    """The holder's record with ``status`` (one of ``STATUSES``), ``age_s``, ``same_host``, ``holder_alive`` and,
+    for another host, ``older_than_stale_after`` (information, not a verdict), or None when the project is free."""
+    path = Path(target).resolve() / OPS_DIR / LOCK_FILE
+    if path.is_symlink() or path.is_dir():
+        return {"status": "invalid", "path": str(path), "reason": "the lock path is a symlink or a directory"}
+    if not path.exists():
+        return None
+    record = _read_record(path)
+    if record is None:
         return {"status": "unreadable", "path": str(path)}
     age = _age_s(record)
     same_host = record.get("host") == socket.gethostname()
-    alive = _pid_alive(int(record.get("pid", 0))) if same_host else None
-    if same_host and alive is False:
-        status = "stale"
-    elif not same_host and age is not None and age > stale_after_s:
+    alive = _pid_alive(int(record["pid"])) if same_host else None
+    if same_host and alive is True:
+        status = "held"
+    elif same_host and alive is False:
         status = "stale"
     else:
-        status = "held"
+        status = "unknown"
     out = dict(record)
     out.update({"status": status, "age_s": None if age is None else round(age, 1), "path": str(path), "same_host": same_host, "holder_alive": alive})
+    if not same_host:
+        out["older_than_stale_after"] = age is not None and age > stale_after_s
     return out
 
 
-def acquire(target: Path, *, kind: str, description: str = "", wait_s: float = 0.0, poll_s: float = 0.1, stale_after_s: float = DEFAULT_STALE_AFTER_S, break_stale: bool = False) -> Lock:
+def _create(path: Path, record: Dict[str, Any]) -> bool:
+    """Create the lock file with its full content in one visible step. True when created, False when it exists."""
+    data = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    tmp = path.with_name(f"{LOCK_FILE}.{record['token']}{_TEMP_SUFFIX}")
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+        try:
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            pass  # no hard links here (some filesystems, Windows): fall back to O_EXCL and an immediate write
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return True
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def acquire(target: Path, *, kind: str, description: str = "", wait_s: float = 0.0, poll_s: float = 0.1, stale_after_s: float = DEFAULT_STALE_AFTER_S, break_stale: bool = False, break_other_host: Optional[str] = None) -> Lock:
     """Take the project lock or raise ``LockHeld``. Fail-fast by default; ``wait_s`` bounds an optional wait;
-    ``break_stale`` replaces a lock whose holder is judged gone (never a live one)."""
+    ``break_stale`` replaces a lock whose holder is judged gone on this host or whose record is unreadable (never a
+    live one, never one of another host); ``break_other_host`` names the host whose lock the operator confirmed
+    abandoned (an ``unknown`` lock of exactly that host is replaced)."""
     target = Path(target).resolve()
     path = target / OPS_DIR / LOCK_FILE
     token = uuid.uuid4().hex
@@ -140,28 +204,26 @@ def acquire(target: Path, *, kind: str, description: str = "", wait_s: float = 0
     while True:
         path.parent.mkdir(parents=True, exist_ok=True)  # a releasing holder removes the empty directory: recreate it on every attempt
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            created = _create(path, record)
         except FileNotFoundError:
             continue  # the directory vanished between the mkdir and the open (a release raced us): try again
-        except FileExistsError:
-            holder = inspect(target, stale_after_s=stale_after_s) or {}
-            status = holder.get("status", "held")
-            if status in ("stale", "unreadable") and break_stale:
-                previous = {k: holder.get(k) for k in ("pid", "host", "started_at", "kind", "description", "status")}
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-                record["broke"] = previous
-                continue
-            if time.monotonic() < deadline:
-                time.sleep(poll_s)
-                continue
-            raise LockHeld(path, holder, status)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(record, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        return Lock(path=path, token=token, record=record)
+        if created:
+            return Lock(path=path, token=token, record=record)
+        holder = inspect(target, stale_after_s=stale_after_s) or {}
+        status = holder.get("status", "held")
+        breakable = (status in ("stale", "unreadable") and break_stale) or (status == "unknown" and break_other_host is not None and holder.get("host") == break_other_host and not holder.get("same_host"))
+        if breakable:
+            previous = {k: holder.get(k) for k in ("pid", "host", "started_at", "kind", "description", "status")}
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            record["broke"] = previous
+            continue
+        if status in ("held", "unknown") and time.monotonic() < deadline:
+            time.sleep(poll_s)
+            continue
+        raise LockHeld(path, holder, status)
 
 
 class project_lock:
@@ -170,6 +232,7 @@ class project_lock:
     def __init__(self, target: Path, *, kind: str, description: str = "", wait_s: float = 0.0, break_stale: bool = False) -> None:
         self._args = (Path(target), kind, description, wait_s, break_stale)
         self.lock: Optional[Lock] = None
+        self.released: Optional[bool] = None  # False after exit means someone else broke or replaced our lock meanwhile
 
     def __enter__(self) -> Lock:
         target, kind, description, wait_s, break_stale = self._args
@@ -178,28 +241,33 @@ class project_lock:
 
     def __exit__(self, *exc: object) -> None:
         if self.lock is not None:
-            self.lock.release()
+            self.released = self.lock.release()
 
 
-def unlock_stale(target: Path, *, stale_after_s: float = DEFAULT_STALE_AFTER_S) -> Dict[str, Any]:
-    """Remove a lock judged stale or unreadable and report it; a held lock is refused (``removed: False``)."""
+def unlock_stale(target: Path, *, stale_after_s: float = DEFAULT_STALE_AFTER_S, other_host: Optional[str] = None) -> Dict[str, Any]:
+    """Remove a lock judged ``stale`` or ``unreadable`` and report it. A ``held`` lock is refused; an ``unknown`` lock
+    (another host, or a pid this host cannot judge) is removed only when ``other_host`` names its host exactly; an
+    ``invalid`` lock (symlink or directory) is never removed here."""
     holder = inspect(target, stale_after_s=stale_after_s)
     if holder is None:
         return {"removed": False, "reason": "no lock"}
-    if holder.get("status") == "held":
+    status = holder.get("status")
+    if status == "held":
         return {"removed": False, "reason": "held", "holder": holder}
+    if status == "invalid":
+        return {"removed": False, "reason": "invalid: the lock path is a symlink or a directory; inspect and remove it by hand", "holder": holder}
+    if status == "unknown":
+        if holder.get("same_host"):
+            return {"removed": False, "reason": "unknown: the holder's pid cannot be judged on this host; confirm the process is gone and remove the lock by hand", "holder": holder}
+        if other_host is None or other_host != holder.get("host"):
+            return {"removed": False, "reason": f"unknown: the lock belongs to host {holder.get('host')!r} (age {holder.get('age_s')} s); nothing here can tell whether that operation continues; confirm it on that host, then pass --other-host {holder.get('host')}", "holder": holder}
     path = Path(holder["path"])
     try:
         path.unlink()
     except OSError as exc:
         return {"removed": False, "reason": f"could not remove: {exc}", "holder": holder}
-    ops = path.parent
-    try:
-        if ops.is_dir() and not any(ops.iterdir()):
-            ops.rmdir()
-    except OSError:
-        pass
-    return {"removed": True, "reason": holder.get("status"), "holder": holder}
+    _remove_empty(path.parent)
+    return {"removed": True, "reason": status if status != "unknown" else f"unknown, confirmed by the operator for host {other_host}", "holder": holder}
 
 
-__all__ = ["DEFAULT_STALE_AFTER_S", "LOCK_FILE", "LOCK_SCHEMA", "Lock", "LockHeld", "acquire", "inspect", "project_lock", "unlock_stale"]
+__all__ = ["DEFAULT_STALE_AFTER_S", "LOCK_FILE", "LOCK_SCHEMA", "STATUSES", "Lock", "LockHeld", "acquire", "inspect", "project_lock", "unlock_stale"]

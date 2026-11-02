@@ -33,7 +33,7 @@ from fastapi_common.fs import resolve_against
 
 from .adopted import alembic_facts, mount_candidates, resolve_mount, resolve_symbol, validate_adoption_extensions
 from .discovery import ProjectModel, discover
-from .generator import GenerationError, safe_join
+from .generator import GenerationError, WriteError, safe_join
 from .journal import FaultInjector, sha256_bytes, write_recoverable
 from .spec import IDENT_RE
 from .transforms import TransformError, module_names
@@ -329,7 +329,10 @@ def adopt(contract: AdoptionContract, *, faults: Optional[FaultInjector] = None,
     content = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     current = project / ADOPTION
     expected = {ADOPTION: sha256_bytes(current.read_bytes()) if current.is_file() else None}
-    op = write_recoverable(project, {ADOPTION: content}, expected, kind="adopt", description=f"adopt {', '.join(m.name for m in contract.modules)}", faults=faults)
+    try:
+        op = write_recoverable(project, {ADOPTION: content}, expected, kind="adopt", description=f"adopt {', '.join(m.name for m in contract.modules)}", faults=faults)
+    except WriteError as exc:
+        raise AdoptionError(contract.source, [f"the adoption record could not be written: {exc}"]) from exc
     return {
         "project": str(project),
         "adopted": {name: {"router": data["router"], "files": sorted(data["files"]), "routes": len(data["routes"])} for name, data in manifest["modules"].items()},

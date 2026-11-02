@@ -43,7 +43,8 @@ from fastapi_design import locking  # noqa: E402
 from fastapi_design.adoption import AdoptionError, adopt, load_adoption_contract, propose_adoption, render_proposal  # noqa: E402
 from fastapi_design.discovery import discover  # noqa: E402
 from fastapi_design.evolution import EvolutionError, EvolveOptions, render_text, run_evolution, to_json  # noqa: E402
-from fastapi_design.journal import classify, pending_operations, recover, unreadable_operations  # noqa: E402
+from fastapi_design.generator import WriteError  # noqa: E402
+from fastapi_design.journal import classify, pending_operations, recover, residual_temporaries, unreadable_operations  # noqa: E402
 
 PROG = "evolve_fastapi"
 OK_STATES = ("planned", "noop", "audit_clean", "verified")
@@ -95,6 +96,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ops.add_argument("action", choices=("list", "show", "unlock"))
     ops.add_argument("project")
     ops.add_argument("--op", metavar="ID", help="operation id for `show`")
+    ops.add_argument("--other-host", metavar="HOST", default=None, help="`unlock` only: remove a lock that belongs to exactly this other host (nothing here can tell whether that operation continues; confirm it there first)")
     for name in ("plan", "apply"):
         p = sub.add_parser(name, help="compute the change set (and verify it in a copy)" if name == "plan" else "verify in a copy, then write the project")
         p.add_argument("contract", help="evolution contract (JSON, schema fastapi-architect/evolution/1.0)")
@@ -140,27 +142,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         project = os.path.abspath(args.project)
         lock_state = locking.inspect(project)
         if args.action == "unlock":
-            payload_obj = {"project": project, "lock": lock_state, "unlock": locking.unlock_stale(project)}
+            payload_obj = {"project": project, "lock": lock_state, "unlock": locking.unlock_stale(project, other_host=args.other_host)}
             text = (f"lock removed ({payload_obj['unlock']['reason']})\n" if payload_obj["unlock"]["removed"] else f"lock not removed: {payload_obj['unlock']['reason']}" + (f" (pid {lock_state.get('pid')} on {lock_state.get('host')}, {lock_state.get('kind')}: {lock_state.get('description')}, started {lock_state.get('started_at')})" if lock_state else "") + "\n")
         else:
             pending = pending_operations(project)
             unreadable = unreadable_operations(project)
+            temporaries = residual_temporaries(project)
             if args.action == "show":
                 pending = [op for op in pending if not args.op or op.op_id == args.op]
                 unreadable = [u for u in unreadable if not args.op or u["op_id"] == args.op]
                 shown = [{**op.to_dict(), "files_now": classify(project, op)} for op in pending]
             else:
                 shown = [{"op_id": op.op_id, "kind": op.kind, "description": op.description, "state": op.state, "files": len(op.files), "published": len(op.published), "steps": [s.get("kind") for s in op.steps], "parent_op": op.parent_op} for op in pending]
-            payload_obj = {"project": project, "lock": lock_state, "pending": shown, "unreadable": unreadable}
+            payload_obj = {"project": project, "lock": lock_state, "pending": shown, "unreadable": unreadable, "residual_temporaries": temporaries}
             text = ("lock: free\n" if lock_state is None else f"lock: {lock_state.get('status')} by pid {lock_state.get('pid')} on {lock_state.get('host')} ({lock_state.get('kind')}: {lock_state.get('description')}, started {lock_state.get('started_at')}, age {lock_state.get('age_s')} s)\n")
             text += "pending operations: none\n" if not shown else "".join(f"operation {o['op_id']} ({o['kind']}: {o['description']}): {o['state']}; " + (f"files {o['files']}, published {o['published']}, steps {', '.join(o['steps']) or '-'}" if args.action == "list" else "files " + ", ".join(f"{k}={v}" for k, v in o["files_now"].items()) + (f"; steps {json.dumps(o['steps'])}" if o["steps"] else "") + (f"; parent {o['parent_op']}" if o.get("parent_op") else "")) + "\n" for o in shown)
             text += "".join(f"operation {u['op_id']}: needs_attention; {u['reason']} ({u['staged_files']} staged file(s) kept)\n" for u in unreadable)
+            text += "".join(f"residual temporary: {rel} (a write died between its temporary file and its rename; the file next to it is whole; inspect, then remove by hand)\n" for rel in temporaries)
         payload = json.dumps(payload_obj, indent=2, sort_keys=True, default=str) + "\n"
         if args.output:
             with open(args.output, "w", encoding="utf-8") as handle:
                 handle.write(payload)
         sys.stdout.write(payload if args.format == "json" else text)
-        attention = bool(payload_obj.get("unreadable")) or (lock_state is not None and lock_state.get("status") != "held" and args.action != "unlock") or (args.action == "unlock" and not payload_obj["unlock"]["removed"] and lock_state is not None)
+        attention = bool(payload_obj.get("unreadable")) or bool(payload_obj.get("residual_temporaries")) or (lock_state is not None and lock_state.get("status") != "held" and args.action != "unlock") or (args.action == "unlock" and not payload_obj["unlock"]["removed"] and lock_state is not None)
         return 1 if attention else 0
 
     if args.command in ("propose", "adopt", "recover"):
@@ -178,7 +182,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 reports = [recover(os.path.abspath(args.project), op, strategy="forward" if args.forward else "rollback", wait_s=args.wait).to_dict() for op in ops]
                 unreadable = [u for u in unreadable_operations(os.path.abspath(args.project)) if not args.op or u["op_id"] == args.op]
                 payload_obj = {"project": os.path.abspath(args.project), "recovered": reports, "unreadable": unreadable}
-                text = ("no pending operation\n" if not reports and not unreadable else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
+                text = ("no pending operation\n" if not reports and not unreadable else "".join(f"operation {r['op_id']} ({r['strategy']}): {r['state']}; restored {len(r['restored'])}, published {len(r['published'])}, already done {len(r['already_done'])}, conflicts {len(r['conflicts'])}" + (f", directories removed {len(r['removed_dirs'])}" if r.get("removed_dirs") else "") + "\n" + "".join(f"  ! {k}: {v}\n" for k, v in r["conflicts"].items()) for r in reports))
                 text += "".join(f"operation {u['op_id']}: needs_attention; {u['reason']} ({u['staged_files']} staged file(s) kept under {os.path.dirname(u['path'])}); inspect by hand, nothing was touched\n" for u in unreadable)
         except (AdoptionError,) as exc:
             sys.stderr.write(f"{PROG}: adoption refused ({exc.source}):\n")
@@ -188,6 +192,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except locking.LockHeld as exc:
             sys.stderr.write(f"{PROG}: locked: {exc}\n")
             return 3
+        except WriteError as exc:
+            sys.stderr.write(f"{PROG}: refused: {exc}\n")
+            return 2
         except (FileNotFoundError, ValueError, OSError) as exc:
             sys.stderr.write(f"{PROG}: error: {exc}\n")
             return 2

@@ -493,6 +493,7 @@ class EvolutionPlan:
     merge_bases: Dict[str, str] = field(default_factory=dict)  # v2.2: the authenticated BASE text of each merged file (not serialised)
     mount: Dict[str, Any] = field(default_factory=dict)  # v2.2 inc. 4: the mount point edit of an adopted project (file, scope, statements, expected routes)
     generated_modules: Dict[str, Any] = field(default_factory=dict)  # v2.2 inc. 4: modules generated inside an adopted project by this plan
+    guards: Dict[str, Optional[str]] = field(default_factory=dict)  # v2.2 inc. 5: files the plan read but does not write; their digests must hold until the write
     conflicts: List[Dict[str, str]] = field(default_factory=list)
     public_contracts: Dict[str, Any] = field(default_factory=dict)
     migration: Dict[str, Any] = field(default_factory=dict)
@@ -549,6 +550,7 @@ class EvolutionPlan:
             "merges": list(self.merges),
             "mount": dict(self.mount),
             "generated_modules": dict(self.generated_modules),
+            "guards": dict(self.guards),
             "conflicts": list(self.conflicts),
             "public_contracts": dict(self.public_contracts),
             "migration": dict(self.migration),
@@ -1476,6 +1478,7 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
                 if error:
                     block("dependency_resolves", f"{label}: {error}")
                     continue
+                plan.guards[info["file"]] = model.digests.get(info["file"])
                 steps.append(lambda p, s, info=info: ensure_import(p, s, info["module"], [info["name"]]))
                 dependency_names.append(info["name"])
             delegate_info = None
@@ -1484,6 +1487,7 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
                 if error or info is None or info["kind"] not in ("function", "async_function"):
                     block("delegate_resolves", f"{label}: {error or ep['delegate']['callable'] + ' is not a top-level function of the project'}")
                     continue
+                plan.guards[info["file"]] = model.digests.get(info["file"])
                 if info["file"] == router_file:
                     delegate_info = {"name": info["name"], "arguments": list(ep["delegate"].get("arguments", [])), "is_async": info["is_async"]}
                 else:
@@ -1558,13 +1562,25 @@ def _plan_adopted(plan: EvolutionPlan, model: ProjectModel, block) -> EvolutionP
         pre.append(Precondition("already_applied", True, "nothing to transform or generate"))
         return plan
     for change in contract.modify_modules:
+        if change.name in generated_modules:
+            for rel in generated_modules[change.name].get("files") or {}:
+                plan.guards.setdefault(rel, model.digests.get(rel))
         if change.name not in new_adoption.get("modules", {}):
             continue
         for rel in new_adoption["modules"][change.name]["files"]:
+            plan.guards.setdefault(rel, model.digests.get(rel))
             if rel in plan.files:
                 new_adoption["modules"][change.name]["files"][rel] = hashlib.sha256(plan.files[rel].encode("utf-8")).hexdigest()
         for ep in change.add_endpoints:
             new_adoption["modules"][change.name].setdefault("routes", []).append({"method": ep["method"], "path": ep["path"], "effective_paths": [], "function": ep["name"]})
+    if plan.mount or any(d.get("persistence") == "postgresql" for d in plan.generated_modules.values()):
+        for rel in (alembic_record.get("ini"), f"{alembic_record.get('script_location')}/env.py" if alembic_record.get("script_location") else None):
+            if rel and rel in model.digests:
+                plan.guards.setdefault(rel, model.digests[rel])
+        head_rev = next((r.get("file") for r in (model.alembic or {}).get("revisions", []) if r.get("revision") in ((model.alembic or {}).get("heads") or [])), None)
+        if head_rev and head_rev in model.digests:
+            plan.guards.setdefault(head_rev, model.digests[head_rev])
+    plan.guards = {rel: digest for rel, digest in plan.guards.items() if rel not in plan.files}
     new_adoption.setdefault("history", []).append({"operation": "evolve", "contract_digest": contract.digest, "modules": plan.modified_modules, "added_modules": list(plan.added_modules), "changes": [c["target"] for c in plan.changes]})
     content = json.dumps(new_adoption, indent=2, sort_keys=True) + "\n"
     plan.modify.append(ADOPTION)
@@ -1819,7 +1835,8 @@ def _write_plan(target: Path, plan: EvolutionPlan, faults: Optional[FaultInjecto
                 evidence[rel] = {"base_sha256": (record.get("base") or {}).get("sha256_recorded"), "local_sha256": record.get("local_sha256"), "new_sha256": record.get("new_sha256"), "result_sha256": record.get("result_sha256")}
             steps.append({"kind": "merge", "paths": list(plan.merged), "evidence": evidence})
     steps.append({"kind": "manifest", "paths": manifest_paths})
-    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable, steps=steps)
+    guards = {rel: digest for rel, digest in plan.guards.items() if rel not in plan.files}
+    return write_recoverable(target, plan.files, plan.expected, kind="evolve", description=plan.operation_description, faults=faults, durable=durable, steps=steps, guards=guards)
 
 
 def verify_in_copy(plan: EvolutionPlan, options: EvolveOptions) -> Dict[str, Any]:
@@ -1947,7 +1964,8 @@ def run_evolution(contract_or_path: Any, options: Optional[EvolveOptions] = None
         if options.apply and verification["state"] in (STATE_VERIFIED, STATE_AUDIT_CLEAN):
             try:
                 op = _write_plan(Path(plan.project), plan, options.faults)
-                report["applied"] = {"written": [f.path for f in op.files], "state": "applied", "operation": op.op_id, "manifest": MANIFEST if plan.kind == "generated" else ADOPTION}
+                migration_required = bool((plan.migration or {}).get("required"))
+                report["applied"] = {"written": [f.path for f in op.files], "state": "applied", "operation": op.op_id, "manifest": MANIFEST if plan.kind == "generated" else ADOPTION, "scope": "files of the project only", "database": {"migration_required": migration_required, "applied_by_this_tool": False, "status": ("pending: run the project's own `alembic upgrade head` (and its backfill, when the plan declares one); the journal says nothing about the database" if migration_required else "no schema change in this plan")}, "deployment": "not performed by this tool: a written project and an applied migration are two different facts from a running application"}
             except LockHeld as exc:
                 report["applied"] = {"written": [], "state": "locked", "error": str(exc), "lock": {"holder": dict(exc.holder), "reason": exc.reason}, "retry": "wait for the holder to finish (or `evolve_fastapi.py ops list PROJECT`; `ops unlock` removes only a stale lock)"}
                 report["state"] = STATE_REJECTED

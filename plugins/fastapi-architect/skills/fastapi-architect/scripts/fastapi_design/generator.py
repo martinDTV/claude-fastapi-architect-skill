@@ -24,7 +24,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi_common.fs import sha256_text, symlink_on_path
 
@@ -175,7 +175,9 @@ def write_files(target: Path, files: Dict[str, str], expected: Dict[str, Optiona
     return written
 
 
-def generate(spec: Spec, blueprint: Blueprint, target_dir: str, *, tool_version: str, allow_existing: bool = False, overwrite: bool = False, dry_run: bool = False) -> GenerationResult:
+def generate(spec: Spec, blueprint: Blueprint, target_dir: str, *, tool_version: str, allow_existing: bool = False, overwrite: bool = False, dry_run: bool = False, writer: Optional[Callable[[Path, Dict[str, str], Dict[str, Optional[str]]], List[str]]] = None) -> GenerationResult:
+    """Render and write a project. ``writer`` publishes the files (default: the two-phase ``write_files``; the design
+    pipeline passes the recoverable, journaled writer of ``journal.py`` so an interrupted generation is recoverable)."""
     raw = Path(target_dir)
     if raw.is_symlink():  # checked before resolving: the resolved path would hide the link
         raise GenerationError(f"the target is a symlink: {raw}")
@@ -219,7 +221,7 @@ def generate(spec: Spec, blueprint: Blueprint, target_dir: str, *, tool_version:
     if dry_run:
         return result
     if to_write:
-        write_files(target, to_write, expected)
+        (writer or write_files)(target, to_write, expected)
     return result
 
 
