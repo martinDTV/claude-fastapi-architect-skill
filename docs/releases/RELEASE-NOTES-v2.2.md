@@ -510,3 +510,86 @@ contracts are sections 2 and 13 of `references/evolution-contracts.md`.
 | `tests/test_adopted_v22_postgresql.py` (opt-in, PostgreSQL 16 throwaway cluster, the project's own `uv` environment) | 2 OK (9.0 s alone, 10.8 s with the suite running): scenario B as recorded in `examples/generated/VERIFICATION.md` (baseline upgrade 1.4–1.5 s, evolve verified 1.8–2.7 s, upgrade of the generated revision 0.26–0.28 s; the columns, the round trip, downgrade and re-upgrade, the second additive column revision, `noop` and stale definitions) and the Alembic refusals (duplicate table in the project and within one contract, two heads, another metadata, unresolved session dependency, metadata that is a function, script location not the ini's, `add_persistence` without `alembic` and PostgreSQL without `add_persistence`) with the project byte-identical |
 | Existing behaviour | full suite 751 OK on 3.13 (130.0 s, 146 MB, 40 skipped) and 751 OK on 3.9 (134.7 s, 189 MB, 61 skipped); the five committed snapshots unchanged; oracle against the published engine unchanged (fresh projects identical except `core/db.py` of the PostgreSQL ones since increment 2; plans differ only in their manifests, the phased example aside); PostgreSQL regression of the earlier increments on a throwaway cluster, all OK: `test_renames_v22_postgresql.py` 4 (33.5 s), `test_retire_contract_v22_postgresql.py` 3 (57.6 s), `test_migrations_v21_postgresql.py` 4 (41.7 s), `test_acceptance_v21.py` 4 (46.5 s), `test_acceptance_v20.py` 3 (33.8 s), `test_design_v20_postgresql.py` 9 (63.0 s) |
 | `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff (the engine, the tests, and the generated output of an in-memory two-entity module and a PostgreSQL module with a dependency linted with the generated projects' rule set), `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; the Docker executor was not modified (no real container run) |
+
+## Increment 5: Recovery & Concurrency Hardening
+
+No new capability: the locks, the journal, the recovery, the planning and the publication of every write path of
+v2.2.0 were put under one question, whether an interrupted, concurrent or rejected operation can silently overwrite
+somebody else's change, lose data, or be reported as done without evidence, and fixed where the answer was yes. The
+file protocol, the operation identity and the journal schema are unchanged (`operation/1.0` and `1.1` are read and
+recovered as before; 1.1 gains three optional keys and one state). The decision record, with the state model and the
+limits, is [`docs/architecture/adr-2.2-07-recovery-and-concurrency.md`](../architecture/adr-2.2-07-recovery-and-concurrency.md);
+the reference is section 6 of `references/evolution-contracts.md`; the guide is section 9 of
+[`docs/guides/evolving-generated-projects.md`](../guides/evolving-generated-projects.md).
+
+### Consumers of the write mechanism, inspected
+
+Generation (`design_fastapi.py`, now through the journal), evolutions of generated projects (regeneration, three-way
+merge, phased migrations, renames, retire and the destructive contract), evolutions of adopted projects (transforms,
+mount edits, generated modules) and adoption itself all end in `write_recoverable` under the project lock.
+Remediation writes only in isolated copies and hands back diffs; it never writes a user's project. PostgreSQL
+transactions belong to the project's own Alembic revisions and to the backfill runner: a database transaction is not
+a file transaction, and the apply report now says so (`applied.scope`, `applied.database`, `applied.deployment`).
+
+### Defects found and fixed
+
+- A file changed during the publication, after the single precondition check and before its own rename, was
+  overwritten silently. Every file is now re-checked immediately before its rename and the staged copy compared with
+  the journal; a mismatch is recorded as refused and stops the publication; a rollback restores what landed and skips
+  the refused file, a forward recovery reports it as a conflict.
+- A recovery resumed with the other strategy mixed restored and published files; `needs_attention` forgot the
+  strategy. The strategy is persisted (`recovery_strategy`) and a different one is refused while any file was handled.
+- `recover` and `classify` joined journal paths without `safe_join`: a tampered journal could write outside the
+  project and a symlink planted after the plan was followed. Every path is resolved safely; `unsafe` files are never
+  touched.
+- Tampered or missing staging copies and backups were used as if they were the journal's. They are compared with the
+  journal's digests first; a mismatch is a conflict.
+- A malformed journal with a schema and an `op_id` (duplicate paths, malformed digests, `published` naming a
+  stranger, an unknown state, a foreign identity) was loaded and acted upon, or crashed the reader. `validate_journal`
+  reports it as unreadable with the reason; it blocks and is never acted upon or deleted.
+- An adoption, a generation or a second evolution wrote a project whose journal had a pending or unreadable
+  operation. `prepare` refuses (`an interrupted operation exists`); adoption reports it as an adoption error.
+- A lock of another host was `stale` after six hours and `ops unlock` broke it; a pid this host could not judge
+  counted as held without saying so; a non-integer pid crashed `inspect`; a lock written in two steps could be read
+  empty. Statuses are now `held`, `stale`, `unknown`, `unreadable`, `invalid`; a lock of another host is never broken
+  by age (`ops unlock --other-host NAME` is the operator's explicit decision); the record is created complete
+  (temporary plus hard link, `O_EXCL` fallback); inconsistent metadata is `unreadable`.
+- A rollback left the empty directories a module creation had made (`created_dirs` are removed when empty); a crash
+  during the cleanup was reported as an interrupted publication (`completed` is written first and finished by the
+  next reader); a rolled-back fresh generation left `.fastapi-architect` behind.
+- Generation wrote with a two-phase writer without journal or lock; it now goes through `write_recoverable`
+  (`kind: generate`), so an interrupted generation is recoverable and a rolled-back fresh target is empty.
+- Nothing guarded the files an adopted plan read but did not write (a delegate renamed between `plan` and `apply`
+  would have been referenced by the new handler). Plans now carry `guards`, checked at `prepare` and `publish`.
+- Leftover temporaries of the writer were invisible. `ops list` names them (`residual_temporaries`, exit 1) and
+  never deletes them.
+
+### Contracts and schemas (all additive)
+
+| Artefact | Change |
+|---|---|
+| `fastapi-architect/operation/1.1` | optional `guards`, `created_dirs`, `recovery_strategy`; state `completed`; 1.0 and 1.1 journals still read and recovered |
+| lock record | unchanged (`lock/1.0`); statuses `held`, `stale`, `unknown`, `unreadable`, `invalid`; `inspect` adds `older_than_stale_after` for another host |
+| report `evolution_report/1.7` | `applied.scope`, `applied.database {migration_required, applied_by_this_tool, status}`, `applied.deployment` (keys added, schema unchanged) |
+| plan | `guards` (files read, not written, with their digests) |
+| CLI | `ops unlock --other-host HOST`; `ops list|show` print `residual_temporaries` (exit 1 when any); `recover` exits 2 when the strategy would change |
+| API | `write_recoverable(guards=)`, `prepare(guards=, faults=)`, `validate_journal`, `residual_temporaries`, `generate(writer=)`, `acquire(break_other_host=)`, `unlock_stale(other_host=)`; `FaultInjector` points `before_prepare`, `after_stage:<n>`, `after_journal`, `during_cleanup`, `before_recover`, `during_classify` |
+
+### Deliberate differences from the earlier increments
+
+- A lock of another host older than six hours was `stale`; it is `unknown` now, whatever its age, and only an operator
+  naming the host removes it.
+- The operation `write_recoverable` returns reports `completed` once its cleanup ran (it reported `published`); the
+  legacy tests that pinned the word were updated.
+- `ops list` exits 1 when leftover temporaries exist, as it already did for a stale lock or an unreadable journal.
+
+### Validation
+
+| Check | Result |
+|---|---|
+| `tests/test_recovery_v22.py` | 29 OK on 3.13 (5.3 s): the fault matrix (`before_prepare`, `after_stage:1|2`, `after_journal`, `after_publish:1|2`, `after_publish_all`, `before_cleanup`, `during_cleanup`, `recover_after:1` under both strategies, `during_classify`, a failing file fsync, a failing and an unsupported directory fsync) with the files classified by digest after each and both strategies ending clean, resumable and idempotent; a file changed during the publication refused, recorded and never overwritten (forward: conflict until the operator restores it; rollback: skipped); a published file changed again before recovery a conflict for the strategy that started; guards at prepare and publish; a project with a pending or an unreadable operation not written again; twelve malformed journals reported with their reason and never acted upon; tampered or missing staging copies and backups; a symlink introduced after the plan refused by publication and by recovery; absent parents, repeated identities, stray entries, residual temporaries listed never deleted (`ops list` exits 1); inconsistent lock metadata `unreadable`, symlinked and directory locks `invalid`, a complete record from its first visible moment, a broken lock never released by its former owner, a stale same-host lock broken on request only; an interrupted generation rolled back to an empty target or finished forward to the identical tree, a locked target a `GenerationError`; scenario A (team-notes, opt-in merge interrupted after three files, rollback restoring the developer's `main.py` byte for byte, retry merging again, `noop`), scenario B (workshop, new module interrupted after the mount file landed, a second evolution and a second adoption refused, rollback restoring the hand-written mount file and the record and removing the half-created package, retry applied, a delegate renamed between plan and apply refused by the guards), scenario D (the destructive contract refused three ways with the tree intact), the apply report's three facts, the command line (`recover` refusing a strategy switch, `ops unlock --other-host`) |
+| `tests/test_concurrency_v22.py` (real processes) | 10 OK on 3.13 (14.1 s): two evolutions of one project apply exactly once over three rounds and leave the tree of a single apply (the loser `locked`, `nothing_to_apply` or blocked); an adoption refuses at once (`LockHeld` naming the holder's pid, CLI exit 3) while an evolution holds the project; a merge evolution and a plain one never interleave and both land sequentially; `recover` exits 3 and `apply` blocks (`no_pending_operation`) while another process holds the lock, then both proceed; two simultaneous recoveries recover exactly once, the third finds nothing; a lock held by another process is named (`held`, its pid) and an apply fails fast while `plan` stays read-only; a 0.5 s wait times out between 0.45 and 2 s and a 20 s wait outlives a 2.5 s holder; a process killed with SIGKILL leaves a `stale` lock that fails an apply, asks for attention and is removed only by `ops unlock`; a corrupt lock is `unreadable` until an operator removes it; a lock of another host dated 2020 is `unknown`, refused by `ops unlock` and by `--other-host` with the wrong name, removed with the right one |
+| `tests/test_recovery_v22_postgresql.py` (opt-in, PostgreSQL 16 throwaway cluster, the project's own `uv` environment) | 2 OK (12.2 s): scenario C (the phased expand of parcels interrupted after four files: journal pending, `alembic_version` unmoved, no evidence, `plan` blocked; forward recovery finishing the files with the database still where it was and the recovered tree a `noop`; a revision that fails on the database (the column already exists) leaving `alembic_version`, the progress table and the index absent as before; the project's own upgrade, the backfill to completion and the evidence; the apply report of a schema-changing plan naming the pending migration), scenario D (a refused destructive contract with the tree, `alembic_version`, the columns and the rows intact, the project's own upgrade a no-op) |
+| Legacy modules re-run after the change | `test_journal_v22.py` 12, `test_evolve_v20_recovery.py` 18, `test_foundations_v21.py` 16, `test_evolve_v20_adoption.py` 22, `test_adopted_v22.py` 16, `test_merge_integration_v22.py` 14, `test_design_v20.py` 67, `test_container_v21.py` 27 (8 skipped), `test_renames_v22.py` 14, `test_retire_contract_v22.py` 13: all OK |
+| Existing behaviour | full suite 792 OK on 3.13 (216.7 s, 138 MB, 42 skipped: the 40 of before plus the two opt-in PostgreSQL recovery scenarios) and 792 OK on 3.9 (228.8 s, 187 MB, 63 skipped; the recovery and concurrency modules run in full there); baseline before the increment 751 OK on 3.13 (172.9 s); the five committed snapshots unchanged; oracle against the published engine identical to the increment-4 oracle (generation and plans byte-identical; only the journal around them changed); the PostgreSQL regression of the earlier increments was run after increment 4 on the same evolution paths and the destructive scenarios of increment 2 cover the retry of a failed drop (no code of those paths changed here beyond the writer) |
+| `scripts/validate_structure.py` (3.9 and 3.13), `claude plugin validate`, Ruff (engine, tests, scripts), `tests/test_docs_links.py`, `git diff --check`, secrets scan | pass; no Docker executor path was modified (no real container run); remediation writes only in isolated copies (no change) |

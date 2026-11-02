@@ -239,6 +239,16 @@ _ref=(base/'references/evolution-contracts.md').read_text(encoding='utf-8')
 assert 'fastapi-architect/adoption/1.1' in _ref and 'fastapi-architect/evolution/1.6' in _ref and 'route_not_shadowed' in _ref and 'adopted_alembic_resolvable' in _ref, 'adoption 1.1 / evolution 1.6 (adopted projects II) are not documented in references/evolution-contracts.md'
 assert 'adoption/1.1' in skill and 'mount' in skill, 'SKILL.md does not describe adoption 1.1 (the mount point of adopted projects)'
 assert 'adr-2.2-06-adopted-projects-ii.md' in (root/'docs/README.md').read_text(encoding='utf-8'), 'docs/README.md does not index ADR 2.2-06'
+
+# v2.2 increment 5: recovery and concurrency hardening
+for rel in ('tests/test_recovery_v22.py','tests/test_concurrency_v22.py','tests/test_recovery_v22_postgresql.py','docs/architecture/adr-2.2-07-recovery-and-concurrency.md'):
+    assert (root/rel).is_file(), f'Missing {rel} (v2.2 increment 5)'
+_journal=(base/'scripts/fastapi_design/journal.py').read_text(encoding='utf-8')
+assert 'def validate_journal' in _journal and 'def residual_temporaries' in _journal and 'guards' in _journal and '"completed"' in _journal, 'journal.py lacks the increment 5 hardening (validation, residual temporaries, guards, completed)'
+_locking=(base/'scripts/fastapi_design/locking.py').read_text(encoding='utf-8')
+assert '"unknown"' in _locking and 'other_host' in _locking and 'os.link' in _locking, 'locking.py lacks the increment 5 hardening (unknown status, other-host unlock, atomic record)'
+assert '--other-host' in (base/'scripts/evolve_fastapi.py').read_text(encoding='utf-8') and 'residual_temporaries' in (base/'scripts/evolve_fastapi.py').read_text(encoding='utf-8'), 'the CLI lacks ops unlock --other-host or the residual temporaries'
+assert 'adr-2.2-07-recovery-and-concurrency.md' in (root/'docs/README.md').read_text(encoding='utf-8') and 'Increment 5' in (base/'references/evolution-contracts.md').read_text(encoding='utf-8') and '--other-host' in skill, 'increment 5 is not documented'
 assert 'Merging a hand-modified integration point' in (root/'docs/guides/evolving-generated-projects.md').read_text(encoding='utf-8'), 'the merge walkthrough is missing from the evolution guide'
 major_minor='.'.join(version.split('.')[:2])
 assert (root/f'docs/releases/RELEASE-NOTES-v{major_minor}.md').is_file(), f'Missing docs/releases/RELEASE-NOTES-v{major_minor}.md'

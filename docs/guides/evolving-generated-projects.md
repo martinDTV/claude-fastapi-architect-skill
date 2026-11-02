@@ -221,6 +221,19 @@ that honours `fsync`. What that does not cover: the drive's own cache on macOS, 
 filesystems that refuse to sync directories (the file is synced, the entry is not). A sync failure is reported as
 `write_failed` or `interrupted`, never hidden. The staging directory must live on the project's filesystem.
 
+Since v2.2 increment 5 the writer also refuses to touch a project whose journal has any pending or unreadable operation
+(adopt and generate included), re-checks each file right before its own rename (a file you edited while the tool was
+publishing is left as you left it, recorded as refused, and a rollback skips it), guards the files a plan read but
+does not write (a delegate you renamed between `plan` and `apply` refuses the write), and never trusts a journal, a
+staged copy or a backup it did not verify. A recovery keeps the strategy it started with: `recover --forward` after an
+interrupted rollback exits 2 and tells you to run `recover` again. `ops list` names a lock as `held`, `stale`
+(its process is gone on this machine: `ops unlock` removes it), `unknown` (another host, or a process this machine
+cannot judge: confirm there, then `ops unlock --other-host NAME`), `unreadable` (removed on request) or `invalid`
+(a symlink or a directory: remove it by hand), and lists leftover `*.fa-tmp` temporaries for you to inspect. After
+`apply`, the report says what it did and did not do: `applied.scope` is the files; `applied.database` tells you
+whether a migration is pending and that the tool did not run it; `applied.deployment` reminds you that a written
+project is not a running one.
+
 ## 10. Merging a hand-modified integration point (opt-in, v2.2)
 
 You edited `src/team_notes/main.py` by hand (a middleware, a helper) and the next evolution needs to regenerate it.

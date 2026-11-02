@@ -233,6 +233,36 @@ lock silently (`evolve_fastapi.py ops unlock` removes one whose holder is gone, 
 `merge`) and `parent_op`, 1.0 journals are still read and recovered; `ops list` and `ops show` print pending
 operations, their steps and the lock.
 
+**Increment 5 (hardening, same schema; decision record `docs/architecture/adr-2.2-07-recovery-and-concurrency.md`).**
+States persisted in the journal: `prepared`, `publishing`, `published`, `recovering_rollback`, `recovering_forward`,
+`needs_attention`, `completed` (written right before the cleanup: an interrupted cleanup is finished by the next
+reader, not reported as an interrupted publication). States inferred and never written: pending, interrupted,
+conflict, recovered, locked, unreadable. What changed, each a refusal with a reason and the tree untouched:
+`prepare` refuses while any other operation of the project is pending or unreadable (adoption and generation
+included); every file's digest is re-checked immediately before its own rename and the staged copy is compared with
+the journal (a file changed during the publication is recorded as refused, `conflicts[path]` starting with `changed
+before it was written`, the publication stops, a rollback restores what landed and skips that file, a forward recovery
+reports it as a conflict); `guards` (journal 1.1, optional) are files the plan read but does not write, whose digests
+must hold at `prepare` and `publish` (an adopted plan guards the files its dependencies, delegates and response models
+resolved in, the module files it did not rewrite, the Alembic ini, env and head revision of a persistence plan);
+recovery resolves every path through `safe_join` and the symlink check (`unsafe`, never touched), compares the backup
+or the staged copy with the journal before using it, re-reads each file right before acting, persists the strategy it
+started with (`recovery_strategy`) and refuses a different one while any file was handled (`recover` exits 2); the
+directories a publication created (`created_dirs`) are removed by a rollback when empty; a journal that does not
+validate (identity, unique and safe paths, 64-hex digests, known state, `published`/`recovered` naming files of the
+operation, well-formed steps and guards) is `unreadable` with the reason, never acted upon, never deleted; stray
+files and symlinks inside `.fastapi-architect/ops` are reported; leftover temporaries of the writer (`*.fa-tmp`) are
+listed by `ops list` (`residual_temporaries`, exit 1) and never deleted; generation (`design_fastapi.py`) writes
+through the same journal under the same lock (`kind: generate`). Lock statuses: `held`, `stale` (holder gone on this
+host), `unknown` (another host, or a pid this host cannot judge: nothing here can tell whether the operation
+continues), `unreadable`, `invalid` (a symlink or a directory); the record is complete from its first visible moment
+(temporary plus hard link); **a lock of another host is never broken by age**: `ops unlock` refuses it and only
+`ops unlock --other-host NAME` removes it; an unreadable one is removed on request, an invalid one by hand. The apply
+report separates the facts: `applied.scope` (files), `applied.database {migration_required, applied_by_this_tool:
+false, status}` and `applied.deployment`; an interrupted write claims nothing about the database. The operation
+returned by `write_recoverable` reports `completed` once its cleanup ran. Fault points added for the tests:
+`before_prepare`, `after_stage:<n>`, `after_journal`, `during_cleanup`, `before_recover`, `during_classify`.
+
 ## 7. Verification and states
 
 `apply` (and `plan` unless `--no-verify`) applies the plan to a **copy** of the project and audits it against
