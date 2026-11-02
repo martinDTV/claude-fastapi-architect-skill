@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -56,7 +57,7 @@ class LockHeld(RuntimeError):
         who = f"pid {holder.get('pid')} on {holder.get('host')}" if holder and holder.get("pid") is not None else "an unreadable record"
         what = f"{holder.get('kind')}: {holder.get('description')}" if holder and holder.get("kind") else "unknown operation"
         since = holder.get("started_at") if holder else None
-        hint = {"held": "wait for it to finish", "stale": "its process is gone on this host: `ops unlock` removes it", "unknown": "it belongs to another host or cannot be judged here: confirm it is not running, then `ops unlock --other-host <host>`", "unreadable": "the record is not readable: inspect it, then `ops unlock`", "invalid": "the lock path is not a regular file: remove it by hand after inspecting it"}.get(reason, reason)
+        hint = {"held": "wait for it to finish", "stale": "its process is gone on this host (or its pid now belongs to another process): `ops unlock` removes it", "unknown": "it belongs to another host or cannot be judged here: confirm it is not running, then `ops unlock --other-host <host>`", "unreadable": "the record is not readable: inspect it, then `ops unlock`", "invalid": "the lock path is not a regular file: remove it by hand after inspecting it"}.get(reason, reason)
         super().__init__(f"{path}: locked by {who} ({what}) since {since}; {reason}: {hint}")
 
 
@@ -114,6 +115,45 @@ def _pid_alive(pid: int) -> Optional[bool]:
     return True
 
 
+def _process_start(pid: int) -> Optional[datetime]:
+    """When process ``pid`` started on this host (``ps -o lstart``, second resolution), or None when it cannot be told.
+    Used to recognise a pid that the system reused after the holder died: the lock then belongs to nobody."""
+    if pid <= 0 or os.name != "posix":
+        return None
+    try:
+        proc = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = proc.stdout.strip()
+    if proc.returncode != 0 or not text:
+        return None
+    for pattern in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):
+        try:
+            return datetime.strptime(" ".join(text.split()), pattern).astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _pid_reused(record: Dict[str, Any]) -> Optional[bool]:
+    """True when the alive pid of the record is not the process that took the lock: its start time differs from the
+    one the record carries (``process_started_at``), or, for records without it, the process started after the lock
+    was taken. None when nothing can be told."""
+    current = _process_start(int(record["pid"]))
+    if current is None:
+        return None
+    recorded = record.get("process_started_at") or record.get("started_at")
+    try:
+        reference = datetime.fromisoformat(str(recorded))
+    except (TypeError, ValueError):
+        return None
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    if record.get("process_started_at"):
+        return abs((current - reference).total_seconds()) > 2.0
+    return (current - reference).total_seconds() > 2.0
+
+
 def _age_s(record: Dict[str, Any]) -> Optional[float]:
     try:
         started = datetime.fromisoformat(str(record.get("started_at")))
@@ -149,14 +189,15 @@ def inspect(target: Path, *, stale_after_s: float = DEFAULT_STALE_AFTER_S) -> Op
     age = _age_s(record)
     same_host = record.get("host") == socket.gethostname()
     alive = _pid_alive(int(record["pid"])) if same_host else None
-    if same_host and alive is True:
+    reused = _pid_reused(record) if same_host and alive is True else None
+    if same_host and alive is True and not reused:
         status = "held"
-    elif same_host and alive is False:
+    elif same_host and (alive is False or reused):
         status = "stale"
     else:
         status = "unknown"
     out = dict(record)
-    out.update({"status": status, "age_s": None if age is None else round(age, 1), "path": str(path), "same_host": same_host, "holder_alive": alive})
+    out.update({"status": status, "age_s": None if age is None else round(age, 1), "path": str(path), "same_host": same_host, "holder_alive": alive, "pid_reused": reused})
     if not same_host:
         out["older_than_stale_after"] = age is not None and age > stale_after_s
     return out
@@ -199,7 +240,10 @@ def acquire(target: Path, *, kind: str, description: str = "", wait_s: float = 0
     target = Path(target).resolve()
     path = target / OPS_DIR / LOCK_FILE
     token = uuid.uuid4().hex
+    own_start = _process_start(os.getpid())
     record = {"schema": LOCK_SCHEMA, "pid": os.getpid(), "host": socket.gethostname(), "started_at": datetime.now(timezone.utc).isoformat(), "kind": kind, "description": description, "token": token}
+    if own_start is not None:
+        record["process_started_at"] = own_start.isoformat()  # lets a reader tell this process from a later one that got the same pid
     deadline = time.monotonic() + max(0.0, wait_s)
     while True:
         path.parent.mkdir(parents=True, exist_ok=True)  # a releasing holder removes the empty directory: recreate it on every attempt
