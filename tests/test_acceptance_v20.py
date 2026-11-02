@@ -243,7 +243,7 @@ class ManifestAndGuaranteesConsistencyTests(unittest.TestCase):
                 self.assertEqual(s["authorization_model"], g["authorization_model"])
                 self.assertEqual(s["authentication"], spec.security["authentication"])
                 self.assertEqual(all(m.get("row_level_security") for m in manifest["migrations"]) if manifest["migrations"] else False, s["row_level_security"])
-                self.assertEqual(manifest["tool"]["version"], "2.1.0")
+                self.assertEqual(manifest["tool"]["version"], "2.2.0")
 
 
 if __name__ == "__main__":

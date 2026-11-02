@@ -4,4 +4,4 @@
 checks it against the plugin manifests. It stays at the published version until a release increment bumps it.
 """
 
-TOOL_VERSION = "2.1.0"
+TOOL_VERSION = "2.2.0"
