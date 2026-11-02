@@ -18,7 +18,7 @@ def _pyproject(spec: Spec, rec: Recommendation) -> str:
     if pg:
         deps += ['"sqlalchemy[asyncio]>=2.0.36,<2.1"', '"asyncpg>=0.30,<0.31"', '"alembic>=1.13,<2"']
     if _oidc(spec):
-        deps.append('"pyjwt[crypto]>=2.9,<3"')
+        deps.append('"pyjwt[crypto]>=2.10.1,<3"')  # 2.10.1: ECAlgorithm.to_jwk keeps leading zero bytes; the generated fixture no longer depends on it, the pin keeps every other JWK helper sound
     if rec.style == STYLE_HEXAGONAL and any(i.kind == "http" for i in spec.integrations):
         deps.append('"httpx>=0.27,<1"')
     dev = ['"pytest>=8.3"', '"httpx>=0.27,<1"', '"anyio>=4.4"', '"ruff>=0.6"']

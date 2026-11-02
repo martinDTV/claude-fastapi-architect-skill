@@ -61,16 +61,16 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
         local.append(f"from {spec.package}.core.db import Base")
     ports_items = [f'"{i.name}": Recording{_camel(i.name)}Adapter()' for _m, i in ports]
     stdlib = (["import asyncio", "import os", "import subprocess", "import sys", "from pathlib import Path"] if pg else []) + (["from uuid import UUID"] if identity or tenant else [])
-    if oidc:
-        stdlib += ["import json", "import time"]
-    third = ["import pytest", "from fastapi.testclient import TestClient"] + (["from pydantic import SecretStr"] if api_key and not registry else [])
     algorithm = o.get("algorithms", ["RS256"])[0] if oidc else ""
+    if oidc:
+        stdlib += (["import base64"] if algorithm.startswith("ES") else []) + ["import json", "import time"]
+    third = ["import pytest", "from fastapi.testclient import TestClient"] + (["from pydantic import SecretStr"] if api_key and not registry else [])
     if oidc:
         third.append("import jwt")
         if algorithm.startswith(("RS", "PS")):
             third += ["from cryptography.hazmat.primitives.asymmetric import rsa", "from jwt.algorithms import RSAAlgorithm"]
         elif algorithm.startswith("ES"):
-            third += ["from cryptography.hazmat.primitives.asymmetric import ec", "from jwt.algorithms import ECAlgorithm"]
+            third += ["from cryptography.hazmat.primitives.asymmetric import ec"]  # the JWK is built from the public numbers (fixed-length coordinates), not from ECAlgorithm.to_jwk
         else:
             third += ["from cryptography.hazmat.primitives.asymmetric import ed25519", "from jwt.algorithms import OKPAlgorithm"]
     if pg:
@@ -102,14 +102,22 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
     if oidc:
         if algorithm.startswith(("RS", "PS")):
             keygen = "rsa.generate_private_key(public_exponent=65537, key_size=2048)"
-            to_jwk = "RSAAlgorithm.to_jwk(PRIVATE_KEY.public_key())"
+            jwk_lines = ["    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))"]
         elif algorithm.startswith("ES"):
-            curve = {"ES256": "SECP256R1", "ES384": "SECP384R1", "ES512": "SECP521R1"}[algorithm]
+            curve, crv = {"ES256": ("SECP256R1", "P-256"), "ES384": ("SECP384R1", "P-384"), "ES512": ("SECP521R1", "P-521")}[algorithm]
             keygen = f"ec.generate_private_key(ec.{curve}())"
-            to_jwk = "ECAlgorithm.to_jwk(PRIVATE_KEY.public_key())"
+            jwk_lines = [
+                "    # Fixed-length coordinates: a leading zero byte of x or y is kept. PyJWT 2.9's ECAlgorithm.to_jwk dropped it for",
+                "    # about one key in a hundred and the provider's key set became unusable (the client then served stale keys).",
+                "    numbers = private_key.public_key().public_numbers()",
+                "    size = (numbers.curve.key_size + 7) // 8",
+                f'    jwk = {{"kty": "EC", "crv": "{crv}"}}',
+                '    jwk["x"] = _b64url(numbers.x.to_bytes(size, "big"))',
+                '    jwk["y"] = _b64url(numbers.y.to_bytes(size, "big"))',
+            ]
         else:
             keygen = "ed25519.Ed25519PrivateKey.generate()"
-            to_jwk = "OKPAlgorithm.to_jwk(PRIVATE_KEY.public_key())"
+            jwk_lines = ["    jwk = json.loads(OKPAlgorithm.to_jwk(private_key.public_key()))"]
         lines += [
             f'ISSUER = "{o["issuer"]}"',
             f'AUDIENCE = "{o["audience"]}"',
@@ -125,8 +133,9 @@ def _conftest(spec: Spec, ports: List[Tuple[ModuleSpec, IntegrationSpec]], layou
             f"    return {keygen}",
             "",
             "",
+            *(["def _b64url(raw: bytes) -> str:", '    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")', "", ""] if algorithm.startswith("ES") else []),
             "def public_jwk(private_key, kid: str) -> dict:",
-            f"    jwk = json.loads({to_jwk.replace('PRIVATE_KEY', 'private_key')})",
+            *jwk_lines,
             '    jwk.update({"kid": kid, "alg": ALGORITHM, "use": "sig"})',
             "    return jwk",
             "",
